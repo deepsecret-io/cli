@@ -1,0 +1,12 @@
+# Compiled binaries
+deepsecret
+deepsecret-cli
+secret
+
+# Build artifacts
+.next/
+*.tgz
+dist/
+
+# IDE / tool state
+.claude/
