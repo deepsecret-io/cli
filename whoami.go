@@ -63,7 +63,11 @@ func newWhoamiCmd() *cobra.Command {
 			kv := func(k, v string) { fmt.Fprintf(os.Stderr, "  %s%-14s%s %s\n", ansiDim, k, ansiReset, v) }
 			kv("ID", actor.ID)
 			kv("Email", actor.Email)
-			kv("Name", actor.FirstName+" "+actor.LastName)
+			name := actor.Name
+			if name == "" {
+				name = actor.Email
+			}
+			kv("Name", name)
 			tier := actor.TierName
 			if tier == "" {
 				tier = "None"
