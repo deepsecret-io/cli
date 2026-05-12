@@ -31,11 +31,13 @@ PLATFORMS := \
 # R2_PREFIX controls the in-bucket key prefix; the default groups CLI uploads
 # under cli/<version>/ so multiple versions can coexist in one bucket.
 -include .env
-export R2_ACCOUNT_ID R2_BUCKET R2_PREFIX R2_ENDPOINT R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY
-R2_ACCOUNT_ID ?=
-R2_BUCKET     ?=
-R2_PREFIX     ?= cli/$(VERSION)
-R2_ENDPOINT   ?= https://$(R2_ACCOUNT_ID).r2.cloudflarestorage.com
+export R2_ACCOUNT_ID R2_BUCKET R2_PREFIX R2_LATEST_PREFIX R2_ENDPOINT R2_PUBLIC_BASE_URL R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY ALLOW_DIRTY
+R2_ACCOUNT_ID     ?=
+R2_BUCKET         ?=
+R2_PREFIX         ?= cli/$(VERSION)
+R2_LATEST_PREFIX  ?= cli
+R2_ENDPOINT       ?= https://$(R2_ACCOUNT_ID).r2.cloudflarestorage.com
+R2_PUBLIC_BASE_URL ?= https://get.deepsecret.io
 
 .PHONY: all build release release-upload clean platforms platforms-all checksums
 

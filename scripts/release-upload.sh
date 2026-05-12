@@ -3,8 +3,10 @@
 # Copyright 2026 DeepSecret
 #
 # Upload the cross-compiled archives in $DIST to a Cloudflare R2 bucket under
-# $R2_PREFIX/. Invoked by `make release-upload` after the release target has
-# rebuilt the dist tree; can also be run directly with the same env vars.
+# $R2_PREFIX/, then mirror the same files to $R2_LATEST_PREFIX/ so the static
+# download URLs on the landing page serve the freshly built artifacts. Invoked
+# by `make release-upload` after the release target has rebuilt the dist tree;
+# can also be run directly with the same env vars.
 #
 # Required env vars:
 #   BINARY                CLI binary name; matches Makefile's $(BINARY)
@@ -16,8 +18,13 @@
 #   R2_SECRET_ACCESS_KEY  R2 secret (falls back to AWS_SECRET_ACCESS_KEY)
 #
 # Optional:
-#   R2_PREFIX             In-bucket key prefix; default cli/$VERSION
+#   R2_PREFIX             Archived path in the bucket; default cli/$VERSION
+#   R2_LATEST_PREFIX      Stable path the landing page links to; default cli
+#                         (set to empty string to skip the latest mirror)
 #   R2_ENDPOINT           Override endpoint; default derived from R2_ACCOUNT_ID
+#   R2_PUBLIC_BASE_URL    Public origin used to print download URLs;
+#                         default https://get.deepsecret.io (the bucket
+#                         custom domain)
 #   ALLOW_DIRTY           Set to 1 to permit uploading a *-dirty VERSION
 set -euo pipefail
 
@@ -33,7 +40,9 @@ command -v aws >/dev/null 2>&1 || {
 acct="${R2_ACCOUNT_ID:-}"
 bucket="${R2_BUCKET:-}"
 prefix="${R2_PREFIX:-cli/$VERSION}"
+latest_prefix="${R2_LATEST_PREFIX-cli}"
 endpoint="${R2_ENDPOINT:-https://${acct}.r2.cloudflarestorage.com}"
+public_base="${R2_PUBLIC_BASE_URL:-https://get.deepsecret.io}"
 key_id="${R2_ACCESS_KEY_ID:-${AWS_ACCESS_KEY_ID:-}}"
 key_secret="${R2_SECRET_ACCESS_KEY:-${AWS_SECRET_ACCESS_KEY:-}}"
 
@@ -61,19 +70,40 @@ case "$VERSION" in
     ;;
 esac
 
-echo "uploading $VERSION to s3://$bucket/$prefix/ ..."
-AWS_ACCESS_KEY_ID="$key_id" AWS_SECRET_ACCESS_KEY="$key_secret" AWS_DEFAULT_REGION=auto \
-  aws s3 cp "$DIST/" "s3://$bucket/$prefix/" \
-    --endpoint-url "$endpoint" \
-    --recursive \
-    --exclude "*" \
-    --include "${BINARY}-*.tar.gz" \
-    --include "SHA256SUMS" \
-    --checksum-algorithm CRC32 \
-    --only-show-errors
+# Shared aws options. R2 is S3-compatible via --endpoint-url; --checksum-algorithm
+# CRC32 keeps newer aws CLI versions from negotiating an algorithm R2 rejects.
+aws_cp() {
+  local dest="$1"
+  AWS_ACCESS_KEY_ID="$key_id" AWS_SECRET_ACCESS_KEY="$key_secret" AWS_DEFAULT_REGION=auto \
+    aws s3 cp "$DIST/" "$dest" \
+      --endpoint-url "$endpoint" \
+      --recursive \
+      --exclude "*" \
+      --include "${BINARY}-*.tar.gz" \
+      --include "SHA256SUMS" \
+      --checksum-algorithm CRC32 \
+      --only-show-errors
+}
+
+echo "uploading $VERSION to $public_base/$prefix/ ..."
+aws_cp "s3://$bucket/$prefix/"
+
+if [ -n "$latest_prefix" ]; then
+  echo "mirroring to landing-page path $public_base/$latest_prefix/ ..."
+  aws_cp "s3://$bucket/$latest_prefix/"
+fi
 
 echo "done. published:"
 for f in "$DIST/${BINARY}"-*.tar.gz "$DIST/SHA256SUMS"; do
   [ -e "$f" ] || continue
-  echo "  s3://$bucket/$prefix/$(basename "$f")"
+  base="$(basename "$f")"
+  echo "  $public_base/$prefix/$base"
 done
+if [ -n "$latest_prefix" ]; then
+  echo "landing page URLs (now serving $VERSION):"
+  for f in "$DIST/${BINARY}"-*.tar.gz "$DIST/SHA256SUMS"; do
+    [ -e "$f" ] || continue
+    base="$(basename "$f")"
+    echo "  $public_base/$latest_prefix/$base"
+  done
+fi
