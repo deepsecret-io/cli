@@ -10,3 +10,5 @@ dist/
 
 # IDE / tool state
 .claude/
+cli
+./dist/

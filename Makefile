@@ -16,8 +16,7 @@ PLATFORMS := \
 	darwin/arm64 \
 	darwin/amd64 \
 	linux/amd64 \
-	linux/arm64 \
-	linux/arm/7
+	linux/arm64
 
 .PHONY: all build release clean platforms platforms-all checksums
 
@@ -43,7 +42,6 @@ release: clean
 			darwin/amd64)   label=macos-x86_64 ;; \
 			linux/amd64)    label=linux-x86_64 ;; \
 			linux/arm64)    label=linux-arm64 ;; \
-			linux/arm/7)    label=linux-armv7 ;; \
 			*)              label="$$os-$$arch$${goarm:+v$$goarm}" ;; \
 		esac; \
 		stage="$(DIST)/$(BINARY)-$$label"; \

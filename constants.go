@@ -8,4 +8,4 @@ package main
 // or config so a tampered config file can't redirect traffic to an
 // attacker-controlled host. To target a different deployment, build a fork
 // with this constant changed and verify the binary's checksum out-of-band.
-const apiBaseURL = "http://localhost:80"
+const apiBaseURL = "https://api.deepsecret.io:443"

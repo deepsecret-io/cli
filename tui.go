@@ -173,6 +173,7 @@ func runPipeline(title string, steps []step, summary []keyValue) error {
 			}()
 
 			ticker := time.NewTicker(250 * time.Millisecond)
+			cancelled := false
 		transferLoop:
 			for {
 				select {
@@ -189,12 +190,25 @@ func runPipeline(title string, steps []step, summary []keyValue) error {
 							ansiWhite, transferred, total, pct, ansiReset,
 							ansiDim, speed, ansiReset)
 					}
+				case <-rootCtx.Done():
+					// Ctrl+C arrived. The SDK's retry loops also see the
+					// cancellation and unwind in a few ms, but show the user
+					// immediate feedback so the in-place progress bar doesn't
+					// look frozen while the goroutine drains.
+					if !cancelled {
+						cancelled = true
+						fmt.Fprintf(os.Stderr, "\r%s\r  %s⏳%s cancelling, please wait...\n",
+							strings.Repeat(" ", 140), ansiYellow, ansiReset)
+					}
 				case <-done:
 					break transferLoop
 				}
 			}
 			ticker.Stop()
-			fmt.Fprintf(os.Stderr, "\r%s\r\n", strings.Repeat(" ", 140))
+			fmt.Fprintf(os.Stderr, "\r%s\r", strings.Repeat(" ", 140))
+			if !cancelled {
+				fmt.Fprintln(os.Stderr)
+			}
 
 			detail = actionDetail
 			err = actionErr
