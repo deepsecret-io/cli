@@ -18,7 +18,18 @@ PLATFORMS := \
 	linux/amd64 \
 	linux/arm64
 
-.PHONY: all build release clean platforms platforms-all checksums
+# R2 upload config. Auth comes from R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY,
+# falling back to AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY so this also works
+# from a workstation already configured for AWS. R2_BUCKET and R2_ACCOUNT_ID
+# are required (no sensible defaults; must point at your tenant).
+# R2_PREFIX controls the in-bucket key prefix; the default groups CLI uploads
+# under cli/<version>/ so multiple versions can coexist in one bucket.
+R2_ACCOUNT_ID ?=
+R2_BUCKET     ?=
+R2_PREFIX     ?= cli/$(VERSION)
+R2_ENDPOINT   ?= https://$(R2_ACCOUNT_ID).r2.cloudflarestorage.com
+
+.PHONY: all build release release-upload clean platforms platforms-all checksums
 
 all: build
 
@@ -55,6 +66,39 @@ release: clean
 		rm -rf "$$stage"; \
 	done
 	@$(MAKE) --no-print-directory checksums
+
+# Build a fresh release and upload every archive + SHA256SUMS to R2 under
+# $(R2_PREFIX)/. Refuses to push a -dirty version so an in-progress edit can't
+# overwrite a tagged build. Requires the `aws` CLI; R2 speaks S3 so the same
+# binary works against a Cloudflare endpoint with --endpoint-url.
+#
+# Usage:
+#   R2_ACCOUNT_ID=<id> R2_BUCKET=<name> \
+#   R2_ACCESS_KEY_ID=<key> R2_SECRET_ACCESS_KEY=<secret> \
+#   make release-upload
+release-upload: release
+	@command -v aws >/dev/null 2>&1 || { echo "release-upload: aws CLI not found (install: https://aws.amazon.com/cli/)"; exit 1; }
+	@test -n "$(R2_ACCOUNT_ID)" || { echo "release-upload: R2_ACCOUNT_ID is required"; exit 1; }
+	@test -n "$(R2_BUCKET)"     || { echo "release-upload: R2_BUCKET is required"; exit 1; }
+	@case "$(VERSION)" in *-dirty) echo "release-upload: refusing to upload dirty version $(VERSION); commit or stash first"; exit 1 ;; esac
+	@key_id="$${R2_ACCESS_KEY_ID:-$$AWS_ACCESS_KEY_ID}"; \
+	 key_secret="$${R2_SECRET_ACCESS_KEY:-$$AWS_SECRET_ACCESS_KEY}"; \
+	 test -n "$$key_id" -a -n "$$key_secret" || { echo "release-upload: R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY (or AWS_*) must be set"; exit 1; }; \
+	 echo "uploading $(VERSION) to s3://$(R2_BUCKET)/$(R2_PREFIX)/ ..."; \
+	 AWS_ACCESS_KEY_ID="$$key_id" AWS_SECRET_ACCESS_KEY="$$key_secret" AWS_DEFAULT_REGION=auto \
+	   aws s3 cp $(DIST)/ "s3://$(R2_BUCKET)/$(R2_PREFIX)/" \
+	     --endpoint-url "$(R2_ENDPOINT)" \
+	     --recursive \
+	     --exclude "*" \
+	     --include "$(BINARY)-*.tar.gz" \
+	     --include "SHA256SUMS" \
+	     --checksum-algorithm CRC32 \
+	     --only-show-errors
+	@echo "done. published:"
+	@for f in $(DIST)/$(BINARY)-*.tar.gz $(DIST)/SHA256SUMS; do \
+		[ -e "$$f" ] || continue; \
+		echo "  s3://$(R2_BUCKET)/$(R2_PREFIX)/$$(basename $$f)"; \
+	done
 
 # Generate SHA-256 checksums for every archive in $(DIST).
 checksums:
