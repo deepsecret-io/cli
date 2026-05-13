@@ -100,8 +100,11 @@ else
   echo "updating $landing_html to point at $public_base/$prefix/ ..."
   base_re=$(printf '%s' "$public_base" | sed 's|\.|\\.|g')
   prefix_repl=$(printf '%s' "$prefix" | sed 's|[\&|]|\\&|g')
+  version_repl=$(printf '%s' "$VERSION" | sed 's|[\&#]|\\&|g')
   sed -E -i.bak \
-    "s|(\"${base_re}/)[^\"']*(secret-[A-Za-z0-9._-]+\\.tar\\.gz)|\\1${prefix_repl}/\\2|g" \
+    -e "s|(\"${base_re}/)[^\"']*(secret-[A-Za-z0-9._-]+\\.tar\\.gz)|\\1${prefix_repl}/\\2|g" \
+    -e "s|(\"${base_re}/)[^\"']*(SHA256SUMS)|\\1${prefix_repl}/\\2|g" \
+    -e "s#(install\\.sh \\\| bash -s -- )[A-Za-z0-9._-]+#\\1${version_repl}#g" \
     "$landing_html"
   rm -f "${landing_html}.bak"
   landing_updated=1
