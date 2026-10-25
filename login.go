@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -22,9 +23,14 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// callbackTemplate renders the browser landing page that extracts the JWT from
-// the URL fragment and POSTs it back. Using html/template guarantees `.State`
-// is JS-escaped when interpolated inside <script>.
+// callbackTemplate renders the browser landing page that extracts the JWT
+// and client_state from the URL fragment and POSTs both back to /receive.
+//
+// The page deliberately does NOT know the CLI's state. The API echoes the
+// state in the redirect fragment of the genuine login only, so a page that
+// navigates the browser here with a planted #token= cannot supply it, and
+// /receive rejects the token. Any local process can still fetch this page,
+// but it learns nothing secret from it.
 //
 // The DOM is built via document.createElement/textContent (not innerHTML), so
 // even an attacker-controlled error string from /receive cannot inject markup.
@@ -35,7 +41,6 @@ var callbackTemplate = template.Must(template.New("callback").Parse(`<!DOCTYPE h
 <body><div class="box" id="msg"><p id="msg-text">Authenticating...</p></div>
 <script>
 (function(){
-  var STATE={{.State}};
   var msg=document.getElementById('msg');
   function setMsg(text,color){
     while(msg.firstChild){msg.removeChild(msg.firstChild);}
@@ -44,10 +49,11 @@ var callbackTemplate = template.Must(template.New("callback").Parse(`<!DOCTYPE h
     p.textContent=text;
     msg.appendChild(p);
   }
-  var h=window.location.hash;
-  if(!h||h.indexOf('token=')<0){setMsg('Authentication failed.','#ef4444');return;}
-  var t=h.split('token=')[1];if(!t){setMsg('No token received.','#ef4444');return;}
-  fetch('/receive',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:t,state:STATE})})
+  var f=new URLSearchParams(window.location.hash.slice(1));
+  history.replaceState(null,'',window.location.pathname);
+  var t=f.get('token'),s=f.get('client_state');
+  if(!t||!s){setMsg('Authentication failed.','#ef4444');return;}
+  fetch('/receive',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:t,state:s})})
   .then(function(r){return r.json();})
   .then(function(d){
     if(d.ok){setMsg('Authenticated. You can close this tab.','#22c55e');}
@@ -83,15 +89,36 @@ Examples:
 func newLogoutCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "logout",
-		Short: "Remove stored login token",
+		Short: "Revoke and remove the stored login token",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := removeToken(); err != nil {
+			tf, err := loadTokenFile()
+			if err != nil || tf.Token == "" {
 				return fmt.Errorf("no active session")
 			}
-			printSuccess("Logged out. Token removed.")
+			// Revoke server-side first so a copy of the token stops
+			// working, then remove it locally whatever the outcome.
+			revokeErr := revokeToken(apiBaseURL, tf.Token)
+			if err := removeToken(); err != nil {
+				return fmt.Errorf("remove token: %w", err)
+			}
+			if revokeErr != nil {
+				printDim("Token removed locally, but the server could not revoke it: " + revokeErr.Error())
+				printDim("It stays valid until it expires (at most 1 hour).")
+				return nil
+			}
+			printSuccess("Logged out. Token revoked and removed.")
 			return nil
 		},
 	}
+}
+
+// revokeToken asks the API to blacklist the bearer token.
+func revokeToken(apiBase, token string) error {
+	c, err := NewClient(apiBase, "bearer:"+token)
+	if err != nil {
+		return err
+	}
+	return c.Logout()
 }
 
 func showAuthStatus() error {
@@ -164,7 +191,8 @@ func browserLogin() error {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Cache-Control", "no-store")
-		_ = callbackTemplate.Execute(w, struct{ State string }{State: state})
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		_ = callbackTemplate.Execute(w, nil)
 	})
 
 	// Receive the token from the callback page JS
@@ -183,8 +211,9 @@ func browserLogin() error {
 			return
 		}
 
-		// Validate state to prevent CSRF
-		if body.State != state {
+		// The state only reaches this listener through the fragment of the
+		// genuine login redirect. A mismatch means the token was planted.
+		if subtle.ConstantTimeCompare([]byte(body.State), []byte(state)) != 1 {
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprintf(w, `{"ok":false,"error":"state mismatch"}`)
 			return
@@ -215,8 +244,10 @@ func browserLogin() error {
 		}
 	}()
 
-	// Fetch the Google auth URL from the API (don't send browser to API directly)
-	ssoReqURL := fmt.Sprintf("%s/api/v1/auth/sso/google?return_url=%s", apiBase, callbackURL)
+	// Fetch the Google auth URL from the API (don't send browser to API
+	// directly). client_state is echoed back only in the genuine redirect.
+	ssoQuery := url.Values{"return_url": {callbackURL}, "client_state": {state}}
+	ssoReqURL := fmt.Sprintf("%s/api/v1/auth/sso/google?%s", apiBase, ssoQuery.Encode())
 	httpClient := &http.Client{Timeout: 10 * time.Second}
 	httpResp, err := httpClient.Get(ssoReqURL)
 	if err != nil {

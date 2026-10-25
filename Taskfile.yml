@@ -1,0 +1,54 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 DeepSecret
+
+# CLI tasks. `task --list` shows them; run from cli/.
+version: '3'
+
+# R2 settings for `release-upload` (R2_ACCOUNT_ID, R2_BUCKET,
+# R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, ...) may live in .env. The
+# upload script documents every variable and its default.
+dotenv: ['.env']
+
+vars:
+  BINARY: secret
+  DIST: dist
+  VERSION:
+    sh: git describe --tags --always --dirty 2>/dev/null || echo dev
+  COMMIT:
+    sh: git rev-parse --short HEAD 2>/dev/null || echo none
+  DATE:
+    sh: date -u +%Y-%m-%dT%H:%M:%SZ
+  LDFLAGS: -s -w -X main.version={{.VERSION}} -X main.commit={{.COMMIT}} -X main.date={{.DATE}}
+  # os/arch:archive-label
+  PLATFORMS: darwin/arm64:macos-arm64 darwin/amd64:macos-x86_64 linux/amd64:linux-x86_64 linux/arm64:linux-arm64
+
+tasks:
+  build:
+    desc: Build the CLI for this machine into dist/
+    cmd: go build -trimpath -ldflags "{{.LDFLAGS}}" -o {{.DIST}}/{{.BINARY}} .
+
+  release:
+    desc: Cross-compile every platform into dist/*.tar.gz plus SHA256SUMS
+    cmds:
+      - rm -rf {{.DIST}} && mkdir -p {{.DIST}}
+      - |
+        for p in {{.PLATFORMS}}; do
+          target="${p%%:*}"; label="${p##*:}"; stage="{{.DIST}}/{{.BINARY}}-$label"
+          mkdir -p "$stage"
+          CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" \
+            go build -trimpath -ldflags "{{.LDFLAGS}}" -o "$stage/{{.BINARY}}" .
+          cp LICENSE "$stage/"
+          tar -C {{.DIST}} -czf "$stage.tar.gz" "{{.BINARY}}-$label"
+          rm -rf "$stage"
+          echo "  $target -> $stage.tar.gz"
+        done
+      - cd {{.DIST}} && shasum -a 256 {{.BINARY}}-*.tar.gz > SHA256SUMS
+
+  release-upload:
+    desc: Release, then upload dist/ to R2 and update the landing page
+    deps: [release]
+    env:
+      BINARY: '{{.BINARY}}'
+      DIST: '{{.DIST}}'
+      VERSION: '{{.VERSION}}'
+    cmd: ./scripts/release-upload.sh

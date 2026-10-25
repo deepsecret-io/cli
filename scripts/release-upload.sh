@@ -5,11 +5,11 @@
 # Upload the cross-compiled archives in $DIST to a Cloudflare R2 bucket under
 # $R2_PREFIX/ (default cli/$VERSION), then rewrite the landing page so its
 # download links point at the freshly uploaded version. Invoked by
-# `make release-upload` after the release target has rebuilt the dist tree;
+# `task release-upload` after the release task has rebuilt the dist tree;
 # can also be run directly with the same env vars.
 #
 # Required env vars:
-#   BINARY                CLI binary name; matches Makefile's $(BINARY)
+#   BINARY                CLI binary name; matches the Taskfile's BINARY
 #   DIST                  Path to the dist directory containing the archives
 #   VERSION               Release version string (e.g. v1.2.3 or git-describe)
 #   R2_ACCOUNT_ID         Cloudflare R2 account ID
@@ -55,10 +55,10 @@ missing=""
 [ -n "$key_secret" ] || missing="$missing R2_SECRET_ACCESS_KEY(or AWS_SECRET_ACCESS_KEY)"
 if [ -n "$missing" ]; then
   echo "release-upload: missing required vars:$missing" >&2
-  echo "  tip: make does not see plain shell vars. Use one of:" >&2
+  echo "  tip: unexported shell vars do not reach this script. Use one of:" >&2
   echo "    export R2_ACCOUNT_ID=... R2_BUCKET=... R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=..." >&2
-  echo "    make release-upload R2_ACCOUNT_ID=... R2_BUCKET=... ..." >&2
-  echo "    put KEY=VALUE lines in ./.env (auto-loaded by Makefile)" >&2
+  echo "    R2_ACCOUNT_ID=... R2_BUCKET=... task release-upload" >&2
+  echo "    put KEY=VALUE lines in ./.env (loaded by the Taskfile)" >&2
   exit 1
 fi
 
