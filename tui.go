@@ -75,7 +75,7 @@ func logInfof(ctx, format string, args ...any)  { logLine(lvlInfo, ctx, format, 
 func logWarnf(ctx, format string, args ...any)  { logLine(lvlWarn, ctx, format, args...) }
 func logErrorf(ctx, format string, args ...any) { logLine(lvlError, ctx, format, args...) }
 
-// dbg / dbgErr — kept as thin wrappers for any remaining call sites.
+// dbg / dbgErr: kept as thin wrappers for any remaining call sites.
 // New code should use logDebug / logError directly.
 func dbg(context string, format string, args ...any) { logDebug(context, format, args...) }
 func dbgErr(context string, err error) {
@@ -307,6 +307,17 @@ func printKeyValue(key, value string) {
 	fmt.Fprintf(os.Stderr, "  %s%-14s%s %s\n", ansiDim, key, ansiReset, value)
 }
 
+// printKeyValues prints a list under one key: the key on the first line,
+// later lines aligned under the first value.
+func printKeyValues(key string, values []string) {
+	for i, v := range values {
+		if i > 0 {
+			key = ""
+		}
+		printKeyValue(key, v)
+	}
+}
+
 func printHeader(title string) {
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintf(os.Stderr, "  %s%s%s\n", ansiBold, title, ansiReset)
@@ -325,4 +336,3 @@ func fmtDuration(d time.Duration) string {
 	}
 	return fmt.Sprintf("%.1fs", d.Seconds())
 }
-

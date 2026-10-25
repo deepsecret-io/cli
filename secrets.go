@@ -6,8 +6,8 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"github.com/deepsecret-io/sdk"
+	"os"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -91,7 +91,7 @@ Examples:
 			}
 
 			// Vault is sender-side (self-sends): fetch the sent list and
-			// filter client-side to rows where sender_id == recipient_id.
+			// filter client-side to rows whose only recipient is the sender.
 			view := "inbox"
 			dir := "received"
 			if sent {
@@ -154,7 +154,7 @@ Examples:
 
 			filtered := secretsList[:0]
 			for _, s := range secretsList {
-				selfSend := s.SenderID == s.RecipientID
+				selfSend := s.IsVault()
 				if view == "vault" && !selfSend {
 					continue
 				}
@@ -242,13 +242,13 @@ Examples:
 					)
 					continue
 				}
-				contact := s.SenderEmail
+				contact := ellipsis(s.SenderEmail, 25)
 				if dir == "sent" {
-					contact = s.RecipientEmail
+					contact = recipientsSummary(s.Recipients)
 				}
 				fmt.Fprintf(w, "  %s\t%s\t%s\t%s\t%d\t%s\t%s\n",
 					s.ID,
-					ellipsis(contact, 25),
+					contact,
 					ellipsis(s.Name, 25),
 					filesStr,
 					s.RevisionCount,
@@ -291,7 +291,7 @@ func newDescribeCmd() *cobra.Command {
 		Use:     "describe [secret-id]",
 		Aliases: []string{"desc"},
 		Short:   "Show secret metadata (alias: desc)",
-		Long: `Display full metadata for a secret including sender, recipient, policies,
+		Long: `Display full metadata for a secret including sender, recipients, policies,
 revision details, file attachments, and integrity information.
 
 By default, only the latest revision is shown. Use --all to show all revisions,
@@ -338,16 +338,26 @@ Examples:
 			if s.SenderName != "" {
 				kv("Sender Name", s.SenderName)
 			}
-			kv("Recipient ID", s.RecipientID)
-			kv("Recipient Email", s.RecipientEmail)
-			if s.RecipientName != "" {
-				kv("Recipient Name", s.RecipientName)
+			if len(s.Recipients) == 0 {
+				kv("Recipients", "none")
+			} else {
+				fmt.Fprintf(w, "Recipients:\n")
+				for _, r := range s.Recipients {
+					fmt.Fprintf(w, "  - %-26s%s\n", "Email:", r.Email)
+					if r.Name != "" {
+						fmt.Fprintf(w, "    %-26s%s\n", "Name:", r.Name)
+					}
+					fmt.Fprintf(w, "    %-26s%s\n", "ID:", r.ID)
+				}
+			}
+			if s.DismissedAt != "" {
+				kv("Dismissed At", s.DismissedAt)
 			}
 			kv("Latest Revision ID", s.LatestRevisionID)
 			kv("Revision Count", fmt.Sprintf("%d", s.RevisionCount))
 			kv("Total Size", fmt.Sprintf("%d", s.TotalSize))
 			// When the secret was sent with --archive (or auto-archived), the
-			// server stores FilesCount=0 by design — the archive hides
+			// server stores FilesCount=0 by design: the archive hides
 			// per-file metadata. Render that distinction instead of a bare 0
 			// so the user understands "0" doesn't mean "no files".
 			kv("Files Count", formatFilesCount(s.FilesCount, secretLatestArchived(detail, s.LatestRevisionID)))
@@ -360,7 +370,7 @@ Examples:
 				kv("Allowed IPs", strings.Join(s.AllowedIPs, ", "))
 			}
 
-			// Revisions — same fields as JSON revisions[]
+			// Revisions: same fields as JSON revisions[]
 			if len(detail.Revisions) > 0 {
 				var visible []sdk.RevisionInfo
 
@@ -437,7 +447,13 @@ Examples:
 						ikv("Original Size", fmt.Sprintf("%d", r.Integrity.OriginalSize))
 					}
 					ikv("Key Fingerprint", fingerprintWithStatus(r.Integrity.KeyFingerprint, r.Integrity.SenderKeyStatus))
-					ikv("Recipient Key Fingerprint", fingerprintWithStatus(r.Integrity.RecipientKeyFingerprint, r.Integrity.RecipientKeyStatus))
+					if len(r.Integrity.Recipients) > 0 {
+						fmt.Fprintf(w, "    Recipients:\n")
+						for _, rr := range r.Integrity.Recipients {
+							fmt.Fprintf(w, "      - %-26s%s\n", "Email:", rr.Email)
+							fmt.Fprintf(w, "        %-26s%s\n", "Key Fingerprint:", fingerprintWithStatus(rr.KeyFingerprint, rr.KeyStatus))
+						}
+					}
 					ikv("Checksum SHA256", r.Integrity.ChecksumSHA256)
 					ikv("Etag", r.Integrity.Etag)
 					if len(r.FilesMeta) > 0 {
@@ -509,6 +525,61 @@ Examples:
 		},
 	}
 
+	return cmd
+}
+
+// --- revoke ---
+
+func newRevokeCmd() *cobra.Command {
+	var recipientEmails []string
+
+	cmd := &cobra.Command{
+		Use:   "revoke [secret-id]",
+		Short: "Revoke recipients of a sent secret",
+		Long: `Revoke one or more recipients of a secret you sent. Their access and every
+key wrap made for them are deleted, so they can no longer download any
+revision. A recipient who already downloaded a revision keeps what they
+downloaded. Revoking the last recipient deletes the secret.
+
+Examples:
+  secret revoke abc123-... --to bob@example.com
+  secret revoke abc123-... -t bob@example.com -t carol@example.com`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			secretID := args[0]
+			if _, err := uuid.Parse(secretID); err != nil {
+				return fmt.Errorf("invalid secret ID: %w", err)
+			}
+			if len(recipientEmails) == 0 {
+				return fmt.Errorf("name the recipients to revoke with --to")
+			}
+			if err := sdk.ValidateRecipients(recipientEmails); err != nil {
+				return err
+			}
+
+			c, err := newAuthenticatedClient()
+			if err != nil {
+				return err
+			}
+
+			dbg("revoke", "secret_id=%s recipients=%d", secretID, len(recipientEmails))
+			for _, email := range recipientEmails {
+				logInfo("ds.revoke", fmt.Sprintf("revoking %s on secret=%s", email, secretID[:12]))
+				res, err := c.RevokeRecipient(secretID, email)
+				if err != nil {
+					return fmt.Errorf("revoke %s: %w", email, err)
+				}
+				printSuccess(fmt.Sprintf("Revoked %s", res.Email))
+				if res.SecretDeleted {
+					printDim("That was the last recipient, so the secret was deleted.")
+					return nil
+				}
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().StringSliceVarP(&recipientEmails, "to", "t", nil, "Recipient email to revoke (can be repeated)")
 	return cmd
 }
 
@@ -670,6 +741,19 @@ func resolveIdentityName(fpOrPrefix string) string {
 	return fpOrPrefix
 }
 
+// recipientsSummary renders a recipient list for a table cell: the first
+// email, and how many more there are.
+func recipientsSummary(rs []sdk.SecretRecipient) string {
+	switch len(rs) {
+	case 0:
+		return "-"
+	case 1:
+		return ellipsis(rs[0].Email, 25)
+	default:
+		return fmt.Sprintf("%s +%d", ellipsis(rs[0].Email, 20), len(rs)-1)
+	}
+}
+
 func ellipsis(s string, max int) string {
 	if len(s) <= max {
 		return s
@@ -679,7 +763,7 @@ func ellipsis(s string, max int) string {
 
 // isArchivedRevision reports whether the revision was sent as a single
 // tar.zst archive bundling multiple files. The compression label is the
-// canonical signal — it's set to "tar+zstd" only by the archive code path.
+// canonical signal: it's set to "tar+zstd" only by the archive code path.
 func isArchivedRevision(r sdk.RevisionInfo) bool {
 	return r.Integrity.Compression == "tar+zstd"
 }
@@ -701,7 +785,7 @@ func secretLatestArchived(detail *sdk.SecretDetail, latestRevisionID string) boo
 
 // formatFilesCount renders the per-revision FilesCount for the user. When
 // the revision was archived, the server-stored count is 0 by design (the
-// archive hides per-file metadata) — render that as "archived (entries
+// archive hides per-file metadata), so render that as "archived (entries
 // hidden)" instead of a bare "0" so the user doesn't read it as "no files".
 func formatFilesCount(count int, archived bool) string {
 	if archived {
@@ -749,14 +833,13 @@ func parseDuration(s string) (time.Duration, error) {
 	return d, nil
 }
 
-
 // fingerprintWithStatus annotates an identity fingerprint with its trust
 // status for inline display in revision details. Mirrors the colored
 // indicator in the web UI:
 //
-//   primary   → green   "(primary identity)"
-//   secondary → cyan    "(non-primary identity)"
-//   invalid   → red     "(identity deleted)"
+//	primary   → green   "(primary identity)"
+//	secondary → cyan    "(non-primary identity)"
+//	invalid   → red     "(identity deleted)"
 //
 // When the fingerprint is empty or the status is unset, returns the
 // fingerprint as-is so the details surface degrades gracefully.

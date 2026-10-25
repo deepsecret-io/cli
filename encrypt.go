@@ -5,42 +5,56 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"github.com/deepsecret-io/sdk"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/deepsecret-io/sdk"
+	"github.com/deepsecret-io/sdk/api"
+	"github.com/deepsecret-io/sdk/crypto"
 )
 
 func newEncryptCmd() *cobra.Command {
 	var (
-		recipientEmail string
-		groupName      string
-		name           string
-		inputFiles     []string
-		dataPairs      []string
-		ttl            string
-		allowedIPs     []string
-		skipHidden     bool
-		forceArchive   bool
-		identityFP     string
-		uploadThreads  int
-		presignExpiry  int
+		recipientEmails []string
+		groupName       string
+		revokeMissing   bool
+		name            string
+		inputFiles      []string
+		dataPairs       []string
+		ttl             string
+		allowedIPs      []string
+		skipHidden      bool
+		forceArchive    bool
+		identityFP      string
+		uploadThreads   int
+		presignExpiry   int
 	)
 
 	cmd := &cobra.Command{
 		Use:     "encrypt [files...]",
 		Aliases: []string{"enc"},
 		Short:   "Encrypt and send a secret (alias: enc)",
-		Long: `Encrypt files, directories, or key-value pairs for a recipient using hybrid
-post-quantum encryption (X25519 + ML-KEM-768 + AES-256-GCM).
+		Long: `Encrypt files, directories, or key-value pairs for one or more recipients
+using hybrid post-quantum encryption (X25519 + ML-KEM-768 + AES-256-GCM).
 
 Files and directories can be passed as positional args or with -f flags.
 Directories are recursively included with their structure preserved.
+
+Recipients:
+  --to, -t     Recipient email (can be repeated). The payload is encrypted
+               and uploaded once, with a key wrap for every recipient. You are
+               not a recipient unless you list yourself. Default: yourself.
+  --group, -g  Every member of an org group except you, in one send.
+  --revoke-missing
+               Sending again under an existing name must list everyone who
+               has access now. This flag revokes the people it leaves out.
 
 Policies:
   --ttl  Time-to-live (e.g. "24h", "7d", "30m"). Secret expires after this duration.
@@ -49,19 +63,21 @@ Policies:
 Privacy:
   --archive, --hide-metadata
       Bundle all files into a single tar.zst archive before encrypting.
-      The server only sees one opaque blob — individual file names, sizes,
+      The server only sees one opaque blob: individual file names, sizes,
       and directory structure are never sent as metadata. Use this when
       file metadata itself is sensitive.
 
 Examples:
   secret encrypt config.yaml -t alice@example.com
+  secret encrypt config.yaml -t alice@example.com -t bob@example.com
   secret encrypt auth.service keys.service traefik -t alice@example.com
   secret encrypt -f config.yaml                        # send to self
   secret encrypt -d DB_PASS=secret -d API_KEY=abc -t alice@example.com
   secret encrypt -f key.pem -t alice@example.com --ttl 24h
   secret encrypt -f db.env -t alice@example.com --ip 10.0.0.0/8
   secret encrypt -f . --hide-metadata -t alice@example.com  # hide file metadata from server
-  secret encrypt -f db.env -g engineering              # send to all members of "engineering" group`,
+  secret encrypt -f db.env -g engineering              # one send to every other member of "engineering"
+  secret encrypt -f db.env -n db.env -t alice@example.com --revoke-missing  # resend, revoking anyone left out`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Merge positional args into inputFiles
@@ -92,7 +108,7 @@ Examples:
 				return fmt.Errorf("--presign-expiry must be between 1 and 30 minutes (got %d)", presignExpiry)
 			}
 
-			if recipientEmail != "" && groupName != "" {
+			if len(recipientEmails) > 0 && groupName != "" {
 				return fmt.Errorf("use either --to or --group, not both")
 			}
 
@@ -103,10 +119,11 @@ Examples:
 				}
 			}
 
-			// Validate recipient email format early (basic sanity)
-			if recipientEmail != "" {
-				if !strings.Contains(recipientEmail, "@") || !strings.Contains(recipientEmail, ".") {
-					return fmt.Errorf("invalid recipient email %q", recipientEmail)
+			// Validate the explicit recipient list early, before stdin is
+			// read and before any network call.
+			if len(recipientEmails) > 0 {
+				if err := sdk.ValidateRecipients(recipientEmails); err != nil {
+					return err
 				}
 			}
 
@@ -132,12 +149,12 @@ Examples:
 				dbgErr("encrypt", err)
 				return err
 			}
-			// "client ready" was redundant noise — the next line is the real action.
 
 			// Resolve the recipient list. Sources (in priority order):
-			//   1. -g/--group  → fetch all group members (excluding self)
-			//   2. -t/--to     → single explicit recipient
-			//   3. (none)      → send to self
+			//   1. -g/--group  : every group member except self
+			//   2. -t/--to     : the explicit recipients
+			//   3. (none)      : send to self
+			// Whatever the source, it is one send.
 			var recipients []string
 			switch {
 			case groupName != "":
@@ -182,10 +199,11 @@ Examples:
 				if len(recipients) == 0 {
 					return fmt.Errorf("group %q has no other members to send to.\n  Tip: drop -g/--group to self-send this secret, or add another member to the group first", matched.Name)
 				}
+				groupName = matched.Name
 				fmt.Fprintf(os.Stderr, "%sds.encrypt:%s %s→%s sending to group %q (%d recipient%s)\n",
 					ansiCyan, ansiReset, ansiDim, ansiReset, matched.Name, len(recipients), pluralS(len(recipients)))
-			case recipientEmail != "":
-				recipients = []string{recipientEmail}
+			case len(recipientEmails) > 0:
+				recipients = recipientEmails
 			default:
 				info, err := c.WhoAmI()
 				if err != nil {
@@ -212,6 +230,9 @@ Examples:
 			logDebug("config", "presign-expiry=%dm", presignExpiry)
 			logDebug("config", "upload-threads=%s", threadCountLabel(uploadThreads, 4))
 			logDebug("config", "identity-source=%s", identitySource)
+			if revokeMissing {
+				logDebug("config", "revoke-missing=true")
+			}
 
 			// Prompt for key password if identity is encrypted
 			var keyPassword string
@@ -250,6 +271,7 @@ Examples:
 				SkipHidden:           skipHidden,
 				TTL:                  ttl,
 				IPs:                  normalizedIPs,
+				RevokeMissing:        revokeMissing,
 				ValidateTier:         true,
 				Password:             keyPassword,
 				Identity:             identityFP,
@@ -284,114 +306,89 @@ Examples:
 				}
 			}
 
-			// Encrypt+upload once per recipient. Each recipient gets a unique
-			// ciphertext encrypted to their public key — this is required by the
-			// E2E PQC contract; we can't reuse a single ciphertext.
-			results := make([]*sdk.EncryptResult, 0, len(recipients))
-			var firstErr error
-			for i, rcpt := range recipients {
-				rcpt := rcpt
-				idx := i + 1
-				label := "Encrypting and uploading"
-				if len(recipients) > 1 {
-					label = fmt.Sprintf("Encrypting and uploading [%d/%d] %s", idx, len(recipients), rcpt)
-				}
-				var result *sdk.EncryptResult
-				stepDef := step{
-					label:    label,
-					transfer: uploadProgress,
-					action: func() (string, error) {
-						var err error
-						switch {
-						case len(inputFiles) > 0:
-							// (per-recipient line removed — flow is clear from the encrypt phase logs)
-							uploadProgress.startedAt = time.Now()
-							result, err = c.EncryptPaths(rcpt, inputFiles, opts)
-						case len(dataPairs) > 0:
-							kvMap := make(map[string]string, len(dataPairs))
-							for _, kv := range dataPairs {
-								parts := strings.SplitN(kv, "=", 2)
-								kvMap[parts[0]] = parts[1]
-							}
-							uploadProgress.startedAt = time.Now()
-							result, err = c.EncryptData(rcpt, kvMap, opts)
-						default:
-							uploadProgress.startedAt = time.Now()
-							result, err = c.EncryptText(rcpt, string(stdinData), opts)
-						}
-						if err != nil {
-							dbgErr("encrypt", err)
-							return "", err
-						}
-						return fmt.Sprintf("type=%s, size=%s", result.PayloadType, formatBytes(result.EncryptedSize)), nil
-					},
-				}
-				if err := runPipeline("Encrypt & Send", []step{stepDef}, nil); err != nil {
-					if firstErr == nil {
-						firstErr = err
-					}
-					fmt.Fprintf(os.Stderr, "%sds.encrypt:%s ✗ %s: %v\n", ansiRed, ansiReset, rcpt, err)
-					continue
-				}
-				results = append(results, result)
+			// One send: the SDK encrypts the payload once, wraps its key for
+			// every recipient, and uploads it once.
+			label := "Encrypting and uploading"
+			if len(recipients) > 1 {
+				label = fmt.Sprintf("Encrypting and uploading for %d recipients", len(recipients))
 			}
-
-			if len(results) == 0 {
-				if firstErr != nil {
-					return firstErr
+			var result *sdk.EncryptResult
+			stepDef := step{
+				label:    label,
+				transfer: uploadProgress,
+				action: func() (string, error) {
+					var err error
+					uploadProgress.startedAt = time.Now()
+					switch {
+					case len(inputFiles) > 0:
+						result, err = c.EncryptPaths(recipients, inputFiles, opts)
+					case len(dataPairs) > 0:
+						kvMap := make(map[string]string, len(dataPairs))
+						for _, kv := range dataPairs {
+							parts := strings.SplitN(kv, "=", 2)
+							kvMap[parts[0]] = parts[1]
+						}
+						result, err = c.EncryptData(recipients, kvMap, opts)
+					default:
+						result, err = c.EncryptText(recipients, string(stdinData), opts)
+					}
+					if err != nil {
+						dbgErr("encrypt", err)
+						return "", err
+					}
+					return fmt.Sprintf("type=%s, size=%s, recipients=%d", result.PayloadType, formatBytes(result.EncryptedSize), len(result.Recipients)), nil
+				},
+			}
+			if err := runPipeline("Encrypt & Send", []step{stepDef}, nil); err != nil {
+				if errors.Is(err, api.ErrConflict) && !revokeMissing {
+					fmt.Fprintf(os.Stderr, "  Tip: list everyone who should keep access with --to, or add --revoke-missing to revoke the people this send leaves out\n")
 				}
-				return fmt.Errorf("no secrets were sent")
+				return err
 			}
 
 			// ── Summary ──
 			fmt.Fprintln(os.Stderr)
-			if len(recipients) == 1 {
-				result := results[0]
-				printKeyValue("Secret ID", result.Secret.ID)
-				printKeyValue("Name", result.Secret.Name)
-				printKeyValue("To", recipients[0])
-				printKeyValue("Type", result.PayloadType)
-				if result.Archived && result.ArchiveEntryCount > 0 {
-					printKeyValue("Files", fmt.Sprintf("%d (archived)", result.ArchiveEntryCount))
-				} else if result.FilesCount > 0 {
-					printKeyValue("Files", fmt.Sprintf("%d", result.FilesCount))
+			printKeyValue("Secret ID", result.Secret.ID)
+			printKeyValue("Name", result.Secret.Name)
+			if groupName != "" {
+				printKeyValue("Group", groupName)
+			}
+			printKeyValue("Type", result.PayloadType)
+			if result.Archived && result.ArchiveEntryCount > 0 {
+				printKeyValue("Files", fmt.Sprintf("%d (archived)", result.ArchiveEntryCount))
+			} else if result.FilesCount > 0 {
+				printKeyValue("Files", fmt.Sprintf("%d", result.FilesCount))
+			}
+			// Three-line split mirrors what the frontend's integrity panel
+			// shows so a side-by-side compare reads identically:
+			//   Original Size : plaintext bytes before any compression
+			//   Size          : the one encrypted payload uploaded to storage,
+			//                   shared by every recipient
+			//   Compression   : algo + reduction ratio only (no intermediate
+			//                   "compressed-but-not-encrypted" size, which
+			//                   doesn't appear on the server and confuses
+			//                   readers comparing surfaces)
+			if result.Compressed && result.OriginalSize > 0 {
+				printKeyValue("Original Size", formatBytes(result.OriginalSize))
+			}
+			printKeyValue("Size", formatBytes(result.EncryptedSize)+" encrypted")
+			if result.Compressed && result.OriginalSize > 0 {
+				reduction := 100 - result.CompressionRatio
+				printKeyValue("Compression", fmt.Sprintf("%s (%.0f%% reduction)",
+					strings.ToUpper(result.Compression), reduction))
+			}
+			printKeyValue("Sender", crypto.ShortFingerprint(result.SenderFingerprint))
+			sentTo := make([]string, len(result.Recipients))
+			for i, r := range result.Recipients {
+				sentTo[i] = fmt.Sprintf("%s  %s%s%s", r.Email, ansiDim, crypto.ShortFingerprint(r.Fingerprint), ansiReset)
+			}
+			printKeyValues("Recipient"+pluralS(len(sentTo)), sentTo)
+			if len(result.Revoked) > 0 {
+				revoked := make([]string, len(result.Revoked))
+				for i, r := range result.Revoked {
+					revoked[i] = r.Email
 				}
-				// Three-line split mirrors what the frontend's integrity panel
-				// shows so a side-by-side compare reads identically:
-				//   Original Size   – plaintext bytes before any compression
-				//   Size            – HPKE envelope bytes uploaded to storage
-				//   Compression     – algo + reduction ratio only (no
-				//                     intermediate "compressed-but-not-encrypted"
-				//                     size, which doesn't appear on the server
-				//                     and confuses readers comparing surfaces)
-				if result.Compressed && result.OriginalSize > 0 {
-					printKeyValue("Original Size", formatBytes(result.OriginalSize))
-				}
-				printKeyValue("Size", formatBytes(result.EncryptedSize)+" encrypted")
-				if result.Compressed && result.OriginalSize > 0 {
-					reduction := 100 - result.CompressionRatio
-					printKeyValue("Compression", fmt.Sprintf("%s (%.0f%% reduction)",
-						strings.ToUpper(result.Compression), reduction))
-				}
-				printKeyValue("Sender", result.SenderFingerprint[:16])
-				printKeyValue("Recipient", result.RecipientFingerprint[:16])
-			} else {
-				printKeyValue("Sent", fmt.Sprintf("%d/%d recipients", len(results), len(recipients)))
-				if groupName != "" {
-					printKeyValue("Group", groupName)
-				}
-				printKeyValue("Name", results[0].Secret.Name)
-				printKeyValue("Type", results[0].PayloadType)
-				if results[0].Archived && results[0].ArchiveEntryCount > 0 {
-					printKeyValue("Files", fmt.Sprintf("%d (archived)", results[0].ArchiveEntryCount))
-				} else if results[0].FilesCount > 0 {
-					printKeyValue("Files", fmt.Sprintf("%d", results[0].FilesCount))
-				}
-				printKeyValue("Size", formatBytes(results[0].EncryptedSize)+" encrypted (per recipient)")
-				printKeyValue("Sender", results[0].SenderFingerprint[:16])
-				for _, r := range results {
-					fmt.Fprintf(os.Stderr, "  %s•%s %s  %s\n", ansiDim, ansiReset, r.Secret.ID, recipientForResult(recipients, results, r))
-				}
+				printKeyValues("Revoked", revoked)
 			}
 			if ttl != "" {
 				printKeyValue("TTL", ttl)
@@ -400,16 +397,13 @@ Examples:
 				printKeyValue("IP Lock", strings.Join(normalizedIPs, ", "))
 			}
 			fmt.Fprintln(os.Stderr)
-
-			if firstErr != nil {
-				return fmt.Errorf("some recipients failed: %w", firstErr)
-			}
 			return nil
 		},
 	}
 
-	cmd.Flags().StringVarP(&recipientEmail, "to", "t", "", "Recipient email (default: self)")
-	cmd.Flags().StringVarP(&groupName, "group", "g", "", "Send to all members of this org group (excluding self)")
+	cmd.Flags().StringSliceVarP(&recipientEmails, "to", "t", nil, "Recipient email, can be repeated (default: self)")
+	cmd.Flags().StringVarP(&groupName, "group", "g", "", "Send to all members of this org group (excluding self), in one send")
+	cmd.Flags().BoolVar(&revokeMissing, "revoke-missing", false, "When resending under an existing name, revoke the current recipients this send leaves out")
 	cmd.Flags().StringVarP(&name, "name", "n", "", "Secret name (defaults to filename or timestamp)")
 	cmd.Flags().StringSliceVarP(&inputFiles, "file", "f", nil, "Files to encrypt (can be repeated)")
 	cmd.Flags().StringSliceVarP(&dataPairs, "data", "d", nil, "Key-value pair (KEY=VALUE), can be repeated")
@@ -451,16 +445,4 @@ func splitListFlag(values []string) []string {
 		}
 	}
 	return out
-}
-
-// recipientForResult returns the recipient email for a given encrypt result by
-// matching the recipient fingerprint position in the slices. Both slices have
-// the same ordering since results are appended in recipients order.
-func recipientForResult(recipients []string, results []*sdk.EncryptResult, target *sdk.EncryptResult) string {
-	for i, r := range results {
-		if r == target && i < len(recipients) {
-			return recipients[i]
-		}
-	}
-	return ""
 }

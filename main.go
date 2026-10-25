@@ -37,7 +37,7 @@ func main() {
 
 	root := &cobra.Command{
 		Use:           "secret",
-		Short:         "DeepSecret CLI — E2E encrypted secrets manager",
+		Short:         "DeepSecret CLI: E2E encrypted secrets manager",
 		Version:       version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -72,6 +72,7 @@ func main() {
 		newListCmd(),
 		newDescribeCmd(),
 		newDeleteCmd(),
+		newRevokeCmd(),
 		newPolicyCmd(),
 		newConfigCmd(),
 		newIdentityCmd(),

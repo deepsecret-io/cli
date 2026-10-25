@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
+
 	sdk "github.com/deepsecret-io/sdk"
 	"github.com/deepsecret-io/sdk/archive"
 	"github.com/deepsecret-io/sdk/compress"
@@ -138,26 +139,33 @@ Examples:
 			}
 			dbg("setup", "authenticated client ready")
 
-			// Auto-select identity from the secret's recipient fingerprint
-			// when the user did not pass --identity. The user may have
-			// rotated their primary identity, but still hold older keys
-			// locally that match older revisions.
+			// Auto-select identity from the key the target revision was
+			// sealed for, for the caller, when the user did not pass
+			// --identity. The user may have rotated their primary identity,
+			// but still hold older keys locally that match older revisions.
 			identitySource := "primary"
 			if identityFP != "" {
 				identitySource = "explicit (--identity)"
 			} else {
 				detail, derr := c.DescribeSecretFull(secretID)
-				if derr == nil && len(detail.Revisions) > 0 {
+				actorID, aerr := c.ResolveActorID()
+				if derr == nil && aerr == nil && len(detail.Revisions) > 0 {
 					targetID := revisionID
 					if targetID == "" {
 						targetID = detail.Secret.LatestRevisionID
 					}
 					var expectedFP string
-					for i := range detail.Revisions {
-						if detail.Revisions[i].ID == targetID {
-							expectedFP = detail.Revisions[i].Integrity.RecipientKeyFingerprint
-							break
+					for _, rev := range detail.Revisions {
+						if rev.ID != targetID {
+							continue
 						}
+						for _, r := range rev.Integrity.Recipients {
+							if r.ID == actorID {
+								expectedFP = r.KeyFingerprint
+								break
+							}
+						}
+						break
 					}
 					if expectedFP != "" {
 						if matched := findLocalKeyByFingerprint(expectedFP); matched != "" {
@@ -262,10 +270,23 @@ Examples:
 			if result.Compressed {
 				printKeyValue("Compression", strings.ToUpper(result.Compression))
 			}
-			printKeyValue("Sender", result.SenderFingerprint[:16])
-			printKeyValue("Recipient", result.RecipientFingerprint[:16])
+			printKeyValue("Sender", crypto.ShortFingerprint(result.SenderFingerprint))
+			// The recipient list is the one the sender signed; emails are
+			// the server's labels for those keys.
+			signedFor := make([]string, len(result.Recipients))
+			for i, r := range result.Recipients {
+				line := ansiDim + crypto.ShortFingerprint(r.Fingerprint) + ansiReset
+				if r.Email != "" {
+					line = r.Email + "  " + line
+				}
+				if r.Fingerprint == result.RecipientFingerprint {
+					line += " (you)"
+				}
+				signedFor[i] = line
+			}
+			printKeyValues("Recipient"+plural(len(signedFor)), signedFor)
 			printKeyValue("Protocol", fmt.Sprintf("v%s, %s", result.ProtocolVersion, result.CipherSuite))
-			printKeyValue("Checksum", result.EnvelopeChecksum[:16]+" (SHA-256)")
+			printKeyValue("Payload Digest", result.PayloadDigest[:16]+" (SHA-256, signed by the sender)")
 			fmt.Fprintln(os.Stderr)
 
 			// Resolve the default output directory only when the payload is

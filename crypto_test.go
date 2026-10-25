@@ -4,153 +4,135 @@
 package main
 
 import (
-	"github.com/deepsecret-io/sdk/crypto"
 	"testing"
+
+	"github.com/deepsecret-io/sdk/crypto"
 )
 
-func TestHybridEncryptDecryptRoundtrip(t *testing.T) {
-	sender, err := crypto.GenerateKeyPair()
-	if err != nil {
-		t.Fatalf("sender keygen: %v", err)
-	}
-	recipient, err := crypto.GenerateKeyPair()
-	if err != nil {
-		t.Fatalf("recipient keygen: %v", err)
-	}
+const testRevisionID = "4f9c1e5a-8b2d-4c3e-9f1a-2b3c4d5e6f70"
 
-	recipientFP, err := crypto.Fingerprint(recipient)
+type testParty struct {
+	kp  *crypto.KeyPair
+	fp  string
+	pub *crypto.PublicKeys
+}
+
+func newTestParty(t *testing.T) testParty {
+	t.Helper()
+	kp, err := crypto.GenerateKeyPair()
+	if err != nil {
+		t.Fatalf("keygen: %v", err)
+	}
+	fp, err := crypto.Fingerprint(kp)
 	if err != nil {
 		t.Fatal(err)
 	}
+	return testParty{kp: kp, fp: fp, pub: &crypto.PublicKeys{
+		ED25519:     kp.ED25519Public,
+		X25519:      kp.X25519Public,
+		MLKEM768:    kp.MLKEM768PK,
+		MLDSA65:     kp.MLDSA65PK,
+		Fingerprint: fp,
+	}}
+}
 
-	recipientPub := &crypto.PublicKeys{
-		ED25519:     recipient.ED25519Public,
-		X25519:      recipient.X25519Public,
-		MLKEM768:    recipient.MLKEM768PK,
-		MLDSA65:     recipient.MLDSA65PK,
-		Fingerprint: recipientFP,
+// sealFor seals plaintext once for every recipient.
+func sealFor(t *testing.T, plaintext []byte, sender testParty, p crypto.SealParams, recipients ...testParty) ([]byte, *crypto.Sealed) {
+	t.Helper()
+	pubs := make([]*crypto.PublicKeys, len(recipients))
+	for i, r := range recipients {
+		pubs[i] = r.pub
 	}
-
-	plaintext := []byte("hello deepsecret - HPKE post-quantum encrypted!")
-	params := crypto.EncryptParams{PayloadType: "message"}
-
-	envelopeData, err := crypto.HybridEncrypt(plaintext, sender, recipientPub, params)
+	payload, sealed, err := crypto.SealBytes(plaintext, sender.kp, pubs, p)
 	if err != nil {
-		t.Fatalf("encrypt: %v", err)
+		t.Fatalf("seal: %v", err)
+	}
+	return payload, sealed
+}
+
+// openAs opens the revision as r with r's own wrap and decrypts payload.
+func openAs(sealed *crypto.Sealed, payload []byte, r testParty, senderED25519 string) ([]byte, *crypto.Manifest, error) {
+	wrap, _ := sealed.Wrap(r.fp)
+	opened, err := crypto.Open(sealed.ManifestData, wrap, r.kp, crypto.OpenParams{RevisionID: testRevisionID, SenderED25519: senderED25519})
+	if err != nil {
+		return nil, nil, err
+	}
+	defer opened.Close()
+	plaintext, err := opened.Decrypt(payload)
+	return plaintext, opened.Manifest, err
+}
+
+func TestSealOpenRoundtrip(t *testing.T) {
+	sender, alice, bob := newTestParty(t), newTestParty(t), newTestParty(t)
+	plaintext := []byte("hello deepsecret - one payload, every recipient")
+	payload, sealed := sealFor(t, plaintext, sender, crypto.SealParams{RevisionID: testRevisionID, PayloadType: "message"}, alice, bob)
+
+	m, err := crypto.UnmarshalManifest(sealed.ManifestData)
+	if err != nil {
+		t.Fatalf("unmarshal manifest: %v", err)
+	}
+	if m.Version != crypto.ProtocolVersion {
+		t.Fatalf("version: got %q, want %q", m.Version, crypto.ProtocolVersion)
+	}
+	if m.CipherSuite != crypto.CipherSuite {
+		t.Fatalf("cipher suite: got %q, want %q", m.CipherSuite, crypto.CipherSuite)
+	}
+	if m.PayloadType != "message" || len(m.Recipients) != 2 || m.CiphertextSize != int64(len(payload)) {
+		t.Fatalf("manifest: %+v", m)
 	}
 
-	// Verify envelope metadata via unmarshal
-	env, err := crypto.UnmarshalEnvelope(envelopeData)
-	if err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if env.Version != crypto.ProtocolVersion {
-		t.Fatalf("version: got %q, want %q", env.Version, crypto.ProtocolVersion)
-	}
-	if env.CipherSuite != crypto.CipherSuite {
-		t.Fatalf("cipher suite: got %q, want %q", env.CipherSuite, crypto.CipherSuite)
-	}
-	if env.PayloadType != "message" {
-		t.Fatalf("payload type: got %q, want %q", env.PayloadType, "message")
-	}
-	if len(env.Enc) == 0 {
-		t.Fatal("enc should not be empty")
-	}
-	if len(env.Ciphertext) == 0 {
-		t.Fatal("ciphertext should not be empty")
-	}
-
-	// Decrypt
-	result, err := crypto.HybridDecrypt(envelopeData, recipient, sender.ED25519Public)
-	if err != nil {
-		t.Fatalf("decrypt: %v", err)
-	}
-	if string(result.Plaintext) != string(plaintext) {
-		t.Fatalf("plaintext mismatch: got %q, want %q", string(result.Plaintext), string(plaintext))
+	for _, r := range []testParty{alice, bob} {
+		got, _, err := openAs(sealed, payload, r, sender.kp.ED25519Public)
+		if err != nil {
+			t.Fatalf("open: %v", err)
+		}
+		if string(got) != string(plaintext) {
+			t.Fatalf("plaintext mismatch: got %q, want %q", got, plaintext)
+		}
 	}
 }
 
 func TestDecryptWithCompression(t *testing.T) {
-	sender, _ := crypto.GenerateKeyPair()
-	recipient, _ := crypto.GenerateKeyPair()
-	recipientFP, _ := crypto.Fingerprint(recipient)
-
-	recipientPub := &crypto.PublicKeys{
-		ED25519:     recipient.ED25519Public,
-		X25519:      recipient.X25519Public,
-		MLKEM768:    recipient.MLKEM768PK,
-		MLDSA65:     recipient.MLDSA65PK,
-		Fingerprint: recipientFP,
-	}
-
+	sender, recipient := newTestParty(t), newTestParty(t)
 	plaintext := []byte("compressed payload with repeated data repeated data repeated data")
-	params := crypto.EncryptParams{
+	payload, sealed := sealFor(t, plaintext, sender, crypto.SealParams{
+		RevisionID:  testRevisionID,
 		PayloadType: "files",
 		Compressed:  true,
 		Compression: "zstd",
-	}
+	}, recipient)
 
-	envelopeData, err := crypto.HybridEncrypt(plaintext, sender, recipientPub, params)
+	got, m, err := openAs(sealed, payload, recipient, sender.kp.ED25519Public)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	result, err := crypto.HybridDecrypt(envelopeData, recipient, sender.ED25519Public)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !result.Compressed {
+	if !m.Compressed {
 		t.Error("expected compressed=true")
 	}
-	if result.Compression != "zstd" {
-		t.Errorf("compression = %q, want %q", result.Compression, "zstd")
+	if m.Compression != "zstd" {
+		t.Errorf("compression = %q, want %q", m.Compression, "zstd")
 	}
-	if string(result.Plaintext) != string(plaintext) {
+	if string(got) != string(plaintext) {
 		t.Error("plaintext mismatch")
 	}
 }
 
 func TestDecryptWrongKey(t *testing.T) {
-	sender, _ := crypto.GenerateKeyPair()
-	recipient, _ := crypto.GenerateKeyPair()
-	wrong, _ := crypto.GenerateKeyPair()
-	recipientFP, _ := crypto.Fingerprint(recipient)
+	sender, recipient, wrong := newTestParty(t), newTestParty(t), newTestParty(t)
+	_, sealed := sealFor(t, []byte("secret"), sender, crypto.SealParams{RevisionID: testRevisionID, PayloadType: "message"}, recipient)
 
-	recipientPub := &crypto.PublicKeys{
-		ED25519:     recipient.ED25519Public,
-		X25519:      recipient.X25519Public,
-		MLKEM768:    recipient.MLKEM768PK,
-		MLDSA65:     recipient.MLDSA65PK,
-		Fingerprint: recipientFP,
-	}
-
-	envelopeData, _ := crypto.HybridEncrypt([]byte("secret"), sender, recipientPub, crypto.EncryptParams{PayloadType: "message"})
-
-	_, err := crypto.HybridDecrypt(envelopeData, wrong, sender.ED25519Public)
-	if err == nil {
-		t.Error("should fail with wrong key")
+	wrap, _ := sealed.Wrap(recipient.fp)
+	if _, err := crypto.Open(sealed.ManifestData, wrap, wrong.kp, crypto.OpenParams{RevisionID: testRevisionID}); err == nil {
+		t.Error("should fail with a key that is not a recipient")
 	}
 }
 
 func TestSignatureVerificationFails(t *testing.T) {
-	sender, _ := crypto.GenerateKeyPair()
-	recipient, _ := crypto.GenerateKeyPair()
-	fakeSender, _ := crypto.GenerateKeyPair()
-	recipientFP, _ := crypto.Fingerprint(recipient)
+	sender, recipient, fakeSender := newTestParty(t), newTestParty(t), newTestParty(t)
+	payload, sealed := sealFor(t, []byte("secret"), sender, crypto.SealParams{RevisionID: testRevisionID, PayloadType: "message"}, recipient)
 
-	recipientPub := &crypto.PublicKeys{
-		ED25519:     recipient.ED25519Public,
-		X25519:      recipient.X25519Public,
-		MLKEM768:    recipient.MLKEM768PK,
-		MLDSA65:     recipient.MLDSA65PK,
-		Fingerprint: recipientFP,
-	}
-
-	envelopeData, _ := crypto.HybridEncrypt([]byte("secret"), sender, recipientPub, crypto.EncryptParams{PayloadType: "message"})
-
-	_, err := crypto.HybridDecrypt(envelopeData, recipient, fakeSender.ED25519Public)
-	if err == nil {
-		t.Error("should fail with wrong sender key (signature verification)")
+	if _, _, err := openAs(sealed, payload, recipient, fakeSender.kp.ED25519Public); err == nil {
+		t.Error("should fail with wrong expected sender key")
 	}
 }
 
@@ -202,29 +184,20 @@ func TestKeyBundleSignVerify(t *testing.T) {
 	}
 }
 
+// A self-send lists only the sender, who then holds the one wrap.
 func TestSelfEncryptDecrypt(t *testing.T) {
-	kp, _ := crypto.GenerateKeyPair()
-	fp, _ := crypto.Fingerprint(kp)
-
-	pub := &crypto.PublicKeys{
-		ED25519:     kp.ED25519Public,
-		X25519:      kp.X25519Public,
-		MLKEM768:    kp.MLKEM768PK,
-		MLDSA65:     kp.MLDSA65PK,
-		Fingerprint: fp,
-	}
-
+	self := newTestParty(t)
 	msg := "self-encrypted message"
-	envelopeData, err := crypto.HybridEncrypt([]byte(msg), kp, pub, crypto.EncryptParams{PayloadType: "message"})
-	if err != nil {
-		t.Fatal(err)
+	payload, sealed := sealFor(t, []byte(msg), self, crypto.SealParams{RevisionID: testRevisionID, PayloadType: "message"}, self)
+	if len(sealed.Wraps) != 1 {
+		t.Fatalf("want a single wrap, got %d", len(sealed.Wraps))
 	}
 
-	result, err := crypto.HybridDecrypt(envelopeData, kp, kp.ED25519Public)
+	got, _, err := openAs(sealed, payload, self, self.kp.ED25519Public)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(result.Plaintext) != msg {
-		t.Errorf("got %q, want %q", string(result.Plaintext), msg)
+	if string(got) != msg {
+		t.Errorf("got %q, want %q", got, msg)
 	}
 }
