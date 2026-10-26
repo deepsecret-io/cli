@@ -4,8 +4,6 @@
 package main
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,8 +14,6 @@ import (
 	"github.com/spf13/cobra"
 
 	sdk "github.com/deepsecret-io/sdk"
-	"github.com/deepsecret-io/sdk/archive"
-	"github.com/deepsecret-io/sdk/compress"
 	"github.com/deepsecret-io/sdk/crypto"
 )
 
@@ -36,32 +32,6 @@ func plural(n int) string {
 // redirect plaintext writes; see decrypt_unix.go / decrypt_windows.go for the
 // platform-specific safeWriteFile.
 var forceOverwrite bool
-
-// safeRelPath returns a path that is guaranteed to be inside base after
-// filepath.Clean. Rejects absolute paths, paths that escape via "..", paths
-// containing NUL bytes, and (on every OS) paths containing backslash since
-// payloads should never carry Windows separators.
-func safeRelPath(base, name string) (string, error) {
-	if name == "" {
-		return "", fmt.Errorf("empty file name")
-	}
-	if strings.ContainsRune(name, 0) {
-		return "", fmt.Errorf("file name contains NUL byte")
-	}
-	if strings.ContainsRune(name, '\\') {
-		return "", fmt.Errorf("file name contains backslash: %q", name)
-	}
-	cleaned := filepath.Clean(name)
-	if filepath.IsAbs(cleaned) {
-		return "", fmt.Errorf("absolute file path rejected: %q", name)
-	}
-	dest := filepath.Join(base, cleaned)
-	rel, err := filepath.Rel(base, dest)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("file path escapes output dir: %q", name)
-	}
-	return dest, nil
-}
 
 func newDecryptCmd() *cobra.Command {
 	var (
@@ -235,21 +205,60 @@ Examples:
 				downloadProgress.total = total
 			}
 
-			var result *sdk.DecryptResult
+			var opened *sdk.OpenedSecret
+			var written *sdk.WriteResult
+			var decrypted *sdk.DecryptedPayload
+			defer func() {
+				if opened != nil {
+					opened.Close()
+				}
+			}()
 
 			steps := []step{
 				{
-					label:    "Downloading and decrypting",
+					label:    "Downloading",
 					transfer: downloadProgress,
 					action: func() (string, error) {
 						downloadProgress.startedAt = time.Now()
 						var err error
-						result, err = c.DecryptSecretFull(secretID, opts)
+						opened, err = c.OpenSecret(secretID, opts)
 						if err != nil {
 							dbgErr("decrypt", err)
 							return "", err
 						}
-						return fmt.Sprintf("type=%s, size=%s", result.PayloadType, formatBytes(result.EncryptedSize)), nil
+						return fmt.Sprintf("type=%s, size=%s", opened.Result.PayloadType, formatBytes(opened.Result.EncryptedSize)), nil
+					},
+				},
+				{
+					label: "Verifying and decrypting",
+					action: func() (string, error) {
+						if opened.Result.PayloadType != "files" {
+							var err error
+							decrypted, err = opened.Payload()
+							if err != nil {
+								dbgErr("decrypt", err)
+								return "", err
+							}
+							return "verified", nil
+						}
+						// Files default to ./<revision-id>/ so an unintended
+						// decrypt never dumps a tree on top of the caller's CWD.
+						if outputDir == "" {
+							if opened.Result.RevisionID == "" {
+								return "", fmt.Errorf("internal error: SDK returned empty RevisionID")
+							}
+							outputDir = "./" + opened.Result.RevisionID
+						}
+						var err error
+						written, err = opened.WriteFiles(outputDir, sdk.WriteOptions{Overwrite: forceOverwrite})
+						if err != nil {
+							dbgErr("decrypt", err)
+							return "", err
+						}
+						if written.Archived {
+							return fmt.Sprintf("extracted %d file%s", written.Extracted, plural(written.Extracted)), nil
+						}
+						return fmt.Sprintf("%d file%s written", len(written.Files), plural(len(written.Files))), nil
 					},
 				},
 			}
@@ -257,14 +266,17 @@ Examples:
 			if err := runPipeline("Decrypt", steps, nil); err != nil {
 				return err
 			}
+			result := opened.Result
 
 			// ── Summary ──
 			fmt.Fprintln(os.Stderr)
 			printKeyValue("Secret ID", secretID)
 			printKeyValue("Type", result.PayloadType)
-			fileCount := len(result.Decrypted.Files)
-			if fileCount > 0 {
-				printKeyValue("Files", fmt.Sprintf("%d", fileCount))
+			switch {
+			case written != nil && written.Archived:
+				printKeyValue("Files", fmt.Sprintf("%d (archived)", written.Extracted))
+			case written != nil:
+				printKeyValue("Files", fmt.Sprintf("%d", len(written.Files)))
 			}
 			printKeyValue("Size", formatBytes(result.EncryptedSize)+" encrypted")
 			if result.Compressed {
@@ -287,27 +299,16 @@ Examples:
 			printKeyValues("Recipient"+plural(len(signedFor)), signedFor)
 			printKeyValue("Protocol", fmt.Sprintf("v%s, %s", result.ProtocolVersion, result.CipherSuite))
 			printKeyValue("Payload Digest", result.PayloadDigest[:16]+" (SHA-256, signed by the sender)")
-			fmt.Fprintln(os.Stderr)
-
-			// Resolve the default output directory only when the payload is
-			// actually files. Messages, key-value data, and raw payloads go
-			// to stdout (or -o), so creating ./<revision-id>/ for those
-			// would just leave empty directories behind. Files default to
-			// ./<revision-id>/ so an unintended decrypt never dumps a tree
-			// on top of the caller's CWD.
-			hasFiles := len(result.Decrypted.Files) > 0
-			if outputDir == "" && hasFiles {
-				if result.RevisionID == "" {
-					return fmt.Errorf("internal error: SDK returned empty RevisionID")
-				}
-				outputDir = "./" + result.RevisionID
-				if err := os.MkdirAll(outputDir, 0755); err != nil {
-					return fmt.Errorf("create default output directory %q: %w", outputDir, err)
-				}
+			if written != nil {
 				printKeyValue("Output", outputDir)
 			}
+			fmt.Fprintln(os.Stderr)
 
-			return outputDecrypted(result, outputDir, outputFile)
+			if written != nil {
+				printWrittenFiles(written, outputDir)
+				return nil
+			}
+			return outputDecrypted(decrypted, outputFile)
 		},
 	}
 
@@ -322,111 +323,34 @@ Examples:
 	return cmd
 }
 
-// outputDecrypted handles writing decrypted content to disk or stdout.
-func outputDecrypted(result *sdk.DecryptResult, outputDir, outputFile string) error {
-	d := result.Decrypted
+// printWrittenFiles lists what WriteFiles wrote: each file with its size
+// and SHA-256, or the archive's entry count.
+func printWrittenFiles(w *sdk.WriteResult, outputDir string) {
+	if w.Archived {
+		fmt.Fprintf(os.Stderr, "  %s✓%s extracted %d file%s into %s\n",
+			ansiGreen, ansiReset, w.Extracted, plural(w.Extracted), outputDir)
+		return
+	}
+	maxName, maxSize := 0, 0
+	sizes := make([]string, len(w.Files))
+	for i, f := range w.Files {
+		sizes[i] = formatBytes(f.Size)
+		maxName = max(maxName, len(f.Path))
+		maxSize = max(maxSize, len(sizes[i]))
+	}
+	for i, f := range w.Files {
+		fmt.Fprintf(os.Stderr, "  %s✓%s %-*s  %s%*s%s  %ssha256:%s%s\n",
+			ansiGreen, ansiReset,
+			maxName, f.Path,
+			ansiDim, maxSize, sizes[i], ansiReset,
+			ansiDim, f.SHA256[:16], ansiReset)
+	}
+}
 
+// outputDecrypted writes a decrypted message or key-value data to stdout,
+// or to outputFile.
+func outputDecrypted(d *sdk.DecryptedPayload, outputFile string) error {
 	switch d.Type {
-	case "files":
-		if err := os.MkdirAll(outputDir, 0755); err != nil {
-			return fmt.Errorf("create output dir: %w", err)
-		}
-
-		// Archived payloads (single tar+zstd blob) are stream-extracted to
-		// disk so arbitrarily large archives work without buffering every
-		// entry into RAM. The CLI is a deliberate, user-driven tool, so the
-		// default in-memory limits (2 GB) are too tight; we use generous
-		// caps that still protect against pathological input.
-		if d.Archived && len(d.Files) == 1 {
-			f := d.Files[0]
-			if f.SHA256 != "" {
-				h := sha256.Sum256(f.Data)
-				if actual := hex.EncodeToString(h[:]); actual != f.SHA256 {
-					return fmt.Errorf("integrity check failed for %s: expected sha256 %s, got %s", f.Name, f.SHA256, actual)
-				}
-			}
-			lim := &archive.Limits{
-				MaxEntries:     100_000,
-				MaxEntrySize:   50 << 30,  // 50 GiB per file
-				MaxTotalSize:   500 << 30, // 500 GiB total
-				AllowOverwrite: forceOverwrite,
-			}
-			count, err := archive.ExtractTar(f.Data, outputDir, compress.Algorithm(d.ArchiveCompression), lim)
-			if err != nil {
-				return fmt.Errorf("extract %s: %w", f.Name, err)
-			}
-			fmt.Fprintf(os.Stderr, "  %s✓%s extracted %d file%s into %s\n",
-				ansiGreen, ansiReset, count, plural(count), outputDir)
-			return nil
-		}
-
-		// Pre-compute column widths for aligned output
-		type fileOut struct {
-			dest string
-			size string
-			sha  string
-		}
-		outputs := make([]fileOut, 0, len(d.Files))
-		maxName, maxSize := 0, 0
-
-		for _, f := range d.Files {
-			dest, err := safeRelPath(outputDir, f.Name)
-			if err != nil {
-				return err
-			}
-
-			if f.SHA256 != "" {
-				h := sha256.Sum256(f.Data)
-				actual := hex.EncodeToString(h[:])
-				if actual != f.SHA256 {
-					return fmt.Errorf("integrity check failed for %s: expected sha256 %s, got %s", f.Name, f.SHA256, actual)
-				}
-			}
-			if f.Size > 0 && int64(len(f.Data)) != f.Size {
-				return fmt.Errorf("integrity check failed for %s: expected %d bytes, got %d", f.Name, f.Size, len(f.Data))
-			}
-
-			if dir := filepath.Dir(dest); dir != outputDir {
-				if err := os.MkdirAll(dir, 0755); err != nil {
-					return fmt.Errorf("create directory %s: %w", dir, err)
-				}
-			}
-			// Preserve the sender's permission bits, masked to 0o777 so
-			// setuid/setgid/sticky from the payload can't leak onto disk.
-			// Fall back to 0600 for legacy revisions that stored no mode.
-			mode := f.Mode & 0o777
-			if mode == 0 {
-				mode = 0600
-			}
-			dbg("write", "%s mode=%o", f.Name, uint32(mode))
-			if err := safeWriteFile(dest, f.Data, mode, forceOverwrite); err != nil {
-				return err
-			}
-
-			sha := f.SHA256
-			if sha == "" {
-				h := sha256.Sum256(f.Data)
-				sha = hex.EncodeToString(h[:])
-			}
-
-			sizeStr := formatBytes(int64(len(f.Data)))
-			outputs = append(outputs, fileOut{dest: dest, size: sizeStr, sha: sha[:16]})
-			if len(dest) > maxName {
-				maxName = len(dest)
-			}
-			if len(sizeStr) > maxSize {
-				maxSize = len(sizeStr)
-			}
-		}
-
-		for _, o := range outputs {
-			fmt.Fprintf(os.Stderr, "  %s✓%s %-*s  %s%*s%s  %ssha256:%s%s\n",
-				ansiGreen, ansiReset,
-				maxName, o.dest,
-				ansiDim, maxSize, o.size, ansiReset,
-				ansiDim, o.sha, ansiReset)
-		}
-
 	case "data":
 		var buf strings.Builder
 		for _, e := range d.Entries {

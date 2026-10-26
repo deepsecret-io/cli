@@ -62,10 +62,16 @@ Policies:
 
 Privacy:
   --archive, --hide-metadata
-      Bundle all files into a single tar.zst archive before encrypting.
-      The server only sees one opaque blob: individual file names, sizes,
-      and directory structure are never sent as metadata. Use this when
-      file metadata itself is sensitive.
+      Bundle all files into a single tar archive, compressed with zstd,
+      before encrypting. The server only sees one opaque blob: individual
+      file names, sizes, and directory structure are never sent as
+      metadata. Use this when file metadata itself is sensitive.
+
+Large files:
+  Files stream from disk, so memory stays flat at any size. The encrypted
+  copy is written to a private temporary file before it is uploaded, so a
+  send needs that much free disk space. Set DEEPSECRET_TMPDIR to put it
+  elsewhere than the system temp directory.
 
 Examples:
   secret encrypt config.yaml -t alice@example.com
