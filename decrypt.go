@@ -294,8 +294,11 @@ Examples:
 						// Files default to ./<revision-id>/ so an unintended
 						// decrypt never dumps a tree on top of the caller's CWD.
 						if outputDir == "" {
-							if opened.Result.RevisionID == "" {
-								return "", fmt.Errorf("internal error: SDK returned empty RevisionID")
+							// The revision ID names a directory, so it must
+							// be a UUID and never a path.
+							id, err := uuid.Parse(opened.Result.RevisionID)
+							if err != nil || id.String() != opened.Result.RevisionID {
+								return "", fmt.Errorf("the revision ID %q is not a UUID; pass -d to choose the output directory", opened.Result.RevisionID)
 							}
 							outputDir = "./" + opened.Result.RevisionID
 						}

@@ -19,10 +19,12 @@ import (
 
 // uploadsDir is where large sends keep their encrypted payload until the
 // upload finishes, so `secret resume` can finish an interrupted one.
-// DEEPSECRET_TMPDIR moves it, as it moves the other temporary files.
+// DEEPSECRET_TMPDIR moves it, as it moves the other temporary files; the
+// folder there is named for the user, since that directory may be shared,
+// and the SDK refuses it unless it is private to this user.
 func uploadsDir() string {
 	if dir := os.Getenv(sdk.TempDirEnv); dir != "" {
-		return filepath.Join(dir, "deepsecret-uploads")
+		return filepath.Join(dir, fmt.Sprintf("deepsecret-uploads-%d", os.Getuid()))
 	}
 	return filepath.Join(configDir(), "uploads")
 }

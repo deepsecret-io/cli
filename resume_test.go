@@ -4,6 +4,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,7 +35,8 @@ func TestFindPendingUpload(t *testing.T) {
 }
 
 // DEEPSECRET_TMPDIR moves interrupted uploads with the other temporary
-// files; otherwise they live in the config folder.
+// files, into a folder named for the user since it may be shared;
+// otherwise they live in the config folder.
 func TestUploadsDir(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -43,7 +45,7 @@ func TestUploadsDir(t *testing.T) {
 		t.Fatalf("default: %s", got)
 	}
 	t.Setenv(sdk.TempDirEnv, "/big/disk")
-	if got := uploadsDir(); got != "/big/disk/deepsecret-uploads" {
+	if got := uploadsDir(); got != fmt.Sprintf("/big/disk/deepsecret-uploads-%d", os.Getuid()) {
 		t.Fatalf("with %s: %s", sdk.TempDirEnv, got)
 	}
 }
