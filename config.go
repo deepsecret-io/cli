@@ -14,6 +14,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
+
+	"github.com/deepsecret-io/sdk"
 )
 
 // Config stored at ~/.deepsecret/config.json
@@ -87,7 +89,36 @@ func saveToken(token, email, expiresAt string) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal token: %w", err)
 	}
-	return os.WriteFile(tokenPath(), data, 0600)
+	// Write a temporary file (0600) and rename it over the token, so another
+	// run reading the token never sees half of one.
+	tmp, err := os.CreateTemp(configDir(), "token-*.json")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), tokenPath())
+}
+
+// saveRefreshedToken stores a session token the SDK refreshed, keeping the
+// email on record. The server revoked the previous token.
+func saveRefreshedToken(token string, expiresAt time.Time) error {
+	email := ""
+	if tf, err := loadTokenFile(); err == nil {
+		email = tf.Email
+	}
+	if err := saveToken(token, email, expiresAt.UTC().Format(time.RFC3339)); err != nil {
+		dbgErr("auth", fmt.Errorf("save refreshed session: %w", err))
+		return err
+	}
+	dbg("auth", "session refreshed, expires %s", expiresAt.Local().Format("15:04:05"))
+	return nil
 }
 
 func loadToken() (string, error) {
@@ -158,7 +189,16 @@ func newAuthenticatedClient() (*Client, error) {
 		return nil, err
 	}
 	dbg("auth", "api_url=%s key_set=true", apiBaseURL)
-	return NewClient(apiBaseURL, key)
+	c, err := NewClient(apiBaseURL, key)
+	if err != nil {
+		return nil, err
+	}
+	// A login session (not an API key) is refreshed before its one-hour
+	// token expires; each new token is saved for the next command.
+	if apiKey == "" && strings.HasPrefix(key, "bearer:") {
+		c.SetSessionStore(sdk.SessionStore{Load: loadToken, Save: saveRefreshedToken})
+	}
+	return c, nil
 }
 
 func newConfigCmd() *cobra.Command {

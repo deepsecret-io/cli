@@ -41,10 +41,11 @@ func newDecryptCmd() *cobra.Command {
 		identityFP      string
 		downloadThreads int
 		presignExpiry   int
+		local           bool
 	)
 
 	cmd := &cobra.Command{
-		Use:     "decrypt [secret-id]",
+		Use:     "decrypt [secret-id | --local file]",
 		Aliases: []string{"dec"},
 		Short:   "Decrypt a secret (alias: dec)",
 		Long: `Decrypt a secret. Smart output based on content type:
@@ -53,17 +54,44 @@ func newDecryptCmd() *cobra.Command {
     directory. Pass -d to override.
   - Key-value secrets: printed to stdout (or to -o <file>).
 
+Local files:
+  --local <file> decrypts a file written by "secret encrypt --local" instead
+  of a secret on the server. Only public keys are looked up: decrypting
+  checks that the sender named in the file registered the key that signed
+  it, then verifies and decrypts it on this machine.
+
 Examples:
   secret decrypt abc123-...                       # writes to ./<revision-id>/
   secret decrypt abc123-... -d ./out              # writes to ./out
-  secret decrypt abc123-... --revision rev-id-...`,
+  secret decrypt abc123-... --revision rev-id-...
+  secret decrypt --local db.env.cbor              # a file sent to you directly`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
+				if local {
+					return fmt.Errorf("provide the file to decrypt as argument")
+				}
 				return fmt.Errorf("provide a secret ID as argument")
 			}
 
-			secretID := args[0]
-			dbg("setup", "secret_id=%s", secretID)
+			secretID, localPath := args[0], ""
+			if local {
+				secretID, localPath = "", args[0]
+				for _, f := range []string{"revision", "threads", "presign-expiry"} {
+					if cmd.Flags().Changed(f) {
+						return fmt.Errorf("--%s applies to secrets on the server, not to --local", f)
+					}
+				}
+				info, err := os.Stat(localPath)
+				if err != nil {
+					return err
+				}
+				if !info.Mode().IsRegular() {
+					return fmt.Errorf("%s is not a file", localPath)
+				}
+				dbg("setup", "local_file=%s", localPath)
+			} else {
+				dbg("setup", "secret_id=%s", secretID)
+			}
 			if revisionID != "" {
 				dbg("setup", "revision=%s", revisionID)
 			}
@@ -72,8 +100,10 @@ Examples:
 			}
 
 			// Validate secret ID format early
-			if _, err := uuid.Parse(secretID); err != nil {
-				return fmt.Errorf("invalid secret ID %q: expected UUID format", secretID)
+			if !local {
+				if _, err := uuid.Parse(secretID); err != nil {
+					return fmt.Errorf("invalid secret ID %q: expected UUID format", secretID)
+				}
 			}
 
 			if presignExpiry < 1 || presignExpiry > 30 {
@@ -116,6 +146,18 @@ Examples:
 			identitySource := "primary"
 			if identityFP != "" {
 				identitySource = "explicit (--identity)"
+			} else if local {
+				// The file lists the keys it was sealed for.
+				if rs, err := sdk.LocalFileRecipients(localPath); err == nil {
+					for _, r := range rs {
+						if matched := findLocalKeyByFingerprint(r.Fingerprint); matched != "" {
+							identityFP = matched
+							identitySource = "auto-selected from local keystore"
+							dbg("identity", "auto-selected key for recipient fingerprint=%s", crypto.ShortFingerprint(r.Fingerprint))
+							break
+						}
+					}
+				}
 			} else {
 				detail, derr := c.DescribeSecretFull(secretID)
 				actorID, aerr := c.ResolveActorID()
@@ -152,7 +194,7 @@ Examples:
 
 			// Print resolved configuration once, before any phase logs.
 			dbg("config", "presign-expiry=%dm", presignExpiry)
-			dbg("config", "download-threads=%s", threadCountLabel(downloadThreads, 4))
+			dbg("config", "download-threads=%s", threadCountLabel(downloadThreads))
 			dbg("config", "identity-source=%s", identitySource)
 			if identityFP != "" {
 				dbg("config", "identity=%s", crypto.ShortFingerprint(identityFP))
@@ -214,14 +256,22 @@ Examples:
 				}
 			}()
 
+			openLabel := "Downloading"
+			if local {
+				openLabel = "Checking the sender and reading " + filepath.Base(localPath)
+			}
 			steps := []step{
 				{
-					label:    "Downloading",
+					label:    openLabel,
 					transfer: downloadProgress,
 					action: func() (string, error) {
 						downloadProgress.startedAt = time.Now()
 						var err error
-						opened, err = c.OpenSecret(secretID, opts)
+						if local {
+							opened, err = c.OpenLocalFile(localPath, opts)
+						} else {
+							opened, err = c.OpenSecret(secretID, opts)
+						}
 						if err != nil {
 							dbgErr("decrypt", err)
 							return "", err
@@ -270,7 +320,11 @@ Examples:
 
 			// ── Summary ──
 			fmt.Fprintln(os.Stderr)
-			printKeyValue("Secret ID", secretID)
+			if local {
+				printKeyValue("File", localPath)
+			} else {
+				printKeyValue("Secret ID", secretID)
+			}
 			printKeyValue("Type", result.PayloadType)
 			switch {
 			case written != nil && written.Archived:
@@ -282,9 +336,15 @@ Examples:
 			if result.Compressed {
 				printKeyValue("Compression", strings.ToUpper(result.Compression))
 			}
-			printKeyValue("Sender", crypto.ShortFingerprint(result.SenderFingerprint))
+			if result.SenderEmail != "" {
+				printKeyValue("Sender", fmt.Sprintf("%s  %s%s%s (their registered key)", result.SenderEmail,
+					ansiDim, crypto.ShortFingerprint(result.SenderFingerprint), ansiReset))
+			} else {
+				printKeyValue("Sender", crypto.ShortFingerprint(result.SenderFingerprint))
+			}
 			// The recipient list is the one the sender signed; emails are
-			// the server's labels for those keys.
+			// the server's labels for those keys (the sender's, in a local
+			// file).
 			signedFor := make([]string, len(result.Recipients))
 			for i, r := range result.Recipients {
 				line := ansiDim + crypto.ShortFingerprint(r.Fingerprint) + ansiReset
@@ -317,8 +377,9 @@ Examples:
 	cmd.Flags().StringVar(&revisionID, "revision", "", "Decrypt a specific revision ID (default: latest)")
 	cmd.Flags().StringVarP(&identityFP, "identity", "i", "", "Use a specific local identity (fingerprint or prefix) instead of primary")
 	cmd.Flags().BoolVarP(&forceOverwrite, "force", "f", false, "Overwrite destination files if they exist")
-	cmd.Flags().IntVarP(&downloadThreads, "threads", "t", 0, "Parallel byte-range download threads (0=SDK default of 4, 1=disable parallelism, max=64). Larger files benefit from more threads on high-RTT or high-bandwidth links.")
+	cmd.Flags().IntVarP(&downloadThreads, "threads", "t", 0, "Parallel range downloads for large files (0 = adapt to the connection, 1 = serial, max 64)")
 	cmd.Flags().IntVar(&presignExpiry, "presign-expiry", 15, "Presigned download URL lifetime in minutes (allowed: 1-30, default: 15)")
+	cmd.Flags().BoolVar(&local, "local", false, "Decrypt a local file written by \"secret encrypt --local\" instead of a secret ID")
 
 	return cmd
 }

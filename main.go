@@ -69,6 +69,7 @@ func main() {
 		newDoctorCmd(),
 		newEncryptCmd(),
 		newDecryptCmd(),
+		newResumeCmd(),
 		newListCmd(),
 		newDescribeCmd(),
 		newDeleteCmd(),

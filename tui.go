@@ -85,12 +85,12 @@ func dbgErr(context string, err error) {
 	logErrorf(context, "%v", err)
 }
 
-// threadCountLabel renders a thread-count flag value for debug logs.
-// 0 means "use SDK default"; render that explicitly so the log doesn't
-// look like the user disabled parallelism.
-func threadCountLabel(v, sdkDefault int) string {
+// threadCountLabel renders a thread-count flag value for debug logs. 0
+// means the SDK adapts the count to the connection; say so, so the log
+// doesn't look like the user disabled parallelism.
+func threadCountLabel(v int) string {
 	if v <= 0 {
-		return fmt.Sprintf("default(%d)", sdkDefault)
+		return "adaptive"
 	}
 	return fmt.Sprintf("%d", v)
 }
