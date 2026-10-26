@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -64,5 +65,24 @@ func TestRecipientsSummary(t *testing.T) {
 		if got := recipientsSummary(c.in); got != c.want {
 			t.Errorf("%s: got %q, want %q", name, got, c.want)
 		}
+	}
+}
+
+// whoami shows the free trial, not just "inactive", when there is no
+// subscription.
+func TestSubscriptionStatus(t *testing.T) {
+	now := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+	future, past := "2026-11-02T12:00:00Z", "2026-10-20T12:00:00Z"
+	if got := subscriptionStatus("inactive", &future, now); !strings.HasPrefix(got, "Free trial, ends ") {
+		t.Errorf("in trial: %q", got)
+	}
+	if got := subscriptionStatus("inactive", &past, now); !strings.HasPrefix(got, "inactive, free trial ended ") {
+		t.Errorf("after trial: %q", got)
+	}
+	if got := subscriptionStatus("active", &future, now); got != "active" {
+		t.Errorf("subscribed: %q", got)
+	}
+	if got := subscriptionStatus("inactive", nil, now); got != "inactive" {
+		t.Errorf("no trial: %q", got)
 	}
 }

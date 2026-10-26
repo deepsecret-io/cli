@@ -6,9 +6,11 @@ package main
 import (
 	"fmt"
 	"os"
-	"github.com/deepsecret-io/sdk"
+	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/deepsecret-io/sdk"
 )
 
 func newWhoamiCmd() *cobra.Command {
@@ -73,7 +75,7 @@ func newWhoamiCmd() *cobra.Command {
 				tier = "None"
 			}
 			kv("Plan", tier)
-			kv("Status", actor.SubscriptionStatus)
+			kv("Status", subscriptionStatus(actor.SubscriptionStatus, actor.Subscription.TrialEndsAt, time.Now()))
 			if primaryFP != "" {
 				kv("Identity", primaryFP)
 			}
@@ -82,4 +84,21 @@ func newWhoamiCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// subscriptionStatus describes the subscription status for whoami. Without
+// a subscription it shows the free trial and when it ends, or when it
+// ended: the API reports "inactive" during a trial, which gives access.
+func subscriptionStatus(status string, trialEndsAt *string, now time.Time) string {
+	if status == "active" || trialEndsAt == nil {
+		return status
+	}
+	ends, err := time.Parse(time.RFC3339, *trialEndsAt)
+	if err != nil {
+		return status
+	}
+	if now.Before(ends) {
+		return "Free trial, ends " + ends.Local().Format("2 Jan 2006 15:04")
+	}
+	return status + ", free trial ended " + ends.Local().Format("2 Jan 2006")
 }

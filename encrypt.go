@@ -346,8 +346,13 @@ Examples:
 				},
 			}
 			if err := runPipeline("Encrypt & Send", []step{stepDef}, nil); err != nil {
-				if errors.Is(err, api.ErrConflict) && !revokeMissing {
-					fmt.Fprintf(os.Stderr, "  Tip: list everyone who should keep access with --to, or add --revoke-missing to revoke the people this send leaves out\n")
+				// A send under the name of an existing secret adds a revision
+				// to it. The name may have come from the input's file name,
+				// so say so, and how to send a new secret instead.
+				if errors.Is(err, api.ErrConflict) && !revokeMissing && strings.Contains(err.Error(), "leaves out") {
+					fmt.Fprintf(os.Stderr, "  Tip: you already have a secret named %q, and this send would add a revision to it.\n", opts.Name)
+					fmt.Fprintf(os.Stderr, "       To send a new secret instead, give it another name with -n.\n")
+					fmt.Fprintf(os.Stderr, "       To update %q, list everyone who should keep access with --to, or add --revoke-missing.\n", opts.Name)
 				}
 				return err
 			}
