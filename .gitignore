@@ -12,3 +12,6 @@ dist/
 .claude/
 cli
 ./dist/
+
+# Release upload settings (R2 keys) for task release-upload.
+.env
