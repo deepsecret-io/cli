@@ -9,7 +9,6 @@
 #
 # Examples:
 #   curl -fsSL https://get.deepsecret.io/install.sh | bash -s -- v0.1.0
-#   curl -fsSL https://get.deepsecret.io/install.sh | bash -s -- 592ef21
 #
 # Detects OS (macos/linux) and arch (arm64/x86_64), downloads the matching
 # archive from https://get.deepsecret.io/cli/<version>/, verifies SHA-256, and
@@ -28,6 +27,12 @@ VERSION="${1:-}"
 if [ -z "$VERSION" ]; then
   echo "error: version is required" >&2
   echo "usage: curl -fsSL https://get.deepsecret.io/install.sh | bash -s -- <version>" >&2
+  exit 1
+fi
+# Releases are vMAJOR.MINOR.PATCH, and the version goes into the download
+# URL, so nothing else is accepted.
+if ! printf '%s' "$VERSION" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+  echo "error: version must look like v0.1.0, got: $VERSION" >&2
   exit 1
 fi
 

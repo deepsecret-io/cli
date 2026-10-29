@@ -2,41 +2,73 @@
 # Copyright 2026 DeepSecret
 
 # CLI tasks. `task --list` shows them; run from cli/.
+#
+# Releases follow semver.org: vMAJOR.MINOR.PATCH, and while the major
+# version is 0 a breaking change bumps the minor version. To release:
+#   1. Publish the SDK release the CLI needs (in sdk/: task release
+#      VERSION=...), then GOWORK=off go get github.com/deepsecret-io/sdk@...
+#      and GOWORK=off go mod tidy, and commit and push.
+#   2. From a clean main that is pushed: task release-upload VERSION=v0.1.0.
+#      It refuses anything else, and tags the commit only once the upload
+#      succeeded.
 version: '3'
 
-# R2 settings for `release-upload` (R2_ACCOUNT_ID, R2_BUCKET,
-# R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, ...) may live in .env. The
-# upload script documents every variable and its default.
-dotenv: ['.env']
+# Tasks build with the SDK version go.mod requires, never a local ../sdk
+# through a go.work, so what they build and scan is what a release ships.
+# The one exception is `task build`, a dev build. Plain go commands still
+# use a go.work.
+env:
+  GOWORK: 'off'
 
 vars:
   BINARY: secret
   DIST: dist
-  VERSION:
-    sh: git describe --tags --always --dirty 2>/dev/null || echo dev
-  COMMIT:
-    sh: git rev-parse --short HEAD 2>/dev/null || echo none
-  DATE:
-    sh: date -u +%Y-%m-%dT%H:%M:%SZ
-  LDFLAGS: -s -w -X main.version={{.VERSION}} -X main.commit={{.COMMIT}} -X main.date={{.DATE}}
+  SDK: github.com/deepsecret-io/sdk
+  # A release version, vMAJOR.MINOR.PATCH (semver.org). Builds outside
+  # `task release` say "dev".
+  SEMVER: '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
   # os/arch:archive-label
   PLATFORMS: darwin/arm64:macos-arm64 darwin/amd64:macos-x86_64 linux/amd64:linux-x86_64 linux/arm64:linux-arm64
+  # Scanners for `task security`, pinned and checked against the Go
+  # checksum database. Dependabot does not see them; bump them by hand.
+  GOVULNCHECK: golang.org/x/vuln/cmd/govulncheck@v1.9.0
+  GOSEC: github.com/securego/gosec/v2/cmd/gosec@v2.30.0
+  OSV_SCANNER: github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.7.0
+  GITLEAKS: github.com/zricethezav/gitleaks/v8@v8.30.1
+  # Dependency licenses allowed without review. Reviewed exceptions, each
+  # with a reason, live in licenses.toml.
+  LICENSES: Apache-2.0,BSD-2-Clause,BSD-3-Clause,0BSD,MIT,ISC
+  REPORTS: reports
 
 tasks:
   build:
-    desc: Build the CLI for this machine into dist/
-    cmd: go build -trimpath -ldflags "{{.LDFLAGS}}" -o {{.DIST}}/{{.BINARY}} .
+    desc: Build a dev CLI for this machine into dist/, with the SDK from ./go.work when there is one
+    # A dev build may use the local SDK that ./go.work points at; its
+    # --version then names where the SDK came from. A release never does:
+    # release-check refuses a set GOWORK.
+    env:
+      GOWORK:
+        sh: if [ -f go.work ]; then echo "$(pwd)/go.work"; else echo off; fi
+    cmd: go build -trimpath -ldflags "-s -w" -o {{.DIST}}/{{.BINARY}} .
 
   release:
-    desc: Cross-compile every platform into dist/*.tar.gz plus SHA256SUMS
+    desc: 'Check, pass the security gate, then cross-compile VERSION for every platform into dist/*.tar.gz plus SHA256SUMS: task release VERSION=v0.1.0'
+    # VERSION reaches the shell as an environment variable, never as
+    # command text.
+    requires:
+      vars: [VERSION]
+    env:
+      VERSION: '{{.VERSION}}'
     cmds:
+      - task: release-check
+      - task: security
       - rm -rf {{.DIST}} && mkdir -p {{.DIST}}
       - |
         for p in {{.PLATFORMS}}; do
           target="${p%%:*}"; label="${p##*:}"; stage="{{.DIST}}/{{.BINARY}}-$label"
           mkdir -p "$stage"
           CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" \
-            go build -trimpath -ldflags "{{.LDFLAGS}}" -o "$stage/{{.BINARY}}" .
+            go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "$stage/{{.BINARY}}" .
           cp LICENSE "$stage/"
           tar -C {{.DIST}} -czf "$stage.tar.gz" "{{.BINARY}}-$label"
           rm -rf "$stage"
@@ -45,10 +77,70 @@ tasks:
       - cd {{.DIST}} && shasum -a 256 {{.BINARY}}-*.tar.gz > SHA256SUMS
 
   release-upload:
-    desc: Release, then upload dist/ to R2 and update the landing page
-    deps: [release]
+    desc: 'Release VERSION, upload dist/ to R2, update the landing page, then tag HEAD and push the tag: task release-upload VERSION=v0.1.0'
+    # R2 settings (R2_ACCOUNT_ID, R2_BUCKET, R2_ACCESS_KEY_ID,
+    # R2_SECRET_ACCESS_KEY, ...) may live in .env. They load for this task
+    # only, so the build and the scanners never see the keys. The upload
+    # script documents every variable and its default.
+    requires:
+      vars: [VERSION]
+    dotenv: ['.env']
     env:
       BINARY: '{{.BINARY}}'
       DIST: '{{.DIST}}'
       VERSION: '{{.VERSION}}'
-    cmd: ./scripts/release-upload.sh
+    cmds:
+      - task: release
+      - ./scripts/release-upload.sh
+      - git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null || git tag -a "$VERSION" -m "secret $VERSION"
+      - git push origin "refs/tags/$VERSION"
+
+  release-check:
+    internal: true
+    env:
+      VERSION: '{{.VERSION}}'
+    preconditions:
+      - sh: printf '%s' "$VERSION" | grep -Eq '{{.SEMVER}}'
+        msg: 'VERSION must be vMAJOR.MINOR.PATCH, like v0.1.0'
+      - sh: test "$(go env GOWORK)" = off
+        msg: 'GOWORK is set, so the build would not use the SDK version go.mod requires: unset it'
+      - sh: '! grep -Eq "^[[:space:]]*replace([[:space:]]|\()" go.mod'
+        msg: 'go.mod replaces a module: a release builds only from published module versions'
+      - sh: awk '$1 == "{{.SDK}}" { print $2 }' go.mod | grep -Eq '{{.SEMVER}}'
+        msg: 'go.mod must require an SDK release (vMAJOR.MINOR.PATCH), not a pseudo-version'
+      - sh: go list -deps ./... >/dev/null 2>&1
+        msg: 'the modules go.mod requires do not resolve (go list -deps ./... says why): publish the SDK release, then GOWORK=off go mod tidy'
+      - sh: test -z "$(git status --porcelain)"
+        msg: 'the tree has uncommitted or untracked files: a release is a commit'
+      - sh: git fetch --quiet origin main && git merge-base --is-ancestor HEAD origin/main
+        msg: 'HEAD is not on origin/main: push it first'
+      - sh: test -z "$(git ls-remote --tags origin "refs/tags/$VERSION")"
+        msg: 'this version is already published'
+      - sh: '! git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null || test "$(git rev-list -n 1 "refs/tags/$VERSION")" = "$(git rev-parse HEAD)"'
+        msg: 'a local tag for this version points at another commit'
+      - sh: |
+          last=$(git tag --list 'v*' | grep -E '{{.SEMVER}}' | grep -vxF "$VERSION" | sort -V | tail -n 1)
+          test -z "$last" || test "$(printf '%s\n%s\n' "$last" "$VERSION" | sort -V | tail -n 1)" = "$VERSION"
+        msg: 'VERSION is not newer than the last release'
+
+  security:
+    desc: 'Release gate: known vulnerabilities, gosec, disallowed licenses and secrets in git history (reports in reports/)'
+    # The four scans run in parallel; each one finishes and keeps its report
+    # even when another fails, and the task fails if any of them did.
+    deps:
+      - task: scan
+        vars: {NAME: govulncheck, CMD: 'go run {{.GOVULNCHECK}} ./...'}
+      - task: scan
+        vars: {NAME: gosec, CMD: 'go run {{.GOSEC}} -nosec-require-justification -nosec-require-rules ./...'}
+      - task: scan
+        vars: {NAME: licenses, CMD: 'go run {{.OSV_SCANNER}} scan source --config=licenses.toml --licenses={{.LICENSES}} .'}
+      - task: scan
+        vars: {NAME: gitleaks, CMD: 'go run {{.GITLEAKS}} git --no-banner --no-color --redact --verbose --log-opts=--all .'}
+
+  scan:
+    internal: true
+    # Runs CMD into REPORTS/NAME.txt and prints the report only on failure.
+    cmds:
+      - mkdir -p {{.REPORTS}}
+      - '{{.CMD}} > {{.REPORTS}}/{{.NAME}}.txt 2>&1 || { cat {{.REPORTS}}/{{.NAME}}.txt; echo "{{.NAME}}: FAILED, report in {{.REPORTS}}/{{.NAME}}.txt"; exit 1; }'
+      - 'echo "{{.NAME}}: passed"'

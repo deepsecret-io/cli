@@ -62,11 +62,34 @@ func saveConfig(c *Config) error {
 	if err := os.MkdirAll(configDir(), 0700); err != nil {
 		return err
 	}
+	// #nosec G117 -- the API key is what the config file holds; writePrivateFile keeps it 0600.
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal config: %w", err)
 	}
-	return os.WriteFile(configPath(), data, 0600)
+	return writePrivateFile(configPath(), data)
+}
+
+// writePrivateFile replaces path with data through a new 0600 file renamed
+// over it, so the file is private even when an older one was not, a link
+// at path is replaced rather than followed, and a reader never sees half
+// of it.
+func writePrivateFile(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*")
+	if err != nil {
+		return err
+	}
+	// After the rename this finds nothing; after a failure it removes the
+	// temporary file.
+	defer func() { _ = os.Remove(tmp.Name()) }()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close() // the write error is returned and the file removed.
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
 }
 
 // TokenFile stored at ~/.deepsecret/token.json
@@ -89,21 +112,7 @@ func saveToken(token, email, expiresAt string) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal token: %w", err)
 	}
-	// Write a temporary file (0600) and rename it over the token, so another
-	// run reading the token never sees half of one.
-	tmp, err := os.CreateTemp(configDir(), "token-*.json")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), tokenPath())
+	return writePrivateFile(tokenPath(), data)
 }
 
 // saveRefreshedToken stores a session token the SDK refreshed, keeping the
@@ -134,7 +143,7 @@ func loadToken() (string, error) {
 		return "", fmt.Errorf("empty token")
 	}
 	token := tf.Token
-	// Check expiry — if parse fails, treat as expired (fail closed)
+	// Check expiry: if it does not parse, treat it as expired (fail closed)
 	if tf.ExpiresAt != "" {
 		exp, err := time.Parse(time.RFC3339, tf.ExpiresAt)
 		if err != nil {
@@ -177,7 +186,7 @@ func resolveAuth() (string, error) {
 	if cfg, err := loadConfig(); err == nil && cfg.APIKey != "" {
 		return cfg.APIKey, nil
 	}
-	return "", fmt.Errorf("not authenticated. Run: secret login\n  Or set an API key: secret config --api-key <key>")
+	return "", fmt.Errorf("not authenticated. Run: secret login\n  Or save an API key: secret config --save-api-key --api-key-stdin")
 }
 
 // newAuthenticatedClient creates an SDK client pointed at the compiled-in API
@@ -193,8 +202,8 @@ func newAuthenticatedClient() (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	// A login session (not an API key) is refreshed before its one-hour
-	// token expires; each new token is saved for the next command.
+	// A login session (not an API key) renews its token while in use; each
+	// new token is saved for the next command.
 	if apiKey == "" && strings.HasPrefix(key, "bearer:") {
 		c.SetSessionStore(sdk.SessionStore{Load: loadToken, Save: saveRefreshedToken})
 	}
@@ -202,20 +211,31 @@ func newAuthenticatedClient() (*Client, error) {
 }
 
 func newConfigCmd() *cobra.Command {
-	var setKey string
+	var saveKey bool
 
 	cmd := &cobra.Command{
 		Use:     "config",
 		Aliases: []string{"conf"},
 		Short:   "Configure CLI settings (alias: conf)",
+		Long: `Show the CLI's settings, or save an API key for later commands.
+
+--save-api-key saves the key given with the global key options. Pass it on
+stdin or in a file so it stays out of the process list and shell history.`,
+		Example: `  secret config
+  secret config --save-api-key --api-key-stdin < key.txt
+  secret config --save-api-key --api-key-file ./key.txt`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, _ := loadConfig()
 			if cfg == nil {
 				cfg = &Config{}
 			}
 
-			if setKey != "" {
-				cfg.APIKey = setKey
+			if saveKey {
+				if apiKey == "" {
+					return fmt.Errorf("--save-api-key needs a key: give it with --api-key-stdin, --api-key-file, --api-key or DS_API_KEY")
+				}
+				cfg.APIKey = apiKey
 				if err := saveConfig(cfg); err != nil {
 					return fmt.Errorf("failed to save config: %w", err)
 				}
@@ -234,7 +254,8 @@ func newConfigCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&setKey, "api-key", "", "Set API key")
+	cmd.Flags().BoolVar(&saveKey, "save-api-key", false, "Save the API key given with --api-key-stdin, --api-key-file, --api-key or DS_API_KEY")
+	setGroup(cmd.Flags(), groupOptions, "save-api-key")
 
 	return cmd
 }

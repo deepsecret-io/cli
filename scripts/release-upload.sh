@@ -11,7 +11,7 @@
 # Required env vars:
 #   BINARY                CLI binary name; matches the Taskfile's BINARY
 #   DIST                  Path to the dist directory containing the archives
-#   VERSION               Release version string (e.g. v1.2.3 or git-describe)
+#   VERSION               Release version, vMAJOR.MINOR.PATCH (e.g. v1.2.3)
 #   R2_ACCOUNT_ID         Cloudflare R2 account ID
 #   R2_BUCKET             Target bucket name
 #   R2_ACCESS_KEY_ID      R2 access key (falls back to AWS_ACCESS_KEY_ID)
@@ -27,7 +27,6 @@
 #                         default ../landing/index.html (relative to this
 #                         script's invocation directory)
 #   SKIP_LANDING_UPDATE   Set to 1 to upload without touching the landing page
-#   ALLOW_DIRTY           Set to 1 to permit uploading a *-dirty VERSION
 set -euo pipefail
 
 BINARY="${BINARY:-secret}"
@@ -62,15 +61,12 @@ if [ -n "$missing" ]; then
   exit 1
 fi
 
-case "$VERSION" in
-  *-dirty)
-    if [ "${ALLOW_DIRTY:-0}" != "1" ]; then
-      echo "release-upload: refusing to upload dirty version $VERSION; commit or stash first, or pass ALLOW_DIRTY=1" >&2
-      exit 1
-    fi
-    echo "release-upload: WARNING: uploading dirty version $VERSION (ALLOW_DIRTY=1)" >&2
-    ;;
-esac
+# Only a release version names a published build; `task release` checks
+# the rest (a clean tree at a pushed commit, the SDK release it uses).
+if ! printf '%s' "$VERSION" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+  echo "release-upload: VERSION must be vMAJOR.MINOR.PATCH, like v0.1.0" >&2
+  exit 1
+fi
 
 echo "uploading $VERSION to $public_base/$prefix/ ..."
 # R2 is S3-compatible via --endpoint-url. --checksum-algorithm CRC32 keeps

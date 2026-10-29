@@ -4,16 +4,20 @@
 package main
 
 import (
+	"crypto/rand"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
 	sdk "github.com/deepsecret-io/sdk"
+	"github.com/deepsecret-io/sdk/api"
 	"github.com/deepsecret-io/sdk/crypto"
 )
 
@@ -25,13 +29,65 @@ func plural(n int) string {
 	return "s"
 }
 
-// forceOverwrite is wired from the --force flag in newDecryptCmd. When false,
+// forceOverwrite is wired from the --overwrite flag in newDecryptCmd. When false,
 // existing destination files cause writes to fail (O_EXCL); when true, they
-// are truncated. On Unix, symlinks at the destination leaf are also rejected
-// (O_NOFOLLOW) so an attacker who can plant a symlink in outputDir cannot
-// redirect plaintext writes; see decrypt_unix.go / decrypt_windows.go for the
-// platform-specific safeWriteFile.
+// are replaced by a new file renamed over them (safeWriteFile). On Unix, a
+// symlink at a created file's leaf is rejected (O_NOFOLLOW), so an attacker
+// who can plant one in outputDir cannot redirect plaintext writes; see
+// decrypt_unix.go / decrypt_windows.go for the platform-specific
+// createExclusive.
 var forceOverwrite bool
+
+// safeWriteFile writes decrypted data to dest, created with mode (the umask
+// applies) by the platform's createExclusive. Without force it refuses a
+// dest that exists. With force it writes a new file beside dest and renames
+// it over dest once complete, so dest gets mode instead of keeping an old
+// file's, a link at dest is replaced rather than written through, and a
+// reader never sees half a file.
+func safeWriteFile(dest string, data []byte, mode os.FileMode, force bool) error {
+	if !force {
+		f, err := createExclusive(dest, mode)
+		if err != nil {
+			if os.IsExist(err) {
+				return fmt.Errorf("refusing to overwrite %q (use --overwrite)", dest)
+			}
+			return fmt.Errorf("open %s: %w", dest, err)
+		}
+		return writeAndClose(f, dest, data)
+	}
+	tmp := filepath.Join(filepath.Dir(dest), ".deepsecret-"+rand.Text()+".partial")
+	f, err := createExclusive(tmp, mode)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", tmp, err)
+	}
+	if err := writeAndClose(f, tmp, data); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, dest); err != nil {
+		if rmErr := os.Remove(tmp); rmErr != nil {
+			return fmt.Errorf("replace %s: %w (the decrypted %s is left behind: %v)", dest, err, tmp, rmErr)
+		}
+		return fmt.Errorf("replace %s: %w", dest, err)
+	}
+	return nil
+}
+
+// writeAndClose writes data to f, opened at dest, and closes it. On a
+// failure it removes dest, so no partly written plaintext stays behind,
+// and says so when the removal fails too.
+func writeAndClose(f *os.File, dest string, data []byte) error {
+	_, err := f.Write(data)
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		return nil
+	}
+	if rmErr := os.Remove(dest); rmErr != nil {
+		return fmt.Errorf("write %s: %w (the partly written file is left behind: %v)", dest, err, rmErr)
+	}
+	return fmt.Errorf("write %s: %w", dest, err)
+}
 
 func newDecryptCmd() *cobra.Command {
 	var (
@@ -45,42 +101,42 @@ func newDecryptCmd() *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:     "decrypt [secret-id | --local file]",
+		Use:     "decrypt <secret-id> | decrypt --local <file>",
 		Aliases: []string{"dec"},
 		Short:   "Decrypt a secret (alias: dec)",
-		Long: `Decrypt a secret. Smart output based on content type:
-  - File secrets: written to a directory named after the revision UUID by
-    default, so an unintended decrypt never clobbers files in the current
-    directory. Pass -d to override.
-  - Key-value secrets: printed to stdout (or to -o <file>).
+		Long: `Decrypt a secret. Where the output goes depends on what it holds:
+  - Files are written to a directory named after the revision ID by default,
+    so a decrypt never writes over files in the current directory. --dir
+    chooses another one.
+  - A message or key-value data is printed to stdout, or written to the
+    file --output names.
 
-Local files:
-  --local <file> decrypts a file written by "secret encrypt --local" instead
-  of a secret on the server. Only public keys are looked up: decrypting
-  checks that the sender named in the file registered the key that signed
-  it, then verifies and decrypts it on this machine.
+--local decrypts a file written by "secret encrypt --local" instead of a
+secret on the server. Only public keys are looked up: it checks that the
+sender named in the file registered the key that signed it, then verifies
+and decrypts it on this machine.
 
-Examples:
-  secret decrypt abc123-...                       # writes to ./<revision-id>/
-  secret decrypt abc123-... -d ./out              # writes to ./out
-  secret decrypt abc123-... --revision rev-id-...
-  secret decrypt --local db.env.cbor              # a file sent to you directly`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) == 0 {
-				if local {
-					return fmt.Errorf("provide the file to decrypt as argument")
-				}
-				return fmt.Errorf("provide a secret ID as argument")
+Large secrets download in parallel ranges, adapting the connections to the
+link. --progress shows each connection as it goes, and --debug the transfer
+plan and every change to it.`,
+		Example: `  secret decrypt 3f2a9c1e-...                    # files go to ./<revision-id>/
+  secret decrypt 3f2a9c1e-... --dir ./out
+  secret decrypt 3f2a9c1e-... -o db.env          # a message or data, to a file
+  secret decrypt 3f2a9c1e-... -r 7b1d...         # a specific revision
+  secret decrypt --local db.env.cbor             # a file sent to you directly`,
+		Args: func(cmd *cobra.Command, args []string) error {
+			if err := cobra.ExactArgs(1)(cmd, args); err != nil {
+				return err
 			}
-
+			if local {
+				return nil
+			}
+			return checkIDs(args, "secret ID")
+		},
+		RunE: func(_ *cobra.Command, args []string) error {
 			secretID, localPath := args[0], ""
 			if local {
 				secretID, localPath = "", args[0]
-				for _, f := range []string{"revision", "threads", "presign-expiry"} {
-					if cmd.Flags().Changed(f) {
-						return fmt.Errorf("--%s applies to secrets on the server, not to --local", f)
-					}
-				}
 				info, err := os.Stat(localPath)
 				if err != nil {
 					return err
@@ -99,36 +155,22 @@ Examples:
 				dbg("setup", "output_dir=%s", outputDir)
 			}
 
-			// Validate secret ID format early
-			if !local {
-				if _, err := uuid.Parse(secretID); err != nil {
-					return fmt.Errorf("invalid secret ID %q: expected UUID format", secretID)
-				}
-			}
-
-			if presignExpiry < 1 || presignExpiry > 30 {
-				return fmt.Errorf("--presign-expiry must be between 1 and 30 minutes (got %d)", presignExpiry)
-			}
-
-			// Validate an explicit -d up front. The empty default is resolved
+			// Validate an explicit --dir up front. The empty default is resolved
 			// later to the revision UUID once the SDK has fetched the secret;
 			// we cannot create that directory now because we don't know the
 			// revision ID yet.
 			if outputDir != "" {
 				if info, err := os.Stat(outputDir); err != nil {
-					if err := os.MkdirAll(outputDir, 0755); err != nil {
+					if err := os.MkdirAll(outputDir, 0o700); err != nil {
 						return fmt.Errorf("failed to create output directory %q: %w", outputDir, err)
 					}
 				} else if !info.IsDir() {
-					return fmt.Errorf("output path %q is not a directory", outputDir)
+					return fmt.Errorf("--dir %s is not a directory", outputDir)
 				}
 			}
 			if outputFile != "" {
-				dir := filepath.Dir(outputFile)
-				if dir != "." && dir != "" {
-					if _, err := os.Stat(dir); err != nil {
-						return fmt.Errorf("output directory %q for --output does not exist", dir)
-					}
+				if err := checkOutputFile("output", outputFile); err != nil {
+					return err
 				}
 			}
 
@@ -193,8 +235,10 @@ Examples:
 			}
 
 			// Print resolved configuration once, before any phase logs.
-			dbg("config", "presign-expiry=%dm", presignExpiry)
-			dbg("config", "download-threads=%s", threadCountLabel(downloadThreads))
+			if !local {
+				dbg("config", "presign-expiry=%dm", presignExpiry)
+				dbg("config", "download-threads=%s", threadCountLabel(downloadThreads))
+			}
 			dbg("config", "identity-source=%s", identitySource)
 			if identityFP != "" {
 				dbg("config", "identity=%s", crypto.ShortFingerprint(identityFP))
@@ -240,11 +284,21 @@ Examples:
 				OnDebug:              func(step, msg string) { dbg(step, "%s", msg) },
 			}
 
-			// Download progress callback
-			downloadProgress := &transferProgress{}
-			opts.OnDownloadProgress = func(transferred, total int64) {
-				downloadProgress.transferred.Store(transferred)
-				downloadProgress.total = total
+			// Live progress: each connection of the download, or reading
+			// a local file. A large download is kept until decrypted, so
+			// an interrupted one continues when run again.
+			progress := newDownloadProgress()
+			if local {
+				progress = newStageProgress("reading")
+				opts.OnDownloadProgress = progress.pre.set
+			} else {
+				opts.DownloadStatus = &progress.transfer
+				opts.ResumeDir = downloadsDir()
+			}
+			// Then each pass that verifies and decrypts it.
+			decryptProgress := newStageProgress("decrypting")
+			opts.OnDecryptProgress = func(stage sdk.DecryptStage, done, total int64) {
+				decryptProgress.pre.setStage(string(stage), done, total)
 			}
 
 			var opened *sdk.OpenedSecret
@@ -252,7 +306,7 @@ Examples:
 			var decrypted *sdk.DecryptedPayload
 			defer func() {
 				if opened != nil {
-					opened.Close()
+					_ = opened.Close() // removes the private temporary ciphertext once the command is done; the plaintext was already written or failed.
 				}
 			}()
 
@@ -262,10 +316,9 @@ Examples:
 			}
 			steps := []step{
 				{
-					label:    openLabel,
-					transfer: downloadProgress,
+					label: openLabel,
+					live:  progress,
 					action: func() (string, error) {
-						downloadProgress.startedAt = time.Now()
 						var err error
 						if local {
 							opened, err = c.OpenLocalFile(localPath, opts)
@@ -276,11 +329,16 @@ Examples:
 							dbgErr("decrypt", err)
 							return "", err
 						}
-						return fmt.Sprintf("type=%s, size=%s", opened.Result.PayloadType, formatBytes(opened.Result.EncryptedSize)), nil
+						detail := fmt.Sprintf("type=%s, size=%s", opened.Result.PayloadType, formatBytes(opened.Result.EncryptedSize))
+						if kept := opened.Result.ResumedBytes; kept > 0 {
+							detail += fmt.Sprintf(", %s kept from an earlier download", formatBytes(kept))
+						}
+						return detail, nil
 					},
 				},
 				{
 					label: "Verifying and decrypting",
+					live:  decryptProgress,
 					action: func() (string, error) {
 						if opened.Result.PayloadType != "files" {
 							var err error
@@ -298,7 +356,7 @@ Examples:
 							// be a UUID and never a path.
 							id, err := uuid.Parse(opened.Result.RevisionID)
 							if err != nil || id.String() != opened.Result.RevisionID {
-								return "", fmt.Errorf("the revision ID %q is not a UUID; pass -d to choose the output directory", opened.Result.RevisionID)
+								return "", fmt.Errorf("the revision ID %q is not a UUID; pass --dir to choose the output directory", opened.Result.RevisionID)
 							}
 							outputDir = "./" + opened.Result.RevisionID
 						}
@@ -317,6 +375,10 @@ Examples:
 			}
 
 			if err := runPipeline("Decrypt", steps, nil); err != nil {
+				var interrupted *sdk.DownloadInterruptedError
+				if errors.As(err, &interrupted) {
+					printDownloadResumeHint(interrupted.Download)
+				}
 				return err
 			}
 			result := opened.Result
@@ -324,11 +386,11 @@ Examples:
 			// ── Summary ──
 			fmt.Fprintln(os.Stderr)
 			if local {
-				printKeyValue("File", localPath)
+				printKeyValue("File", safe(localPath))
 			} else {
 				printKeyValue("Secret ID", secretID)
 			}
-			printKeyValue("Type", result.PayloadType)
+			printKeyValue("Type", safe(result.PayloadType))
 			switch {
 			case written != nil && written.Archived:
 				printKeyValue("Files", fmt.Sprintf("%d (archived)", written.Extracted))
@@ -337,10 +399,10 @@ Examples:
 			}
 			printKeyValue("Size", formatBytes(result.EncryptedSize)+" encrypted")
 			if result.Compressed {
-				printKeyValue("Compression", strings.ToUpper(result.Compression))
+				printKeyValue("Compression", safe(strings.ToUpper(result.Compression)))
 			}
 			if result.SenderEmail != "" {
-				printKeyValue("Sender", fmt.Sprintf("%s  %s%s%s (their registered key)", result.SenderEmail,
+				printKeyValue("Sender", fmt.Sprintf("%s  %s%s%s (their registered key)", safe(result.SenderEmail),
 					ansiDim, crypto.ShortFingerprint(result.SenderFingerprint), ansiReset))
 			} else {
 				printKeyValue("Sender", crypto.ShortFingerprint(result.SenderFingerprint))
@@ -352,7 +414,7 @@ Examples:
 			for i, r := range result.Recipients {
 				line := ansiDim + crypto.ShortFingerprint(r.Fingerprint) + ansiReset
 				if r.Email != "" {
-					line = r.Email + "  " + line
+					line = safe(r.Email) + "  " + line
 				}
 				if r.Fingerprint == result.RecipientFingerprint {
 					line += " (you)"
@@ -360,10 +422,10 @@ Examples:
 				signedFor[i] = line
 			}
 			printKeyValues("Recipient"+plural(len(signedFor)), signedFor)
-			printKeyValue("Protocol", fmt.Sprintf("v%s, %s", result.ProtocolVersion, result.CipherSuite))
+			printKeyValue("Protocol", safe(fmt.Sprintf("v%s, %s", result.ProtocolVersion, result.CipherSuite)))
 			printKeyValue("Payload Digest", result.PayloadDigest[:16]+" (SHA-256, signed by the sender)")
 			if written != nil {
-				printKeyValue("Output", outputDir)
+				printKeyValue("Output", safe(outputDir))
 			}
 			fmt.Fprintln(os.Stderr)
 
@@ -375,15 +437,26 @@ Examples:
 		},
 	}
 
-	cmd.Flags().StringVarP(&outputDir, "dir", "d", "", "Output directory for file secrets (default: ./<revision-id>)")
-	cmd.Flags().StringVarP(&outputFile, "output", "o", "", "Write KV output to file instead of stdout")
-	cmd.Flags().StringVar(&revisionID, "revision", "", "Decrypt a specific revision ID (default: latest)")
-	cmd.Flags().StringVarP(&identityFP, "identity", "i", "", "Use a specific local identity (fingerprint or prefix) instead of primary")
-	cmd.Flags().BoolVarP(&forceOverwrite, "force", "f", false, "Overwrite destination files if they exist")
-	cmd.Flags().IntVarP(&downloadThreads, "threads", "t", 0, "Parallel range downloads for large files (0 = adapt to the connection, 1 = serial, max 64)")
-	cmd.Flags().IntVar(&presignExpiry, "presign-expiry", 15, "Presigned download URL lifetime in minutes (allowed: 1-30, default: 15)")
-	cmd.Flags().BoolVar(&local, "local", false, "Decrypt a local file written by \"secret encrypt --local\" instead of a secret ID")
+	f := cmd.Flags()
+	f.BoolVar(&local, "local", false, "The argument is a file written by \"secret encrypt --local\", not a secret ID")
+	f.VarP(&uuidFlag{&revisionID}, "revision", "r", "Decrypt this revision `id` instead of the latest")
+	setGroup(f, groupInput, "local", "revision")
 
+	f.StringVar(&outputDir, "dir", "", "Output `directory` for files (default: ./<revision-id>)")
+	f.StringVarP(&outputFile, "output", "o", "", "Output `file` for a message or key-value data (default: stdout)")
+	f.BoolVar(&forceOverwrite, "overwrite", false, "Replace existing files at the destination")
+	setGroup(f, groupOutput, "dir", "output", "overwrite")
+
+	f.VarP(&fingerprintFlag{&identityFP}, "identity", "i", "Decrypt with this local identity (`fingerprint` or a prefix of 16+ characters) instead of picking one")
+	setGroup(f, groupIdentity, "identity")
+
+	f.Var(newIntRange(&downloadThreads, 0, 0, api.MaxDownloadConcurrency, " (0 adapts to the connection, 1 is one at a time)"), "threads", "Parallel range downloads for large secrets: 0 adapts to the connection, up to 64")
+	f.Var(newMinutes(&presignExpiry, 15, 1, 30), "presign-expiry", "Lifetime of the download's presigned URL before it is renewed: 1m to 30m")
+	setGroup(f, groupPerformance, "threads", "presign-expiry")
+
+	for _, serverOnly := range []string{"revision", "threads", "presign-expiry"} {
+		cmd.MarkFlagsMutuallyExclusive("local", serverOnly)
+	}
 	return cmd
 }
 
@@ -399,13 +472,13 @@ func printWrittenFiles(w *sdk.WriteResult, outputDir string) {
 	sizes := make([]string, len(w.Files))
 	for i, f := range w.Files {
 		sizes[i] = formatBytes(f.Size)
-		maxName = max(maxName, len(f.Path))
+		maxName = max(maxName, len(safe(f.Path)))
 		maxSize = max(maxSize, len(sizes[i]))
 	}
 	for i, f := range w.Files {
 		fmt.Fprintf(os.Stderr, "  %s✓%s %-*s  %s%*s%s  %ssha256:%s%s\n",
 			ansiGreen, ansiReset,
-			maxName, f.Path,
+			maxName, safe(f.Path),
 			ansiDim, maxSize, sizes[i], ansiReset,
 			ansiDim, f.SHA256[:16], ansiReset)
 	}
@@ -429,7 +502,7 @@ func outputDecrypted(d *sdk.DecryptedPayload, outputFile string) error {
 			}
 			printSuccess(fmt.Sprintf("Decrypted %d data entries to %s", len(d.Entries), outputFile))
 		} else {
-			fmt.Print(buf.String())
+			return writeStdout([]byte(buf.String()))
 		}
 
 	case "message":
@@ -439,7 +512,7 @@ func outputDecrypted(d *sdk.DecryptedPayload, outputFile string) error {
 			}
 			printSuccess(fmt.Sprintf("Decrypted message to %s (%s)", outputFile, formatBytes(int64(len(d.Message)))))
 		} else {
-			fmt.Print(d.Message)
+			return writeStdout([]byte(d.Message))
 		}
 
 	default:
@@ -450,8 +523,62 @@ func outputDecrypted(d *sdk.DecryptedPayload, outputFile string) error {
 			}
 			printSuccess(fmt.Sprintf("Decrypted to %s (%d bytes)", outputFile, len(d.Raw)))
 		} else {
-			os.Stdout.Write(d.Raw)
+			return writeStdout(d.Raw)
 		}
 	}
 	return nil
+}
+
+// writeStdout prints decrypted content. On a terminal, control characters
+// other than newline and tab are shown escaped, like \x1b, so content from
+// the sender cannot send the terminal commands or rewrite what is on
+// screen; a notice says so. Redirected to a file or a pipe, the bytes are
+// written as they are. A failed write is returned, so a decrypt redirected
+// to a full disk fails instead of reporting success with part of the
+// secret.
+func writeStdout(b []byte) error {
+	if !stdoutIsTerminal {
+		if _, err := os.Stdout.Write(b); err != nil {
+			return fmt.Errorf("write to stdout: %w", err)
+		}
+		return nil
+	}
+	out, escaped := escapeControls(b)
+	if _, err := os.Stdout.Write(out); err != nil {
+		return fmt.Errorf("write to stdout: %w", err)
+	}
+	if escaped > 0 {
+		fmt.Fprintln(os.Stderr)
+		printDim(fmt.Sprintf("%d control character(s) shown escaped. To get the exact bytes, use -o <file> or a pipe.", escaped))
+	}
+	return nil
+}
+
+// escapeControls writes control characters, invisible formatting marks
+// and invalid UTF-8 in b as escapes, keeping newlines and tabs, and counts
+// what it escaped.
+func escapeControls(b []byte) ([]byte, int) {
+	var out []byte
+	escaped := 0
+	for len(b) > 0 {
+		r, n := utf8.DecodeRune(b)
+		switch {
+		case r == utf8.RuneError && n <= 1:
+			out = fmt.Appendf(out, "\\x%02x", b[0])
+			escaped++
+		case r == '\n' || r == '\t':
+			out = append(out, b[:n]...)
+		case unicode.IsControl(r) || (unicode.Is(unicode.Cf, r) && r != '\u200d'):
+			if r < 0x100 {
+				out = fmt.Appendf(out, "\\x%02x", r)
+			} else {
+				out = fmt.Appendf(out, "\\u%04x", r)
+			}
+			escaped++
+		default:
+			out = append(out, b[:n]...)
+		}
+		b = b[n:]
+	}
+	return out, escaped
 }

@@ -17,6 +17,7 @@ func newWhoamiCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "whoami",
 		Short: "Show the authenticated actor",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dbg("whoami", "fetching account info")
 			c, err := newAuthenticatedClient()
@@ -62,7 +63,7 @@ func newWhoamiCmd() *cobra.Command {
 			}
 
 			fmt.Fprintln(os.Stderr)
-			kv := func(k, v string) { fmt.Fprintf(os.Stderr, "  %s%-14s%s %s\n", ansiDim, k, ansiReset, v) }
+			kv := func(k, v string) { fmt.Fprintf(os.Stderr, "  %s%-14s%s %s\n", ansiDim, k, ansiReset, safe(v)) }
 			kv("ID", actor.ID)
 			kv("Email", actor.Email)
 			name := actor.Name

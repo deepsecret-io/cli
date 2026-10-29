@@ -6,12 +6,13 @@ package main
 import (
 	"fmt"
 	"os"
-	"github.com/deepsecret-io/sdk"
 	"sort"
 	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
+
+	"github.com/deepsecret-io/sdk"
 )
 
 func newGroupsCmd() *cobra.Command {
@@ -28,7 +29,7 @@ func newGroupsDescribeCmd() *cobra.Command {
 		Use:     "describe <name>",
 		Aliases: []string{"desc", "show"},
 		Short:   "Show a group's members (alias: desc, show)",
-		Args:    cobra.ExactArgs(1),
+		Args:    groupNameArg,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return describeGroup(args[0])
 		},
@@ -78,7 +79,7 @@ func describeGroup(name string) error {
 
 	printHeader(fmt.Sprintf("Group: %s", matched.Name))
 	fmt.Fprintln(os.Stderr)
-	printKeyValue("ID", matched.ID)
+	printKeyValue("ID", safe(matched.ID))
 	printKeyValue("Members", fmt.Sprintf("%d", len(matched.Members)))
 	fmt.Fprintln(os.Stderr)
 
@@ -91,21 +92,24 @@ func describeGroup(name string) error {
 	copy(members, matched.Members)
 	sort.Slice(members, func(i, j int) bool { return members[i].Email < members[j].Email })
 
+	// Rows wait in the tabwriter until Flush, which returns any write error.
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintf(w, "  EMAIL\tNAME\tROLE\n")
-	fmt.Fprintf(w, "  -----\t----\t----\n")
+	_, _ = fmt.Fprintf(w, "  EMAIL\tNAME\tROLE\n")
+	_, _ = fmt.Fprintf(w, "  -----\t----\t----\n")
 	for _, m := range members {
 		fullName := strings.TrimSpace(m.FirstName + " " + m.LastName)
 		if fullName == "" {
-			fullName = "—"
+			fullName = "-"
 		}
 		role := m.Role
 		if role == "" {
-			role = "—"
+			role = "-"
 		}
-		fmt.Fprintf(w, "  %s\t%s\t%s\n", m.Email, fullName, role)
+		_, _ = fmt.Fprintf(w, "  %s\t%s\t%s\n", safe(m.Email), safe(fullName), safe(role))
 	}
-	w.Flush()
+	if err := w.Flush(); err != nil {
+		return fmt.Errorf("write to stdout: %w", err)
+	}
 	fmt.Fprintln(os.Stderr)
 	return nil
 }
@@ -115,6 +119,7 @@ func newGroupsListCmd() *cobra.Command {
 		Use:     "list",
 		Aliases: []string{"ls"},
 		Short:   "List groups in your organization (alias: ls)",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := newAuthenticatedClient()
 			if err != nil {
@@ -144,15 +149,29 @@ func newGroupsListCmd() *cobra.Command {
 			printHeader(fmt.Sprintf("Groups (%d)", len(groups)))
 			fmt.Fprintln(os.Stderr)
 
+			// Rows wait in the tabwriter until Flush, which returns any write error.
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintf(w, "  NAME\tMEMBERS\tID\n")
-			fmt.Fprintf(w, "  ----\t-------\t--\n")
+			_, _ = fmt.Fprintf(w, "  NAME\tMEMBERS\tID\n")
+			_, _ = fmt.Fprintf(w, "  ----\t-------\t--\n")
 			for _, g := range groups {
-				fmt.Fprintf(w, "  %s\t%d\t%s\n", g.Name, len(g.Members), g.ID)
+				_, _ = fmt.Fprintf(w, "  %s\t%d\t%s\n", safe(g.Name), len(g.Members), safe(g.ID))
 			}
-			w.Flush()
+			if err := w.Flush(); err != nil {
+				return fmt.Errorf("write to stdout: %w", err)
+			}
 			fmt.Fprintln(os.Stderr)
 			return nil
 		},
 	}
+}
+
+// groupNameArg accepts exactly one group name that is not blank.
+func groupNameArg(cmd *cobra.Command, args []string) error {
+	if err := cobra.ExactArgs(1)(cmd, args); err != nil {
+		return err
+	}
+	if args[0] = strings.TrimSpace(args[0]); args[0] == "" {
+		return fmt.Errorf("the group name is blank")
+	}
+	return nil
 }

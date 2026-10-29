@@ -51,10 +51,26 @@ func loadKeyPair(fingerprint string) (*crypto.KeyPair, error) {
 	return kp, err
 }
 
+// keyFile returns the key file of fp, a fingerprint or a prefix of one, or
+// false when fp is not one. Fingerprints can come from the server, and
+// they name the file, so nothing else passes.
+func keyFile(fp string) (string, bool) {
+	fp, err := checkFingerprint(fp)
+	if err != nil {
+		return "", false
+	}
+	return filepath.Join(keysDir(), fp+".json"), true
+}
+
 // resolveKeystoreFingerprint resolves a possibly-truncated fingerprint to the
 // full filename in the keys directory. This handles the case where the server
 // stores 32-char fingerprints but local files use 64-char names.
 func resolveKeystoreFingerprint(fp string) string {
+	clean, err := checkFingerprint(fp)
+	if err != nil {
+		return fp // not a fingerprint, so it names no file: loading it fails
+	}
+	fp = clean
 	// Try exact match first
 	if _, err := os.Stat(filepath.Join(keysDir(), fp+".json")); err == nil {
 		return fp
@@ -78,7 +94,11 @@ func resolveKeystoreFingerprint(fp string) string {
 
 // isKeyPairEncrypted checks if a key pair file is password-encrypted.
 func isKeyPairEncrypted(fingerprint string) bool {
-	data, err := os.ReadFile(filepath.Join(keysDir(), fingerprint+".json"))
+	path, ok := keyFile(fingerprint)
+	if !ok {
+		return false
+	}
+	data, err := os.ReadFile(path) // #nosec G304 -- keyFile accepts hex fingerprints only, so path stays in the keys directory.
 	if err != nil {
 		return false
 	}

@@ -8,11 +8,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"github.com/deepsecret-io/sdk/crypto"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/deepsecret-io/sdk/crypto"
 )
 
 func newIdentityCmd() *cobra.Command {
@@ -41,6 +42,7 @@ func newIdentityGenerateCmd() *cobra.Command {
 		Use:     "generate",
 		Aliases: []string{"gen"},
 		Short:   "Generate a new key pair (alias: gen)",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var kp *crypto.KeyPair
 			var fp string
@@ -147,8 +149,8 @@ func newIdentityGenerateCmd() *cobra.Command {
 			fmt.Fprintf(os.Stderr, "  %s%-14s%s %s\n", ansiDim, "Fingerprint", ansiReset, fp)
 			fmt.Fprintf(os.Stderr, "  %s%-14s%s %s\n", ansiDim, "Ed25519", ansiReset, kp.ED25519Public)
 			fmt.Fprintf(os.Stderr, "  %s%-14s%s %s\n", ansiDim, "X25519", ansiReset, kp.X25519Public)
-			fmt.Fprintf(os.Stderr, "  %s%-14s%s %s\n", ansiDim, "ML-KEM-768", ansiReset, kp.MLKEM768PK[:16]+"..."+kp.MLKEM768PK[len(kp.MLKEM768PK)-8:])
-			fmt.Fprintf(os.Stderr, "  %s%-14s%s %s\n", ansiDim, "ML-DSA-65", ansiReset, kp.MLDSA65PK[:16]+"..."+kp.MLDSA65PK[len(kp.MLDSA65PK)-8:])
+			fmt.Fprintf(os.Stderr, "  %s%-14s%s %s\n", ansiDim, "ML-KEM-768", ansiReset, abbrev(kp.MLKEM768PK, 16, 8))
+			fmt.Fprintf(os.Stderr, "  %s%-14s%s %s\n", ansiDim, "ML-DSA-65", ansiReset, abbrev(kp.MLDSA65PK, 16, 8))
 			fmt.Fprintf(os.Stderr, "  %s%-14s%s %s\n", ansiDim, "Stored at", ansiReset, keysDir()+"/"+fp+".json")
 			if usePassword {
 				fmt.Fprintf(os.Stderr, "  %s%-14s%s %s\n", ansiDim, "Encrypted", ansiReset, "yes (password-protected)")
@@ -165,14 +167,19 @@ func newIdentityGenerateCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolVarP(&usePassword, "password", "p", false, "Encrypt private keys with a password")
-	cmd.Flags().BoolVarP(&syncAfter, "sync", "s", false, "Upload public keys and set as primary after generation")
+	cmd.Flags().BoolVarP(&usePassword, "password", "p", false, "Encrypt the private keys with a password")
+	cmd.Flags().BoolVarP(&syncAfter, "sync", "s", false, "Upload the public keys and make the key your primary after generating it")
+	setGroup(cmd.Flags(), groupOptions, "password", "sync")
 	return cmd
 }
 
 // existsKeyPair checks if a key pair file exists on disk.
 func existsKeyPair(fingerprint string) bool {
-	_, err := os.Stat(filepath.Join(keysDir(), fingerprint+".json"))
+	path, ok := keyFile(fingerprint)
+	if !ok {
+		return false
+	}
+	_, err := os.Stat(path)
 	return err == nil
 }
 
@@ -183,6 +190,7 @@ func newIdentityListCmd() *cobra.Command {
 		Use:     "list",
 		Aliases: []string{"ls"},
 		Short:   "List identities (alias: ls)",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if remote {
 				return listRemoteKeys()
@@ -191,7 +199,8 @@ func newIdentityListCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolVar(&remote, "remote", false, "List identities synced to the server")
+	cmd.Flags().BoolVar(&remote, "remote", false, "List the identities synced to the server")
+	setGroup(cmd.Flags(), groupOptions, "remote")
 	return cmd
 }
 
@@ -227,7 +236,7 @@ func listLocalKeys() error {
 
 	for _, n := range names {
 		encrypted := isKeyPairEncrypted(n)
-		data, err := os.ReadFile(filepath.Join(keysDir(), n+".json"))
+		data, err := os.ReadFile(filepath.Join(keysDir(), n+".json")) // #nosec G304 -- n is a file name listKeyPairs read from the keys directory.
 		if err != nil {
 			continue
 		}
@@ -254,7 +263,7 @@ func listLocalKeys() error {
 		if len(tags) > 0 {
 			suffix = " [" + strings.Join(tags, ", ") + "]"
 		}
-		fmt.Printf("  %s%s\n", fp, suffix)
+		fmt.Printf("  %s%s\n", safe(fp), suffix)
 	}
 	fmt.Println()
 	return nil
@@ -287,7 +296,7 @@ func listRemoteKeys() error {
 		if k.IsPrimary {
 			primary = " [primary]"
 		}
-		fmt.Printf("  %s%s  type=%s\n", k.Fingerprint, primary, k.IdentityType)
+		fmt.Printf("  %s%s  type=%s\n", safe(k.Fingerprint), primary, safe(k.IdentityType))
 	}
 	fmt.Println()
 	return nil
@@ -300,6 +309,7 @@ func newIdentitySyncCmd() *cobra.Command {
 		Use:     "sync",
 		Aliases: []string{"push"},
 		Short:   "Upload public keys (alias: push)",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dbg("identity.sync", "starting sync, identity_fp=%q", identityFP)
 			c, err := newAuthenticatedClient()
@@ -408,7 +418,8 @@ func newIdentitySyncCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVarP(&identityFP, "identity", "i", "", "Identity fingerprint (or prefix)")
+	cmd.Flags().VarP(&fingerprintFlag{&identityFP}, "identity", "i", "Local identity `fingerprint`, or a prefix of 16+ characters")
+	setGroup(cmd.Flags(), groupIdentity, "identity")
 	return cmd
 }
 
@@ -418,6 +429,7 @@ func newIdentityShowCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "show",
 		Short: "Show public keys for a local identity",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			resolved := resolveIdentityName(identityFP)
 			kp, err := loadKeyPair(resolved)
@@ -438,25 +450,36 @@ func newIdentityShowCmd() *cobra.Command {
 			printHeader("Identity: " + fp[:16] + lock)
 			fmt.Println()
 			printKeyValue("Fingerprint", fp[:16]+" "+fp[16:])
-			printKeyValue("Ed25519", kp.ED25519Public)
-			printKeyValue("X25519", kp.X25519Public)
-			printKeyValue("ML-KEM-768", kp.MLKEM768PK[:32]+"..."+kp.MLKEM768PK[len(kp.MLKEM768PK)-16:])
-			printKeyValue("ML-DSA-65", kp.MLDSA65PK[:32]+"..."+kp.MLDSA65PK[len(kp.MLDSA65PK)-16:])
+			printKeyValue("Ed25519", safe(kp.ED25519Public))
+			printKeyValue("X25519", safe(kp.X25519Public))
+			printKeyValue("ML-KEM-768", abbrev(kp.MLKEM768PK, 32, 16))
+			printKeyValue("ML-DSA-65", abbrev(kp.MLDSA65PK, 32, 16))
 			printKeyValue("Algorithm", "X25519 + ML-KEM-768 + AES-256-GCM + Ed25519 + ML-DSA-65")
 			fmt.Println()
 			return nil
 		},
 	}
 
-	cmd.Flags().StringVarP(&identityFP, "identity", "i", "", "Identity fingerprint (or prefix)")
+	cmd.Flags().VarP(&fingerprintFlag{&identityFP}, "identity", "i", "Local identity `fingerprint`, or a prefix of 16+ characters")
+	setGroup(cmd.Flags(), groupIdentity, "identity")
 	return cmd
 }
 
 func newIdentitySetPrimaryCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "set-primary [fingerprint]",
+		Use:   "set-primary <fingerprint>",
 		Short: "Set a synced identity as primary",
-		Args:  cobra.ExactArgs(1),
+		Args: func(cmd *cobra.Command, args []string) error {
+			if err := cobra.ExactArgs(1)(cmd, args); err != nil {
+				return err
+			}
+			fp, err := checkFingerprint(args[0])
+			if err != nil {
+				return fmt.Errorf("invalid fingerprint %q: %w", args[0], err)
+			}
+			args[0] = fp
+			return nil
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			fpPrefix := args[0]
 
@@ -482,7 +505,7 @@ func newIdentitySetPrimaryCmd() *cobra.Command {
 
 						var matches int
 						for _, k := range keys {
-							if k.Fingerprint == fpPrefix || (len(fpPrefix) >= 4 && len(fpPrefix) < 32 && len(k.Fingerprint) >= len(fpPrefix) && k.Fingerprint[:len(fpPrefix)] == fpPrefix) {
+							if fingerprintMatch(k.Fingerprint, fpPrefix) {
 								matchedFP = k.Fingerprint
 								matches++
 							}
@@ -491,7 +514,7 @@ func newIdentitySetPrimaryCmd() *cobra.Command {
 							return "", fmt.Errorf("no remote identity matching '%s'", fpPrefix)
 						}
 						if matches > 1 {
-							return "", fmt.Errorf("ambiguous prefix '%s' — matches %d keys, be more specific", fpPrefix, matches)
+							return "", fmt.Errorf("ambiguous prefix '%s': it matches %d keys, be more specific", fpPrefix, matches)
 						}
 
 						return fmt.Sprintf("found=%d, match=%s", len(keys), matchedFP[:16]), nil

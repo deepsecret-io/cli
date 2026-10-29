@@ -8,11 +8,19 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
+
+	"golang.org/x/term"
 )
 
 // ── ANSI colors (no external deps) ─────────────────────────────────────────
 
-const (
+// Styles for stderr, where all colored output goes. They are empty when
+// color is off: NO_COLOR is set (https://no-color.org), TERM is "dumb",
+// stderr is not a terminal (redirected to a file or a pipe), or the
+// Windows console cannot show them.
+var (
 	ansiReset   = "\033[0m"
 	ansiBold    = "\033[1m"
 	ansiDim     = "\033[2m"
@@ -23,6 +31,66 @@ const (
 	ansiWhite   = "\033[37m"
 	ansiBoldRed = "\033[1;31m"
 )
+
+// stderrIsTerminal says whether stderr is an interactive terminal. Live
+// progress, which redraws in place, is only drawn there.
+var stderrIsTerminal = term.IsTerminal(int(os.Stderr.Fd()))
+
+// liveCursor says whether stderr takes ANSI escapes, so the live view can
+// move the cursor to redraw several lines: a terminal, not TERM=dumb, and
+// on Windows a console that turned them on.
+var liveCursor bool
+
+// stdoutIsTerminal says whether decrypted content printed to stdout lands
+// on a terminal, where control characters in it would be acted on.
+var stdoutIsTerminal = term.IsTerminal(int(os.Stdout.Fd()))
+
+func init() {
+	liveCursor = stderrIsTerminal && os.Getenv("TERM") != "dumb" && enableTerminalEscapes()
+	if !liveCursor || os.Getenv("NO_COLOR") != "" {
+		ansiReset, ansiBold, ansiDim, ansiRed, ansiGreen = "", "", "", "", ""
+		ansiYellow, ansiCyan, ansiWhite, ansiBoldRed = "", "", "", ""
+	}
+}
+
+// safe makes a value from outside the CLI (the server, a payload, another
+// person) safe to print on one line: control characters, including the
+// escape that starts terminal commands, invalid UTF-8 and invisible
+// formatting marks such as a right-to-left override show as "?", so the
+// value cannot send the terminal commands, move the cursor, recolor or
+// rewrite earlier output, or reorder what is read.
+func safe(s string) string { return sanitize(s, false) }
+
+// safeLines is safe for text that may span lines: newlines and tabs stay.
+func safeLines(s string) string { return sanitize(s, true) }
+
+func sanitize(s string, lines bool) string {
+	unsafe := func(r rune) bool {
+		if lines && (r == '\n' || r == '\t') {
+			return false
+		}
+		return r == utf8.RuneError || unicode.IsControl(r) || (unicode.Is(unicode.Cf, r) && r != '\u200d')
+	}
+	if utf8.ValidString(s) && !strings.ContainsFunc(s, unsafe) {
+		return s
+	}
+	return strings.Map(func(r rune) rune {
+		if unsafe(r) {
+			return '?'
+		}
+		return r
+	}, s)
+}
+
+// abbrev shortens a long value, like a public key, to its first head and
+// last tail characters, through safe.
+func abbrev(s string, head, tail int) string {
+	s = safe(s)
+	if len(s) <= head+tail+3 {
+		return s
+	}
+	return s[:head] + "..." + s[len(s)-tail:]
+}
 
 // ── Structured logging ─────────────────────────────────────────────────────
 //
@@ -49,7 +117,7 @@ func logLine(level logLevel, ctx, format string, args ...any) {
 	if level == lvlDebug && !debug {
 		return
 	}
-	msg := fmt.Sprintf(format, args...)
+	msg := safeLines(fmt.Sprintf(format, args...))
 	var tag, color string
 	switch level {
 	case lvlError:
@@ -62,12 +130,14 @@ func logLine(level logLevel, ctx, format string, args ...any) {
 		tag, color = "DEBUG", ansiDim
 	}
 	// For DEBUG keep the entire line dim. For others, color only the tag
-	// so the message text stays legible.
-	if level == lvlDebug {
-		fmt.Fprintf(os.Stderr, "%s%s  %s: %s%s\n", color, tag, ctx, msg, ansiReset)
-	} else {
-		fmt.Fprintf(os.Stderr, "%s%s%s  %s: %s\n", color, tag, ansiReset, ctx, msg)
-	}
+	// so the message text stays legible. A live view moves below the line.
+	withLiveCleared(func() {
+		if level == lvlDebug {
+			fmt.Fprintf(os.Stderr, "%s%s  %s: %s%s\n", color, tag, ctx, msg, ansiReset)
+		} else {
+			fmt.Fprintf(os.Stderr, "%s%s%s  %s: %s\n", color, tag, ansiReset, ctx, msg)
+		}
+	})
 }
 
 func logDebug(ctx, format string, args ...any)  { logLine(lvlDebug, ctx, format, args...) }
@@ -112,7 +182,7 @@ type step struct {
 	label          string
 	action         func() (string, error)                        // simple step
 	progressAction func(progress chan<- float64) (string, error) // progress-tracked step
-	transfer       *transferProgress                             // live transfer progress (upload/download)
+	live           *liveProgress                                 // live progress (encrypt, upload, download)
 }
 
 type keyValue struct {
@@ -152,8 +222,8 @@ func runPipeline(title string, steps []step, summary []keyValue) error {
 		var detail string
 		var err error
 
-		if s.transfer != nil {
-			// Run action in background, poll transfer progress
+		if s.live != nil {
+			// Run action in background, redraw its live progress
 			done := make(chan struct{})
 			var actionDetail string
 			var actionErr error
@@ -172,43 +242,50 @@ func runPipeline(title string, steps []step, summary []keyValue) error {
 				close(done)
 			}()
 
-			ticker := time.NewTicker(250 * time.Millisecond)
+			head := liveHead(prefix, s.label, maxLabel)
+			ticker := time.NewTicker(200 * time.Millisecond)
 			cancelled := false
+			logged := time.Now()
 		transferLoop:
 			for {
 				select {
-				case <-ticker.C:
-					if s.transfer.total > 0 {
-						pct := s.transfer.Pct() * 100
-						speed := s.transfer.Speed()
-						transferred := formatBytes(s.transfer.transferred.Load())
-						total := formatBytes(s.transfer.total)
-						fmt.Fprintf(os.Stderr, "\r%s%s:%s %s⇅%s %-*s  %s%s/%s %.0f%%%s  %s%s%s",
-							ansiCyan, prefix, ansiReset,
-							ansiYellow, ansiReset,
-							maxLabel, s.label,
-							ansiWhite, transferred, total, pct, ansiReset,
-							ansiDim, speed, ansiReset)
+				case now := <-ticker.C:
+					// Progress shows only with --progress, so the output
+					// stays plain for pipes, scripts and logs. On a terminal
+					// it redraws in place; redirected, redraws would fill
+					// the output with partial lines, so it is a line every
+					// progressLogEvery instead.
+					if !showProgress || cancelled {
+						continue
+					}
+					f := s.live.frame(now)
+					switch {
+					case stderrIsTerminal:
+						width, height := terminalSize()
+						drawLive(liveLines(head, f, now, width, height, liveCursor))
+					case now.Sub(logged) >= progressLogEvery:
+						logged = now
+						withLiveCleared(func() {
+							fmt.Fprintf(os.Stderr, "%s  %s\n", strings.TrimRight(head, " "), liveStats(f))
+						})
 					}
 				case <-rootCtx.Done():
 					// Ctrl+C arrived. The SDK's retry loops also see the
 					// cancellation and unwind in a few ms, but show the user
-					// immediate feedback so the in-place progress bar doesn't
-					// look frozen while the goroutine drains.
+					// immediate feedback so the live view doesn't look
+					// frozen while the goroutine drains.
 					if !cancelled {
 						cancelled = true
-						fmt.Fprintf(os.Stderr, "\r%s\r  %s⏳%s cancelling, please wait...\n",
-							strings.Repeat(" ", 140), ansiYellow, ansiReset)
+						withLiveCleared(func() {
+							fmt.Fprintf(os.Stderr, "  %s⏳%s cancelling, please wait...\n", ansiYellow, ansiReset)
+						})
 					}
 				case <-done:
 					break transferLoop
 				}
 			}
 			ticker.Stop()
-			fmt.Fprintf(os.Stderr, "\r%s\r", strings.Repeat(" ", 140))
-			if !cancelled {
-				fmt.Fprintln(os.Stderr)
-			}
+			withLiveCleared(func() {})
 
 			detail = actionDetail
 			err = actionErr
@@ -251,6 +328,16 @@ func runPipeline(title string, steps []step, summary []keyValue) error {
 	return nil
 }
 
+// progressLogEvery is how often --progress prints a line when stderr is
+// not a terminal; tests shorten it.
+var progressLogEvery = 5 * time.Second
+
+// liveHead is the start of a step's live view: its prefix and label,
+// padded to width.
+func liveHead(prefix, label string, width int) string {
+	return fmt.Sprintf("%s%s:%s %s⇅%s %-*s", ansiCyan, prefix, ansiReset, ansiYellow, ansiReset, width, safe(label))
+}
+
 // displayedError wraps an error that has already been printed to stderr.
 // main() checks for this to avoid double-printing.
 type displayedError struct{ err error }
@@ -263,7 +350,7 @@ func (e *displayedError) Unwrap() error { return e.err }
 func logStep(prefix, label string, padWidth int, detail string, d time.Duration) {
 	detailStr := ""
 	if debug && detail != "" {
-		detailStr = ansiDim + " " + detail + ansiReset
+		detailStr = ansiDim + " " + safe(detail) + ansiReset
 	}
 	fmt.Fprintf(os.Stderr, "%s%s:%s %s✓%s %-*s%s  %s%s%s\n",
 		ansiCyan, prefix, ansiReset,
@@ -279,8 +366,8 @@ func logStepError(prefix, label string, padWidth int, err error, d time.Duration
 	fmt.Fprintf(os.Stderr, "%s%s:%s %s✗%s %-*s  %s%s%s  %s%s%s\n",
 		ansiCyan, prefix, ansiReset,
 		ansiBoldRed, ansiReset,
-		padWidth, label,
-		ansiRed, err.Error(), ansiReset,
+		padWidth, safe(label),
+		ansiRed, safeLines(err.Error()), ansiReset,
 		ansiDim, fmtDuration(d), ansiReset,
 	)
 }
@@ -295,12 +382,17 @@ func logInfo(prefix, msg string) {
 
 // ── Simple Output Helpers ───────────────────────────────────────────────────
 
+// printSuccess, printError, printDim and printHeader print text that can
+// hold values from outside the CLI, so they print it through safeLines.
+// printKeyValue takes values that may carry the CLI's own styles: callers
+// pass outside values through safe.
+
 func printSuccess(msg string) {
-	fmt.Fprintf(os.Stderr, "  %s✓%s %s\n", ansiGreen, ansiReset, msg)
+	fmt.Fprintf(os.Stderr, "  %s✓%s %s\n", ansiGreen, ansiReset, safeLines(msg))
 }
 
 func printError(msg string) {
-	fmt.Fprintf(os.Stderr, "  %s✗%s %s\n", ansiRed, ansiReset, msg)
+	fmt.Fprintf(os.Stderr, "  %s✗%s %s\n", ansiRed, ansiReset, safeLines(msg))
 }
 
 func printKeyValue(key, value string) {
@@ -319,13 +411,14 @@ func printKeyValues(key string, values []string) {
 }
 
 func printHeader(title string) {
+	title = safe(title)
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintf(os.Stderr, "  %s%s%s\n", ansiBold, title, ansiReset)
 	fmt.Fprintf(os.Stderr, "  %s%s%s\n", ansiDim, strings.Repeat("─", len(title)+2), ansiReset)
 }
 
 func printDim(msg string) {
-	fmt.Fprintf(os.Stderr, "  %s%s%s\n", ansiDim, msg, ansiReset)
+	fmt.Fprintf(os.Stderr, "  %s%s%s\n", ansiDim, safeLines(msg), ansiReset)
 }
 
 // ── Timer helper ────────────────────────────────────────────────────────────

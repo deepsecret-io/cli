@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -69,11 +70,14 @@ func newLoginCmd() *cobra.Command {
 		Use:   "login",
 		Short: "Authenticate via browser SSO",
 		Long: `Open the browser to authenticate with Google SSO. A short-lived token
-is stored locally for CLI usage. API keys are still supported for CI/CD.
+is stored locally for CLI usage. It renews while you use the CLI, for up
+to 7 days from sign-in; after an hour unused, sign in again. API keys are
+still supported for CI/CD.
 
 Examples:
   secret login          # authenticate via browser
   secret login --check  # show current auth status`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if check {
 				return showAuthStatus()
@@ -82,7 +86,8 @@ Examples:
 		},
 	}
 
-	cmd.Flags().BoolVar(&check, "check", false, "Show current authentication status")
+	cmd.Flags().BoolVar(&check, "check", false, "Show the current authentication status instead of signing in")
+	setGroup(cmd.Flags(), groupOptions, "check")
 	return cmd
 }
 
@@ -90,6 +95,7 @@ func newLogoutCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "logout",
 		Short: "Revoke and remove the stored login token",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			tf, err := loadTokenFile()
 			if err != nil || tf.Token == "" {
@@ -145,7 +151,7 @@ func showAuthStatus() error {
 			if remaining > 0 {
 				printKeyValue("Expires", fmt.Sprintf("%s (%s remaining)", exp.Format("15:04:05"), remaining.Round(time.Minute)))
 			} else {
-				printKeyValue("Expires", "EXPIRED — run: secret login")
+				printKeyValue("Expires", "EXPIRED (run: secret login)")
 			}
 		}
 	}
@@ -196,41 +202,7 @@ func browserLogin() error {
 	})
 
 	// Receive the token from the callback page JS
-	mux.HandleFunc("/receive", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" {
-			http.Error(w, "method not allowed", 405)
-			return
-		}
-		var body struct {
-			Token string `json:"token"`
-			State string `json:"state"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprintf(w, `{"ok":false,"error":"invalid request"}`)
-			return
-		}
-
-		// The state only reaches this listener through the fragment of the
-		// genuine login redirect. A mismatch means the token was planted.
-		if subtle.ConstantTimeCompare([]byte(body.State), []byte(state)) != 1 {
-			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprintf(w, `{"ok":false,"error":"state mismatch"}`)
-			return
-		}
-
-		// Validate token is a real JWT (3 parts, can parse claims)
-		if err := validateJWTFormat(body.Token); err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprintf(w, `{"ok":false,"error":"invalid token format"}`)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"ok":true}`)
-
-		tokenCh <- body.Token
-	})
+	mux.HandleFunc("/receive", receiveToken(state, tokenCh))
 
 	server := &http.Server{
 		Handler:           mux,
@@ -243,6 +215,13 @@ func browserLogin() error {
 			errCh <- err
 		}
 	}()
+	// stopServer shuts the callback server down, giving open requests up to
+	// five seconds.
+	stopServer := func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Shutdown(ctx) // a loopback server for one callback; the login's own result is returned, and the process exits soon after.
+	}
 
 	// Fetch the Google auth URL from the API (don't send browser to API
 	// directly). client_state is echoed back only in the genuine redirect.
@@ -251,33 +230,21 @@ func browserLogin() error {
 	httpClient := &http.Client{Timeout: 10 * time.Second}
 	httpResp, err := httpClient.Get(ssoReqURL)
 	if err != nil {
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		server.Shutdown(shutdownCtx)
-		shutdownCancel()
+		stopServer()
 		return fmt.Errorf("failed to reach API: %w", err)
 	}
 	defer httpResp.Body.Close()
-	var ssoResp struct {
-		Data struct {
-			AuthURL string `json:"auth_url"`
-		} `json:"data"`
+	authURL, err := readAuthURL(httpResp.Body)
+	if err != nil {
+		stopServer()
+		return fmt.Errorf("failed to get auth URL from API (is the server running at %s?): %w", apiBase, err)
 	}
-	if err := json.NewDecoder(httpResp.Body).Decode(&ssoResp); err != nil || ssoResp.Data.AuthURL == "" {
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		server.Shutdown(shutdownCtx)
-		shutdownCancel()
-		return fmt.Errorf("failed to get auth URL from API (is the server running at %s?)", apiBase)
-	}
-
-	authURL := ssoResp.Data.AuthURL
 
 	// Validate the server-supplied URL before handing it to the OS browser
 	// launcher; reject javascript:/file:/smb:/etc. schemes outright.
 	safeURL, err := safeBrowserURL(authURL)
 	if err != nil {
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		server.Shutdown(shutdownCtx)
-		shutdownCancel()
+		stopServer()
 		return fmt.Errorf("API returned an unsafe auth URL: %w", err)
 	}
 
@@ -295,9 +262,7 @@ func browserLogin() error {
 
 	select {
 	case token := <-tokenCh:
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		server.Shutdown(shutdownCtx)
-		shutdownCancel()
+		stopServer()
 		logInfo("ds.login", "token received from browser callback")
 
 		// Parse JWT to get expiry; email is fetched from the server below.
@@ -320,16 +285,89 @@ func browserLogin() error {
 		return nil
 
 	case err := <-errCh:
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		server.Shutdown(shutdownCtx)
-		shutdownCancel()
+		stopServer()
 		return fmt.Errorf("local server error: %w", err)
 
 	case <-ctx.Done():
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		server.Shutdown(shutdownCtx)
-		shutdownCancel()
+		stopServer()
 		return fmt.Errorf("login timed out (2 minutes). Try again with: secret login")
+	}
+}
+
+// Bounds on the login flow's bodies, each holding one URL or one session
+// token of a few KB, so neither the API nor a local process can make the
+// CLI read without end. A body over its bound fails.
+const (
+	// maxAuthURLResponse bounds the API's answer naming the auth URL.
+	maxAuthURLResponse = 64 << 10
+	// maxTokenPost bounds what the callback page posts to /receive.
+	maxTokenPost = 64 << 10
+)
+
+// readAuthURL reads the API's answer to the SSO request and returns the
+// auth URL in it.
+func readAuthURL(r io.Reader) (string, error) {
+	body, err := io.ReadAll(io.LimitReader(r, maxAuthURLResponse+1))
+	if err != nil {
+		return "", err
+	}
+	if len(body) > maxAuthURLResponse {
+		return "", fmt.Errorf("the answer is over %d bytes", maxAuthURLResponse)
+	}
+	var resp struct {
+		Data struct {
+			AuthURL string `json:"auth_url"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return "", fmt.Errorf("decode the answer: %w", err)
+	}
+	if resp.Data.AuthURL == "" {
+		return "", fmt.Errorf("the answer has no auth URL")
+	}
+	return resp.Data.AuthURL, nil
+}
+
+// receiveToken handles the callback page's POST of the session token and
+// the login state, and passes on a token whose state matches.
+func receiveToken(state string, tokenCh chan<- string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// reply answers the callback page. A failed write means the page
+		// has gone, and there is nothing left to tell it.
+		reply := func(body string) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, body)
+		}
+		if r.Method != "POST" {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			Token string `json:"token"`
+			State string `json:"state"`
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxTokenPost)
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			reply(`{"ok":false,"error":"invalid request"}`)
+			return
+		}
+
+		// The state only reaches this listener through the fragment of the
+		// genuine login redirect. A mismatch means the token was planted.
+		if subtle.ConstantTimeCompare([]byte(body.State), []byte(state)) != 1 {
+			reply(`{"ok":false,"error":"state mismatch"}`)
+			return
+		}
+
+		// Validate token is a real JWT (3 parts, can parse claims)
+		if err := validateJWTFormat(body.Token); err != nil {
+			reply(`{"ok":false,"error":"invalid token format"}`)
+			return
+		}
+
+		reply(`{"ok":true}`)
+
+		tokenCh <- body.Token
 	}
 }
 
@@ -391,7 +429,7 @@ func fetchEmailForToken(apiBase, token string) string {
 // safeBrowserURL returns the URL only if it parses, has a safe scheme
 // (https, or http on a loopback host), and a non-empty host. The OS browser
 // launchers (`open`, `xdg-open`, `rundll32`) will happily dispatch
-// `javascript:`, `file:`, `smb:`, etc. — so any server-supplied URL must be
+// `javascript:`, `file:`, `smb:` and others, so any server-supplied URL must be
 // validated before being passed to a shell helper.
 func safeBrowserURL(raw string) (string, error) {
 	u, err := url.Parse(raw)
@@ -423,11 +461,11 @@ func openBrowser(rawURL string) error {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		cmd = exec.Command("open", clean)
+		cmd = exec.Command("open", clean) // #nosec G204 -- a fixed program; clean passed safeBrowserURL (https, or http on loopback) and no shell is involved.
 	case "linux":
-		cmd = exec.Command("xdg-open", clean)
+		cmd = exec.Command("xdg-open", clean) // #nosec G204 -- a fixed program; clean passed safeBrowserURL (https, or http on loopback) and no shell is involved.
 	case "windows":
-		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", clean)
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", clean) // #nosec G204 -- a fixed program; clean passed safeBrowserURL (https, or http on loopback) and no shell is involved.
 	}
 	if cmd != nil {
 		_ = cmd.Start()

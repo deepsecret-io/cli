@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/deepsecret-io/sdk"
 	"github.com/deepsecret-io/sdk/api"
@@ -44,63 +45,38 @@ func newEncryptCmd() *cobra.Command {
 		Use:     "encrypt [files...]",
 		Aliases: []string{"enc"},
 		Short:   "Encrypt and send a secret (alias: enc)",
-		Long: `Encrypt files, directories, or key-value pairs for one or more recipients
-using hybrid post-quantum encryption (X25519 + ML-KEM-768 + AES-256-GCM).
+		Long: `Encrypt files, directories, key-value pairs or text from stdin for one or
+more recipients with hybrid post-quantum encryption (X25519 + ML-KEM-768 +
+AES-256-GCM), and send it as one secret: the payload is encrypted and
+uploaded once, with a key wrap for every recipient. You are a recipient only
+when you list yourself; with no recipients it is sent to you.
 
-Files and directories can be passed as positional args or with -f flags.
-Directories are recursively included with their structure preserved.
+Files and directories can be given as arguments or with --file; directories
+keep their structure. Sending again under an existing name adds a revision
+and must list everyone who has access now, or add --revoke-missing.
 
-Recipients:
-  --to, -t     Recipient email (can be repeated). The payload is encrypted
-               and uploaded once, with a key wrap for every recipient. You are
-               not a recipient unless you list yourself. Default: yourself.
-  --group, -g  Every member of an org group except you, in one send.
-  --revoke-missing
-               Sending again under an existing name must list everyone who
-               has access now. This flag revokes the people it leaves out.
+--archive bundles the files into one zstd-compressed tar before encrypting,
+so the server sees one opaque payload: no file names, sizes or structure.
 
-Policies:
-  --ttl  Time-to-live (e.g. "24h", "7d", "30m"). Secret expires after this duration.
-  --ip   Restrict access to specific IPs or CIDRs (can be repeated).
+Large files stream from disk, so memory stays flat at any size. The
+encrypted copy is kept in ~/.deepsecret/uploads (DEEPSECRET_TMPDIR moves it)
+until the upload finishes, which needs that much free disk space. The upload
+adapts its parallel connections to the link, and "secret resume" finishes
+an interrupted one. --progress shows each connection as it goes, and --debug
+the transfer plan and every change to it.
 
-Privacy:
-  --archive, --hide-metadata
-      Bundle all files into a single tar archive, compressed with zstd,
-      before encrypting. The server only sees one opaque blob: individual
-      file names, sizes, and directory structure are never sent as
-      metadata. Use this when file metadata itself is sensitive.
-
-Large files:
-  Files stream from disk, so memory stays flat at any size. The encrypted
-  copy is written to a private folder under ~/.deepsecret/uploads before
-  it is uploaded, so a send needs that much free disk space. Set
-  DEEPSECRET_TMPDIR to put it elsewhere.
-  The upload adapts its parallel connections to your link. If a large
-  upload is interrupted, "secret resume" finishes it, keeping the parts
-  already sent.
-
-Local files:
-  --local      Encrypt to a file instead of sending: nothing is uploaded and
-               no secret is created. Recipients' public keys still come from
-               your account, so they must have registered keys. Send the
-               file over any channel; recipients open it with
-               "secret decrypt --local <file>", which checks that the sender
-               named in it registered the key that signed it.
-  --output, -o Where to write it (default: ./<input name>.cbor).
-  --overwrite  Replace an existing file at that path.
-  --ttl, --ip, --revoke-missing and the upload flags do not apply.
-
-Examples:
-  secret encrypt config.yaml -t alice@example.com
-  secret encrypt config.yaml -t alice@example.com -t bob@example.com
-  secret encrypt auth.service keys.service traefik -t alice@example.com
-  secret encrypt -f config.yaml                        # send to self
+--local writes the sealed secret to a .cbor file instead: nothing is
+uploaded and no secret is created. Recipients' public keys still come from
+your account. Recipients open the file with "secret decrypt --local".`,
+		Example: `  secret encrypt config.yaml -t alice@example.com
+  secret encrypt config.yaml -t alice@example.com,bob@example.com
+  secret encrypt auth.service keys.service traefik/ -t alice@example.com
+  secret encrypt -f config.yaml                         # send to yourself
   secret encrypt -d DB_PASS=secret -d API_KEY=abc -t alice@example.com
-  secret encrypt -f key.pem -t alice@example.com --ttl 24h
-  secret encrypt -f db.env -t alice@example.com --ip 10.0.0.0/8
-  secret encrypt -f . --hide-metadata -t alice@example.com  # hide file metadata from server
-  secret encrypt -f db.env -g engineering              # one send to every other member of "engineering"
-  secret encrypt -f db.env -n db.env -t alice@example.com --revoke-missing  # resend, revoking anyone left out
+  secret encrypt key.pem -t alice@example.com --ttl 24h --ip 10.0.0.0/8
+  secret encrypt . --archive -t alice@example.com       # hide file names and sizes
+  secret encrypt db.env -g engineering                  # every other member of a group
+  secret encrypt db.env -n db.env -t alice@example.com --revoke-missing
   secret encrypt db.env -t alice@example.com --local    # writes ./db.env.cbor, sends nothing`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -124,40 +100,27 @@ Examples:
 				}
 			}
 
+			// Flag values are checked as they are parsed, and conflicting
+			// flags by cobra; what is left depends on several flags.
 			if len(inputFiles) > 0 && len(dataPairs) > 0 {
-				return fmt.Errorf("use either --file or --data, not both")
+				return fmt.Errorf("give files or --data, not both")
 			}
-
-			if presignExpiry < 1 || presignExpiry > 30 {
-				return fmt.Errorf("--presign-expiry must be between 1 and 30 minutes (got %d)", presignExpiry)
+			if err := requireFlag(cmd, "local", "output", "overwrite"); err != nil {
+				return err
 			}
-
-			if len(recipientEmails) > 0 && groupName != "" {
-				return fmt.Errorf("use either --to or --group, not both")
-			}
-
-			if local {
-				for _, f := range []string{"ttl", "ip", "revoke-missing", "threads", "presign-expiry"} {
-					if cmd.Flags().Changed(f) {
-						return fmt.Errorf("--%s applies to sends, not to --local", f)
-					}
-				}
-			} else if localOutput != "" || localOverwrite {
-				return fmt.Errorf("--output and --overwrite need --local")
-			}
-
-			// Validate data pair format early
-			for _, kv := range dataPairs {
-				if !strings.Contains(kv, "=") {
-					return fmt.Errorf("invalid --data format %q (expected KEY=VALUE)", kv)
+			if cmd.Flags().Changed("group") {
+				if groupName = strings.TrimSpace(groupName); groupName == "" {
+					return fmt.Errorf("--group needs a group name")
 				}
 			}
-
-			// Validate the explicit recipient list early, before stdin is
-			// read and before any network call.
-			if len(recipientEmails) > 0 {
-				if err := sdk.ValidateRecipients(recipientEmails); err != nil {
+			if localOutput != "" {
+				if err := checkOutputFile("output", localOutput); err != nil {
 					return err
+				}
+			}
+			for _, f := range inputFiles {
+				if strings.TrimSpace(f) == "" {
+					return fmt.Errorf("a file argument is empty")
 				}
 			}
 
@@ -166,7 +129,7 @@ Examples:
 			if len(inputFiles) == 0 && len(dataPairs) == 0 {
 				stat, _ := os.Stdin.Stat()
 				if stat.Mode()&os.ModeCharDevice != 0 {
-					fmt.Fprintln(os.Stderr, "Reading from stdin (paste text, then press Ctrl+D to finish):")
+					fmt.Fprintf(os.Stderr, "Reading from stdin (paste text, then press %s to finish):\n", stdinEOFKeys)
 				}
 				var err error
 				stdinData, err = io.ReadAll(os.Stdin)
@@ -239,7 +202,7 @@ Examples:
 				}
 				groupName = matched.Name
 				fmt.Fprintf(os.Stderr, "%sds.encrypt:%s %s→%s %s group %q (%d recipient%s)\n",
-					ansiCyan, ansiReset, ansiDim, ansiReset, verb, matched.Name, len(recipients), pluralS(len(recipients)))
+					ansiCyan, ansiReset, ansiDim, ansiReset, verb, safe(matched.Name), len(recipients), pluralS(len(recipients)))
 			case len(recipientEmails) > 0:
 				recipients = recipientEmails
 			default:
@@ -248,7 +211,7 @@ Examples:
 					return fmt.Errorf("fetch account info: %w", err)
 				}
 				recipients = []string{info.Email}
-				fmt.Fprintf(os.Stderr, "%sds.encrypt:%s %s→%s %s self (%s)\n", ansiCyan, ansiReset, ansiDim, ansiReset, verb, info.Email)
+				fmt.Fprintf(os.Stderr, "%sds.encrypt:%s %s→%s %s self (%s)\n", ansiCyan, ansiReset, ansiDim, ansiReset, verb, safe(info.Email))
 			}
 
 			logDebug("setup", "recipients=%d", len(recipients))
@@ -265,8 +228,10 @@ Examples:
 			if identityFP != "" {
 				identitySource = "explicit (--identity)"
 			}
-			logDebug("config", "presign-expiry=%dm", presignExpiry)
-			logDebug("config", "upload-threads=%s", threadCountLabel(uploadThreads))
+			if !local {
+				logDebug("config", "presign-expiry=%dm", presignExpiry)
+				logDebug("config", "upload-threads=%s", threadCountLabel(uploadThreads))
+			}
 			logDebug("config", "identity-source=%s", identitySource)
 			if revokeMissing {
 				logDebug("config", "revoke-missing=true")
@@ -319,12 +284,14 @@ Examples:
 				OnDebug:              func(step, msg string) { logDebug(step, "%s", msg) },
 			}
 
-			// Upload progress callback
-			uploadProgress := &transferProgress{}
-			opts.OnUploadProgress = func(transferred, total int64) {
-				uploadProgress.transferred.Store(transferred)
-				uploadProgress.total = total
+			// Live progress: encrypting, then each connection of the
+			// upload.
+			progress := newSendProgress()
+			if local {
+				progress = newStageProgress("encrypting")
 			}
+			opts.OnEncryptProgress = progress.pre.set
+			opts.UploadStatus = &progress.transfer
 
 			// Determine name if not provided
 			if opts.Name == "" {
@@ -368,11 +335,10 @@ Examples:
 			}
 			var result *sdk.EncryptResult
 			stepDef := step{
-				label:    label,
-				transfer: uploadProgress,
+				label: label,
+				live:  progress,
 				action: func() (string, error) {
 					var err error
-					uploadProgress.startedAt = time.Now()
 					switch {
 					case len(inputFiles) > 0:
 						result, err = c.EncryptPaths(recipients, inputFiles, opts)
@@ -412,13 +378,13 @@ Examples:
 			// ── Summary ──
 			fmt.Fprintln(os.Stderr)
 			if local {
-				printKeyValue("File", result.LocalFile)
+				printKeyValue("File", safe(result.LocalFile))
 			} else {
-				printKeyValue("Secret ID", result.Secret.ID)
-				printKeyValue("Name", result.Secret.Name)
+				printKeyValue("Secret ID", safe(result.Secret.ID))
+				printKeyValue("Name", safe(result.Secret.Name))
 			}
 			if groupName != "" {
-				printKeyValue("Group", groupName)
+				printKeyValue("Group", safe(groupName))
 			}
 			printKeyValue("Type", result.PayloadType)
 			if result.Archived && result.ArchiveEntryCount > 0 {
@@ -447,13 +413,13 @@ Examples:
 			printKeyValue("Sender", crypto.ShortFingerprint(result.SenderFingerprint))
 			sentTo := make([]string, len(result.Recipients))
 			for i, r := range result.Recipients {
-				sentTo[i] = fmt.Sprintf("%s  %s%s%s", r.Email, ansiDim, crypto.ShortFingerprint(r.Fingerprint), ansiReset)
+				sentTo[i] = fmt.Sprintf("%s  %s%s%s", safe(r.Email), ansiDim, safe(crypto.ShortFingerprint(r.Fingerprint)), ansiReset)
 			}
 			printKeyValues("Recipient"+pluralS(len(sentTo)), sentTo)
 			if len(result.Revoked) > 0 {
 				revoked := make([]string, len(result.Revoked))
 				for i, r := range result.Revoked {
-					revoked[i] = r.Email
+					revoked[i] = safe(r.Email)
 				}
 				printKeyValues("Revoked", revoked)
 			}
@@ -466,29 +432,53 @@ Examples:
 			fmt.Fprintln(os.Stderr)
 			if local {
 				fmt.Fprintf(os.Stderr, "  Nothing was uploaded. Send the file over any channel; recipients open it with:\n")
-				fmt.Fprintf(os.Stderr, "    secret decrypt --local %s\n\n", filepath.Base(result.LocalFile))
+				fmt.Fprintf(os.Stderr, "    secret decrypt --local %s\n\n", safe(filepath.Base(result.LocalFile)))
 			}
 			return nil
 		},
 	}
 
-	cmd.Flags().StringSliceVarP(&recipientEmails, "to", "t", nil, "Recipient email, can be repeated (default: self)")
-	cmd.Flags().StringVarP(&groupName, "group", "g", "", "Send to all members of this org group (excluding self), in one send")
-	cmd.Flags().BoolVar(&revokeMissing, "revoke-missing", false, "When resending under an existing name, revoke the current recipients this send leaves out")
-	cmd.Flags().StringVarP(&name, "name", "n", "", "Secret name (defaults to filename or timestamp)")
-	cmd.Flags().StringSliceVarP(&inputFiles, "file", "f", nil, "Files to encrypt (can be repeated)")
-	cmd.Flags().StringSliceVarP(&dataPairs, "data", "d", nil, "Key-value pair (KEY=VALUE), can be repeated")
-	cmd.Flags().StringVar(&ttl, "ttl", "", "Time-to-live (e.g. \"24h\", \"7d\", \"30m\")")
-	cmd.Flags().StringSliceVar(&allowedIPs, "ip", nil, "Allowed IP address or CIDR (repeatable or comma-separated, e.g. --ip 1.1.1.1/32,2.2.2.2/30)")
-	cmd.Flags().BoolVar(&skipHidden, "skip-hidden", false, "Skip hidden files and directories (dotfiles)")
-	cmd.Flags().BoolVarP(&forceArchive, "archive", "a", false, "Archive files as tar.zst regardless of file count (hides file metadata from server)")
-	cmd.Flags().BoolVar(&forceArchive, "hide-metadata", false, "Alias for --archive: bundle files so individual names/sizes are not sent to the server")
-	cmd.Flags().StringVarP(&identityFP, "identity", "i", "", "Use a specific local identity (fingerprint or prefix) instead of primary")
-	cmd.Flags().IntVar(&uploadThreads, "threads", 0, "Parallel part uploads for large files (0 = adapt to the connection, 1 = serial, max 32)")
-	cmd.Flags().IntVar(&presignExpiry, "presign-expiry", 15, "Presigned upload URL lifetime in minutes (allowed: 1-30, default: 15)")
-	cmd.Flags().BoolVar(&local, "local", false, "Encrypt to a local .cbor file instead of sending; nothing is uploaded")
-	cmd.Flags().StringVarP(&localOutput, "output", "o", "", "File to write with --local (default: ./<input name>.cbor)")
-	cmd.Flags().BoolVar(&localOverwrite, "overwrite", false, "With --local, replace an existing file at the output path")
+	f := cmd.Flags()
+	// --hide-metadata is another name for --archive.
+	f.SetNormalizeFunc(func(_ *pflag.FlagSet, name string) pflag.NormalizedName {
+		if name == "hide-metadata" {
+			name = "archive"
+		}
+		return pflag.NormalizedName(name)
+	})
+	f.VarP(&emailList{&recipientEmails}, "to", "t", "Recipient `email`, repeatable or comma-separated (default: yourself)")
+	f.StringVarP(&groupName, "group", "g", "", "Send to every other member of this org `group`, in one send")
+	f.BoolVar(&revokeMissing, "revoke-missing", false, "When resending under an existing name, revoke the recipients this send leaves out")
+	setGroup(f, groupRecipients, "to", "group", "revoke-missing")
+
+	f.StringArrayVarP(&inputFiles, "file", "f", nil, "File or directory `path` to encrypt, repeatable (or give them as arguments)")
+	f.VarP(&kvPairs{&dataPairs}, "data", "d", "A KEY=VALUE pair to encrypt, repeatable")
+	f.VarP(&nameFlag{&name}, "name", "n", "Secret `name` (default: the first file's name, or a timestamp)")
+	f.BoolVar(&skipHidden, "skip-hidden", false, "Skip hidden files and directories (dotfiles)")
+	f.BoolVarP(&forceArchive, "archive", "a", false, "Bundle files into one compressed archive, so the server sees no file names or sizes (alias: --hide-metadata)")
+	setGroup(f, groupInput, "file", "data", "name", "skip-hidden", "archive")
+
+	f.Var(&ttlFlag{&ttl}, "ttl", "Expire the secret after this long: 2m to 365d, like 30m, 24h or 7d")
+	f.Var(&ipList{&allowedIPs}, "ip", "Allow access only from these IP addresses or CIDR ranges, repeatable or comma-separated (at most 50)")
+	setGroup(f, groupPolicies, "ttl", "ip")
+
+	f.BoolVar(&local, "local", false, "Encrypt to a local .cbor file instead of sending; nothing is uploaded")
+	f.StringVarP(&localOutput, "output", "o", "", "Output `file` for --local (default: ./<input name>.cbor)")
+	f.BoolVar(&localOverwrite, "overwrite", false, "With --local, replace an existing file at the output path")
+	setGroup(f, groupLocal, "local", "output", "overwrite")
+
+	f.VarP(&fingerprintFlag{&identityFP}, "identity", "i", "Sign with this local identity (`fingerprint` or a prefix of 16+ characters) instead of your primary")
+	setGroup(f, groupIdentity, "identity")
+
+	f.Var(newIntRange(&uploadThreads, 0, 0, api.MaxUploadThreads, " (0 adapts to the connection, 1 is one at a time)"), "threads", "Parallel part uploads for large files: 0 adapts to the connection, up to 32")
+	f.Var(newMinutes(&presignExpiry, 15, 1, 30), "presign-expiry", "Lifetime of the presigned URL of a small, single-request upload: 1m to 30m (large uploads renew theirs)")
+	setGroup(f, groupPerformance, "threads", "presign-expiry")
+
+	cmd.MarkFlagsMutuallyExclusive("to", "group")
+	cmd.MarkFlagsMutuallyExclusive("file", "data")
+	for _, sendOnly := range []string{"ttl", "ip", "revoke-missing", "threads", "presign-expiry"} {
+		cmd.MarkFlagsMutuallyExclusive("local", sendOnly)
+	}
 	return cmd
 }
 

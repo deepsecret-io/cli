@@ -15,3 +15,11 @@ cli
 
 # Release upload settings (R2 keys) for task release-upload.
 .env
+
+# task security reports.
+reports/
+
+# A local go.work points the SDK at ../sdk for work across both repos;
+# releases and tasks build with the SDK version go.mod requires.
+go.work
+go.work.sum

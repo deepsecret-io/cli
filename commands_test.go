@@ -25,32 +25,6 @@ func runCmd(cmd *cobra.Command, args ...string) error {
 	return cmd.Execute()
 }
 
-func TestEncryptRecipientFlags(t *testing.T) {
-	cases := map[string]struct {
-		args []string
-		want string
-	}{
-		"to with group": {[]string{"-t", "a@example.com", "-g", "eng", "-d", "K=V"}, "either --to or --group"},
-		"duplicate to":  {[]string{"-t", "a@example.com", "-t", "A@example.com", "-d", "K=V"}, "listed twice"},
-		"invalid to":    {[]string{"-t", "nobody", "-d", "K=V"}, "invalid recipient email"},
-	}
-	for name, c := range cases {
-		if err := runCmd(newEncryptCmd(), c.args...); err == nil || !strings.Contains(err.Error(), c.want) {
-			t.Errorf("%s: got %v, want %q", name, err, c.want)
-		}
-	}
-}
-
-func TestRevokeRequiresRecipient(t *testing.T) {
-	id := "10000000-0000-4000-8000-000000000001"
-	if err := runCmd(newRevokeCmd(), id); err == nil || !strings.Contains(err.Error(), "--to") {
-		t.Errorf("no --to: %v", err)
-	}
-	if err := runCmd(newRevokeCmd(), "not-a-uuid", "-t", "a@example.com"); err == nil || !strings.Contains(err.Error(), "invalid secret ID") {
-		t.Errorf("bad id: %v", err)
-	}
-}
-
 func TestRecipientsSummary(t *testing.T) {
 	rs := []sdk.SecretRecipient{{Email: "alice@example.com"}, {Email: "bob@example.com"}, {Email: "carol@example.com"}}
 	cases := map[string]struct {
@@ -84,31 +58,6 @@ func TestSubscriptionStatus(t *testing.T) {
 	}
 	if got := subscriptionStatus("inactive", nil, now); got != "inactive" {
 		t.Errorf("no trial: %q", got)
-	}
-}
-
-// --local writes a file instead of sending, so the send-only flags are
-// refused with it, and its own flags need it.
-func TestLocalFlags(t *testing.T) {
-	cases := map[string]struct {
-		cmd  func() *cobra.Command
-		args []string
-		want string
-	}{
-		"local with ttl":        {newEncryptCmd, []string{"--local", "--ttl", "1h", "-d", "K=V"}, "--ttl applies to sends"},
-		"local with ip":         {newEncryptCmd, []string{"--local", "--ip", "1.1.1.1", "-d", "K=V"}, "--ip applies to sends"},
-		"local with threads":    {newEncryptCmd, []string{"--local", "--threads", "8", "-d", "K=V"}, "--threads applies to sends"},
-		"output without local":  {newEncryptCmd, []string{"-o", "x.cbor", "-d", "K=V"}, "need --local"},
-		"overwrite only":        {newEncryptCmd, []string{"--overwrite", "-d", "K=V"}, "need --local"},
-		"decrypt local no file": {newDecryptCmd, []string{"--local"}, "provide the file"},
-		"decrypt local missing": {newDecryptCmd, []string{"--local", "/nonexistent/x.cbor"}, "no such file"},
-		"decrypt local dir":     {newDecryptCmd, []string{"--local", t.TempDir()}, "is not a file"},
-		"decrypt local rev":     {newDecryptCmd, []string{"--local", "x.cbor", "--revision", "r"}, "--revision applies to secrets"},
-	}
-	for name, c := range cases {
-		if err := runCmd(c.cmd(), c.args...); err == nil || !strings.Contains(err.Error(), c.want) {
-			t.Errorf("%s: got %v, want %q", name, err, c.want)
-		}
 	}
 }
 

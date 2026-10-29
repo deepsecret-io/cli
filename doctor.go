@@ -8,16 +8,18 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"github.com/deepsecret-io/sdk/crypto"
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/deepsecret-io/sdk/crypto"
 )
 
 func newDoctorCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:     "doctor",
 		Aliases: []string{"doc"},
+		Args:    cobra.NoArgs,
 		Short:   "Check CLI health and configuration (alias: doc)",
 		Long: `Run diagnostic checks on your DeepSecret CLI setup.
 
@@ -98,7 +100,7 @@ func runDoctor() error {
 	fmt.Fprintln(os.Stderr)
 	summary := fmt.Sprintf("%d passed, %d failed", pass, fail)
 	if fail == 0 {
-		fmt.Fprintf(os.Stderr, "%sds.doctor:%s %s%s — all good%s\n", ansiCyan, ansiReset, ansiGreen, summary, ansiReset)
+		fmt.Fprintf(os.Stderr, "%sds.doctor:%s %s%s, all good%s\n", ansiCyan, ansiReset, ansiGreen, summary, ansiReset)
 	} else {
 		fmt.Fprintf(os.Stderr, "%sds.doctor:%s %s%s%s\n", ansiCyan, ansiReset, ansiRed, summary, ansiReset)
 	}
@@ -125,9 +127,9 @@ func checkAuth() []checkResult {
 			if apiBase != "" {
 				tc, tcErr := NewClient(apiBase, "bearer:"+tf.Token)
 				if tcErr != nil {
-					results = append(results, checkResult{name: "Login token", ok: false, detail: fmt.Sprintf("%s — %v", tf.Email, tcErr), fix: "secret login"})
+					results = append(results, checkResult{name: "Login token", ok: false, detail: fmt.Sprintf("%s: %v", tf.Email, tcErr), fix: "secret login"})
 				} else if _, err := tc.WhoAmI(); err != nil {
-					results = append(results, checkResult{name: "Login token", ok: false, detail: fmt.Sprintf("%s — rejected by server", tf.Email), fix: "secret login"})
+					results = append(results, checkResult{name: "Login token", ok: false, detail: fmt.Sprintf("%s: rejected by the server", tf.Email), fix: "secret login"})
 				} else {
 					results = append(results, checkResult{name: "Login token", ok: true, detail: fmt.Sprintf("%s (%s remaining, verified)", tf.Email, remaining)})
 				}
@@ -139,7 +141,7 @@ func checkAuth() []checkResult {
 		results = append(results, checkResult{name: "Login token", ok: false, detail: "not found", fix: "secret login"})
 	}
 
-	// Check API key — report each source separately
+	// Check the API key, reporting each source separately
 	envKey := os.Getenv("DS_API_KEY")
 	var cfgKey string
 	if cfg, err := loadConfig(); err == nil {
@@ -167,7 +169,7 @@ func checkAuth() []checkResult {
 			if tcErr != nil {
 				results = append(results, checkResult{name: "API key (config)", ok: false, detail: tcErr.Error()})
 			} else if _, err := tc.WhoAmI(); err != nil {
-				results = append(results, checkResult{name: "API key (config)", ok: false, detail: "rejected by server", fix: "secret config --api-key <valid-key>"})
+				results = append(results, checkResult{name: "API key (config)", ok: false, detail: "rejected by server", fix: "secret config --save-api-key --api-key-stdin"})
 			} else {
 				results = append(results, checkResult{name: "API key (config)", ok: true, detail: "set (verified)"})
 			}
@@ -177,7 +179,7 @@ func checkAuth() []checkResult {
 	}
 
 	if envKey == "" && cfgKey == "" {
-		results = append(results, checkResult{name: "API key", ok: false, detail: "not set (optional if logged in)", fix: "secret config --api-key <key>"})
+		results = append(results, checkResult{name: "API key", ok: false, detail: "not set (optional if logged in)", fix: "secret config --save-api-key --api-key-stdin"})
 	}
 
 	return results
@@ -194,14 +196,14 @@ func checkLocalKeys() []checkResult {
 
 	var results []checkResult
 	for _, n := range names {
-		data, err := os.ReadFile(filepath.Join(keysDir(), n+".json"))
+		data, err := os.ReadFile(filepath.Join(keysDir(), n+".json")) // #nosec G304 -- n is a file name listKeyPairs read from the keys directory.
 		if err != nil {
-			results = append(results, checkResult{name: "Identity", ok: false, detail: n[:16] + " unreadable"})
+			results = append(results, checkResult{name: "Identity", ok: false, detail: safe(crypto.ShortFingerprint(n)) + " unreadable"})
 			continue
 		}
 		var raw crypto.KeyPair
 		if json.Unmarshal(data, &raw) != nil {
-			results = append(results, checkResult{name: "Identity", ok: false, detail: n[:16] + " corrupt"})
+			results = append(results, checkResult{name: "Identity", ok: false, detail: safe(crypto.ShortFingerprint(n)) + " corrupt"})
 			continue
 		}
 		fp, _ := crypto.Fingerprint(&raw)
@@ -209,7 +211,7 @@ func checkLocalKeys() []checkResult {
 		if raw.Encrypted {
 			encrypted = " (encrypted)"
 		}
-		results = append(results, checkResult{name: "Identity", ok: true, detail: fp[:16] + encrypted})
+		results = append(results, checkResult{name: "Identity", ok: true, detail: crypto.ShortFingerprint(fp) + encrypted})
 	}
 	return results
 }
@@ -240,9 +242,9 @@ func checkRemoteSync() []checkResult {
 		}
 		_, err := loadKeyPair(k.Fingerprint)
 		if err != nil {
-			results = append(results, checkResult{name: label, ok: false, detail: k.Fingerprint[:16] + " not found locally", fix: "key may have been generated on another machine"})
+			results = append(results, checkResult{name: label, ok: false, detail: safe(crypto.ShortFingerprint(k.Fingerprint)) + " not found locally", fix: "key may have been generated on another machine"})
 		} else {
-			results = append(results, checkResult{name: label, ok: true, detail: k.Fingerprint[:16] + " synced"})
+			results = append(results, checkResult{name: label, ok: true, detail: safe(crypto.ShortFingerprint(k.Fingerprint)) + " synced"})
 		}
 	}
 
@@ -253,7 +255,7 @@ func checkRemoteSync() []checkResult {
 		remoteFPs[k.Fingerprint] = true
 	}
 	for _, n := range names {
-		data, err := os.ReadFile(filepath.Join(keysDir(), n+".json"))
+		data, err := os.ReadFile(filepath.Join(keysDir(), n+".json")) // #nosec G304 -- n is a file name listKeyPairs read from the keys directory.
 		if err != nil {
 			continue
 		}
@@ -263,7 +265,7 @@ func checkRemoteSync() []checkResult {
 		}
 		fp, _ := crypto.Fingerprint(&raw)
 		if !remoteFPs[fp] {
-			results = append(results, checkResult{name: "Local only", ok: false, detail: fp[:16] + " not on server", fix: fmt.Sprintf("secret id sync -i %s", fp[:8])})
+			results = append(results, checkResult{name: "Local only", ok: false, detail: crypto.ShortFingerprint(fp) + " not on server", fix: fmt.Sprintf("secret identity sync -i %s", crypto.ShortFingerprint(fp))})
 		}
 	}
 

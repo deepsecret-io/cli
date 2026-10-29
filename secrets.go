@@ -6,13 +6,14 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/deepsecret-io/sdk"
+	"io"
 	"os"
+	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
 
-	"github.com/google/uuid"
+	"github.com/deepsecret-io/sdk"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
@@ -44,7 +45,6 @@ func outputFormatted(format string, data any) (bool, error) {
 func newListCmd() *cobra.Command {
 	var (
 		sent         bool
-		vault        bool
 		fromEmail    string
 		toEmail      string
 		limit        int
@@ -58,125 +58,78 @@ func newListCmd() *cobra.Command {
 		Aliases: []string{"ls"},
 		Short:   "List secrets (alias: ls)",
 		Long: `List secrets with pagination and optional email filter.
-By default lists inbox (received) secrets. Use --sent for outgoing secrets,
-or --vault for secrets you encrypted to yourself (your personal vault).
+By default lists your inbox: the secrets sent to you, and the ones you
+encrypted only to yourself. Use --sent for the secrets you sent to others.
 
 Examples:
-  secret list                                   # inbox (received), page 1
+  secret list                                   # inbox, page 1
   secret list --sent                            # sent secrets
-  secret list --vault                           # secrets you encrypted to yourself
   secret list --from alice@example.com           # inbox from specific sender
   secret list --sent --to bob@example.com        # sent to specific recipient
   secret list --page 2 --limit 50               # page 2, 50 per page
-  secret list --no-pagination                    # all secrets at once`,
+  secret list --no-pagination                    # all secrets at once
+  secret list --format json                      # for scripts`,
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Validate limit
-			if limit < 1 {
-				limit = 20
-			}
-			if limit > 1000 {
-				limit = 1000
-			}
-			if page < 1 {
-				page = 1
-			}
-
-			// Mutually exclusive view selectors. The UI mirrors this with
-			// Inbox / Sent / Vault tabs; the CLI matches one-to-one.
-			if sent && vault {
-				return fmt.Errorf("--sent and --vault are mutually exclusive")
-			}
-			if vault && (fromEmail != "" || toEmail != "") {
-				return fmt.Errorf("--vault filters self-sends only; --from / --to do not apply")
-			}
-
-			// Vault is sender-side (self-sends): fetch the sent list and
-			// filter client-side to rows whose only recipient is the sender.
+			// Values are checked as they are parsed, and the view
+			// selector (--sent) by cobra; the UI mirrors the views with
+			// Inbox / Sent tabs.
 			view := "inbox"
-			dir := "received"
 			if sent {
-				dir = "sent"
 				view = "sent"
-			}
-			if vault {
-				dir = "sent"
-				view = "vault"
 			}
 
 			// Validate filter flags match direction
 			if sent && fromEmail != "" {
 				return fmt.Errorf("use --to (not --from) to filter sent secrets by recipient")
 			}
-			if !sent && !vault && toEmail != "" {
+			if !sent && toEmail != "" {
 				return fmt.Errorf("use --from (not --to) to filter inbox secrets by sender")
 			}
 
 			// Resolve the email filter: --from for inbox, --to for sent.
-			// Vault has no email filter (self-only).
 			filterEmail := fromEmail
 			if sent {
 				filterEmail = toEmail
 			}
 
-			dbg("list", "view=%s direction=%s filter=%s limit=%d page=%d", view, dir, filterEmail, limit, page)
+			dbg("list", "view=%s filter=%s limit=%d page=%d", view, filterEmail, limit, page)
 
 			c, err := newAuthenticatedClient()
 			if err != nil {
 				return err
 			}
 
-			queryLimit := limit
-			offset := 0
-			if noPagination {
-				queryLimit = 10000
-			} else {
-				offset = (page - 1) * queryLimit
-			}
-
-			// All three views apply a client-side self-send filter: vault
-			// keeps only self-sends, inbox/sent exclude them (matching the
-			// UI's Inbox / Sent / Vault separation). Server-side pagination
-			// would over- or under-count after the filter, so fetch large
-			// and slice locally.
-			queryLimit = 10000
-			offset = 0
-
 			logInfo("ds.list", fmt.Sprintf("fetching %s secrets (page=%d, limit=%d)", view, page, limit))
 
-			secretsList, _, err := c.ListSecrets(dir, sdk.ListOptions{
-				Limit:  queryLimit,
-				Offset: offset,
-				Email:  filterEmail,
-			})
-			if err != nil {
-				return err
+			// The inbox merges two lists and Sent leaves out the secrets
+			// sent only to oneself, so server-side pagination would over-
+			// or under-count: fetch large and slice locally.
+			const fetchLimit = 10000
+			var secretsList []sdk.SecretInfo
+			if sent {
+				all, _, err := c.ListSecrets("sent", sdk.ListOptions{Limit: fetchLimit, Email: toEmail})
+				if err != nil {
+					return err
+				}
+				secretsList = sentSecrets(all)
+			} else {
+				received, _, err := c.ListSecrets("received", sdk.ListOptions{Limit: fetchLimit, Email: fromEmail})
+				if err != nil {
+					return err
+				}
+				own, _, err := c.ListSecrets("sent", sdk.ListOptions{Limit: fetchLimit})
+				if err != nil {
+					return err
+				}
+				secretsList = inboxSecrets(received, own, fromEmail)
 			}
 
-			filtered := secretsList[:0]
-			for _, s := range secretsList {
-				selfSend := s.IsVault()
-				if view == "vault" && !selfSend {
-					continue
-				}
-				if view != "vault" && selfSend {
-					continue
-				}
-				filtered = append(filtered, s)
-			}
-			secretsList = filtered
-			total := len(filtered)
+			total := len(secretsList)
+			offset := 0
 			if !noPagination {
-				localOffset := (page - 1) * limit
-				if localOffset > len(secretsList) {
-					localOffset = len(secretsList)
-				}
-				end := localOffset + limit
-				if end > len(secretsList) {
-					end = len(secretsList)
-				}
-				secretsList = secretsList[localOffset:end]
-				offset = localOffset
-				queryLimit = limit
+				offset = min((page-1)*limit, total)
+				secretsList = secretsList[offset:min(offset+limit, total)]
 			}
 
 			if handled, err := outputFormatted(outputFmt, map[string]any{"secrets": secretsList, "total": total}); handled || err != nil {
@@ -188,14 +141,10 @@ Examples:
 				return nil
 			}
 
-			headerLabel := "Inbox"
-			switch view {
-			case "sent":
-				headerLabel = "Sent"
-			case "vault":
-				headerLabel = "Vault"
+			header := "Inbox secrets"
+			if sent {
+				header = "Sent secrets"
 			}
-			header := headerLabel + " secrets"
 			if filterEmail != "" {
 				if sent {
 					header += " to " + filterEmail
@@ -212,42 +161,26 @@ Examples:
 			printHeader(header)
 			fmt.Fprintln(os.Stderr)
 
+			// Rows wait in the tabwriter until Flush, which returns any write error.
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			switch view {
-			case "received":
-				fallthrough
-			case "inbox":
-				fmt.Fprintf(w, "  ID\tFROM\tNAME\tFILES\tREVS\tSIZE\tDATE\n")
-				fmt.Fprintf(w, "  --\t----\t----\t-----\t----\t----\t----\n")
-			case "sent":
-				fmt.Fprintf(w, "  ID\tTO\tNAME\tFILES\tREVS\tSIZE\tDATE\n")
-				fmt.Fprintf(w, "  --\t--\t----\t-----\t----\t----\t----\n")
-			case "vault":
-				fmt.Fprintf(w, "  ID\tNAME\tFILES\tREVS\tSIZE\tDATE\n")
-				fmt.Fprintf(w, "  --\t----\t-----\t----\t----\t----\n")
+			if sent {
+				_, _ = fmt.Fprintf(w, "  ID\tTO\tNAME\tFILES\tREVS\tSIZE\tDATE\n")
+				_, _ = fmt.Fprintf(w, "  --\t--\t----\t-----\t----\t----\t----\n")
+			} else {
+				_, _ = fmt.Fprintf(w, "  ID\tFROM\tNAME\tFILES\tREVS\tSIZE\tDATE\n")
+				_, _ = fmt.Fprintf(w, "  --\t----\t----\t-----\t----\t----\t----\n")
 			}
 			for _, s := range secretsList {
 				filesStr := "-"
 				if s.FilesCount > 0 {
 					filesStr = fmt.Sprintf("%d", s.FilesCount)
 				}
-				if view == "vault" {
-					fmt.Fprintf(w, "  %s\t%s\t%s\t%d\t%s\t%s\n",
-						s.ID,
-						ellipsis(s.Name, 25),
-						filesStr,
-						s.RevisionCount,
-						formatBytes(s.TotalSize),
-						s.UpdatedAt.Format("2006-01-02 15:04"),
-					)
-					continue
-				}
 				contact := ellipsis(s.SenderEmail, 25)
-				if dir == "sent" {
+				if sent {
 					contact = recipientsSummary(s.Recipients)
 				}
-				fmt.Fprintf(w, "  %s\t%s\t%s\t%s\t%d\t%s\t%s\n",
-					s.ID,
+				_, _ = fmt.Fprintf(w, "  %s\t%s\t%s\t%s\t%d\t%s\t%s\n",
+					safe(s.ID),
 					contact,
 					ellipsis(s.Name, 25),
 					filesStr,
@@ -256,26 +189,67 @@ Examples:
 					s.UpdatedAt.Format("2006-01-02 15:04"),
 				)
 			}
-			w.Flush()
+			if err := w.Flush(); err != nil {
+				return fmt.Errorf("write to stdout: %w", err)
+			}
 
 			// Pagination hint
 			if !noPagination && offset+len(secretsList) < total {
-				fmt.Fprintf(os.Stderr, "\n  Page %d of %d. Use --page %d for next page.\n", page, (total+queryLimit-1)/queryLimit, page+1)
+				fmt.Fprintf(os.Stderr, "\n  Page %d of %d. Use --page %d for next page.\n", page, (total+limit-1)/limit, page+1)
 			}
 			fmt.Println()
 			return nil
 		},
 	}
 
-	cmd.Flags().BoolVar(&sent, "sent", false, "List sent secrets (default: inbox/received)")
-	cmd.Flags().BoolVar(&vault, "vault", false, "List secrets you encrypted to yourself (your personal vault)")
-	cmd.Flags().StringVar(&fromEmail, "from", "", "Filter inbox by sender email")
-	cmd.Flags().StringVar(&toEmail, "to", "", "Filter sent secrets by recipient email (use with --sent)")
-	cmd.Flags().IntVar(&limit, "limit", 20, "Number of secrets per page")
-	cmd.Flags().IntVar(&page, "page", 1, "Page number")
-	cmd.Flags().BoolVar(&noPagination, "no-pagination", false, "Show all secrets without pagination")
-	cmd.Flags().StringVarP(&outputFmt, "output", "o", "", "Output format: json or yaml")
+	f := cmd.Flags()
+	f.BoolVar(&sent, "sent", false, "List the secrets you sent to others (default: your inbox)")
+	f.Var(&emailFlag{&fromEmail}, "from", "Inbox secrets from this sender `email` only")
+	f.Var(&emailFlag{&toEmail}, "to", "With --sent, secrets sent to this recipient `email` only")
+	setGroup(f, groupFilters, "sent", "from", "to")
+	f.Var(newIntRange(&limit, 20, 1, 1000, ""), "limit", "Secrets per page: 1 to 1000")
+	f.Var(newIntRange(&page, 1, 1, 1_000_000, ""), "page", "Page number, from 1")
+	f.BoolVar(&noPagination, "no-pagination", false, "Show every secret on one page")
+	setGroup(f, groupPagination, "limit", "page", "no-pagination")
+	outputFmt = "table"
+	f.Var(&enumFlag{&outputFmt, []string{"table", "json", "yaml"}}, "format", "Output format")
+	setGroup(f, groupOutput, "format")
+	cmd.MarkFlagsMutuallyExclusive("no-pagination", "page")
+	cmd.MarkFlagsMutuallyExclusive("no-pagination", "limit")
 	return cmd
+}
+
+// inboxSecrets merges the inbox, newest first: the secrets received,
+// and the ones the caller sent only to themself. Those come from the
+// sent list, which keeps one the caller dismissed as its recipient, so
+// the received list's copies are left out to list each secret once. A
+// sender filter keeps them only when it names the caller.
+func inboxSecrets(received, sent []sdk.SecretInfo, fromEmail string) []sdk.SecretInfo {
+	inbox := make([]sdk.SecretInfo, 0, len(received))
+	for _, s := range received {
+		if !s.IsVault() {
+			inbox = append(inbox, s)
+		}
+	}
+	for _, s := range sent {
+		if s.IsVault() && (fromEmail == "" || strings.EqualFold(s.SenderEmail, fromEmail)) {
+			inbox = append(inbox, s)
+		}
+	}
+	sort.SliceStable(inbox, func(i, j int) bool { return inbox[i].UpdatedAt.After(inbox[j].UpdatedAt) })
+	return inbox
+}
+
+// sentSecrets leaves out the secrets the caller sent only to themself,
+// which the inbox lists.
+func sentSecrets(sent []sdk.SecretInfo) []sdk.SecretInfo {
+	out := make([]sdk.SecretInfo, 0, len(sent))
+	for _, s := range sent {
+		if !s.IsVault() {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // --- delete ---
@@ -298,10 +272,11 @@ By default, only the latest revision is shown. Use --all to show all revisions,
 or --revision to show a specific one.
 
 Examples:
-  secret describe abc123-...                    # latest revision only
-  secret desc abc123-... --all                  # all revisions
-  secret desc abc123-... -r REV_ID              # specific revision`,
-		Args: cobra.ExactArgs(1),
+  secret describe 3f2a9c1e-...                  # latest revision only
+  secret desc 3f2a9c1e-... --all                # all revisions
+  secret desc 3f2a9c1e-... -r 7b1d...           # specific revision
+  secret desc 3f2a9c1e-... --format yaml`,
+		Args: idArgs(1, "secret ID"),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dbg("describe", "secret_id=%s all_revisions=%v", args[0], allRevisions)
 			c, err := newAuthenticatedClient()
@@ -311,7 +286,7 @@ Examples:
 
 			secretID := args[0]
 
-			logInfo("ds.describe", fmt.Sprintf("fetching secret id=%s", secretID[:12]))
+			logInfo("ds.describe", fmt.Sprintf("fetching secret id=%s", shortID(secretID)))
 
 			detail, err := c.DescribeSecretFull(secretID)
 			if err != nil {
@@ -326,9 +301,13 @@ Examples:
 			}
 
 			// kubectl-style: same structure as JSON/YAML, just human-formatted
-			w := os.Stderr
+			// Every value comes from the server, so it is printed
+			// through safe. The report is built whole and written once,
+			// and the error of that write is returned.
+			var b strings.Builder
+			w := &b
 			kv := func(key, val string) {
-				fmt.Fprintf(w, "%-30s%s\n", key+":", val)
+				fmt.Fprintf(w, "%-30s%s\n", key+":", safe(val))
 			}
 
 			kv("Name", s.Name)
@@ -343,11 +322,11 @@ Examples:
 			} else {
 				fmt.Fprintf(w, "Recipients:\n")
 				for _, r := range s.Recipients {
-					fmt.Fprintf(w, "  - %-26s%s\n", "Email:", r.Email)
+					fmt.Fprintf(w, "  - %-26s%s\n", "Email:", safe(r.Email))
 					if r.Name != "" {
-						fmt.Fprintf(w, "    %-26s%s\n", "Name:", r.Name)
+						fmt.Fprintf(w, "    %-26s%s\n", "Name:", safe(r.Name))
 					}
-					fmt.Fprintf(w, "    %-26s%s\n", "ID:", r.ID)
+					fmt.Fprintf(w, "    %-26s%s\n", "ID:", safe(r.ID))
 				}
 			}
 			if s.DismissedAt != "" {
@@ -405,10 +384,10 @@ Examples:
 						fmt.Fprintf(w, "Revisions:\n")
 					}
 					rkv := func(key, val string) {
-						fmt.Fprintf(w, "  %-28s%s\n", key+":", val)
+						fmt.Fprintf(w, "  %-28s%s\n", key+":", safe(val))
 					}
 					ikv := func(key, val string) {
-						fmt.Fprintf(w, "    %-30s%s\n", key+":", val)
+						fmt.Fprintf(w, "    %-30s%s\n", key+":", safe(val))
 					}
 
 					rkv("ID", r.ID)
@@ -446,11 +425,11 @@ Examples:
 					if r.Integrity.OriginalSize > 0 {
 						ikv("Original Size", fmt.Sprintf("%d", r.Integrity.OriginalSize))
 					}
-					ikv("Key Fingerprint", fingerprintWithStatus(r.Integrity.KeyFingerprint, r.Integrity.SenderKeyStatus))
+					fmt.Fprintf(w, "    %-30s%s\n", "Key Fingerprint:", fingerprintWithStatus(r.Integrity.KeyFingerprint, r.Integrity.SenderKeyStatus))
 					if len(r.Integrity.Recipients) > 0 {
 						fmt.Fprintf(w, "    Recipients:\n")
 						for _, rr := range r.Integrity.Recipients {
-							fmt.Fprintf(w, "      - %-26s%s\n", "Email:", rr.Email)
+							fmt.Fprintf(w, "      - %-26s%s\n", "Email:", safe(rr.Email))
 							fmt.Fprintf(w, "        %-26s%s\n", "Key Fingerprint:", fingerprintWithStatus(rr.KeyFingerprint, rr.KeyStatus))
 						}
 					}
@@ -459,21 +438,27 @@ Examples:
 					if len(r.FilesMeta) > 0 {
 						fmt.Fprintf(w, "  Files Meta:\n")
 						for _, f := range r.FilesMeta {
-							fmt.Fprintf(w, "    - %-28s%s\n", "Name:", f.Name)
+							fmt.Fprintf(w, "    - %-28s%s\n", "Name:", safe(f.Name))
 							fmt.Fprintf(w, "      %-28s%d\n", "Size:", f.Size)
-							fmt.Fprintf(w, "      %-28s%s\n", "SHA256:", f.SHA256)
+							fmt.Fprintf(w, "      %-28s%s\n", "SHA256:", safe(f.SHA256))
 						}
 					}
 				}
 			}
 
-			return nil
+			_, err = io.WriteString(os.Stderr, b.String())
+			return err
 		},
 	}
 
-	cmd.Flags().BoolVarP(&allRevisions, "all", "a", false, "Show all revisions")
-	cmd.Flags().StringVarP(&revisionID, "revision", "r", "", "Show a specific revision by ID")
-	cmd.Flags().StringVarP(&outputFmt, "output", "o", "", "Output format: json or yaml")
+	f := cmd.Flags()
+	f.BoolVar(&allRevisions, "all", false, "Show every revision")
+	f.VarP(&uuidFlag{&revisionID}, "revision", "r", "Show this revision `id` (default: the latest)")
+	setGroup(f, groupInput, "all", "revision")
+	outputFmt = "table"
+	f.Var(&enumFlag{&outputFmt, []string{"table", "json", "yaml"}}, "format", "Output format")
+	setGroup(f, groupOutput, "format")
+	cmd.MarkFlagsMutuallyExclusive("all", "revision")
 	cmd.AddCommand(newDescribeGroupCmd())
 	return cmd
 }
@@ -482,7 +467,7 @@ func newDescribeGroupCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "group <name>",
 		Short: "Show a group's members (alias: secret describe group <name>)",
-		Args:  cobra.ExactArgs(1),
+		Args:  groupNameArg,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return describeGroup(args[0])
 		},
@@ -500,18 +485,12 @@ the sender or recipient.
 Examples:
   secret delete abc123-...
   secret delete abc123-... def456-...`,
-		Args: cobra.MinimumNArgs(1),
+		Args: minIDArgs(1, "secret ID"),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dbg("delete", "ids=%v", args)
 			c, err := newAuthenticatedClient()
 			if err != nil {
 				return err
-			}
-
-			for _, id := range args {
-				if _, err := uuid.Parse(id); err != nil {
-					return fmt.Errorf("invalid secret ID %q: %w", id, err)
-				}
 			}
 
 			dbg("delete", "deleting %d secret(s)", len(args))
@@ -544,18 +523,9 @@ downloaded. Revoking the last recipient deletes the secret.
 Examples:
   secret revoke abc123-... --to bob@example.com
   secret revoke abc123-... -t bob@example.com -t carol@example.com`,
-		Args: cobra.ExactArgs(1),
+		Args: idArgs(1, "secret ID"),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			secretID := args[0]
-			if _, err := uuid.Parse(secretID); err != nil {
-				return fmt.Errorf("invalid secret ID: %w", err)
-			}
-			if len(recipientEmails) == 0 {
-				return fmt.Errorf("name the recipients to revoke with --to")
-			}
-			if err := sdk.ValidateRecipients(recipientEmails); err != nil {
-				return err
-			}
 
 			c, err := newAuthenticatedClient()
 			if err != nil {
@@ -564,7 +534,7 @@ Examples:
 
 			dbg("revoke", "secret_id=%s recipients=%d", secretID, len(recipientEmails))
 			for _, email := range recipientEmails {
-				logInfo("ds.revoke", fmt.Sprintf("revoking %s on secret=%s", email, secretID[:12]))
+				logInfo("ds.revoke", fmt.Sprintf("revoking %s on secret=%s", email, shortID(secretID)))
 				res, err := c.RevokeRecipient(secretID, email)
 				if err != nil {
 					return fmt.Errorf("revoke %s: %w", email, err)
@@ -579,7 +549,9 @@ Examples:
 		},
 	}
 
-	cmd.Flags().StringSliceVarP(&recipientEmails, "to", "t", nil, "Recipient email to revoke (can be repeated)")
+	cmd.Flags().VarP(&emailList{&recipientEmails}, "to", "t", "Recipient `email` to revoke, repeatable or comma-separated")
+	setGroup(cmd.Flags(), groupRecipients, "to")
+	_ = cmd.MarkFlagRequired("to")
 	return cmd
 }
 
@@ -605,12 +577,9 @@ Examples:
   secret policy abc123-... --ttl 48h
   secret policy abc123-... --ip 10.0.0.0/8
   secret policy abc123-... --clear-ttl --clear-ips`,
-		Args: cobra.ExactArgs(1),
+		Args: idArgs(1, "secret ID"),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			secretID := args[0]
-			if _, err := uuid.Parse(secretID); err != nil {
-				return fmt.Errorf("invalid secret ID: %w", err)
-			}
 
 			c, err := newAuthenticatedClient()
 			if err != nil {
@@ -621,11 +590,7 @@ Examples:
 			hasChanges := false
 
 			if cmd.Flags().Changed("ttl") {
-				d, err := parseDuration(ttl)
-				if err != nil {
-					return fmt.Errorf("invalid --ttl: %w", err)
-				}
-				secs := int(d.Seconds())
+				secs := int(ttlSeconds(ttl))
 				update.TTLSeconds = &secs
 				hasChanges = true
 			}
@@ -649,7 +614,7 @@ Examples:
 				return fmt.Errorf("no policy flags specified. Use --ttl, --ip, or --clear-* flags")
 			}
 
-			logInfo("ds.policy", fmt.Sprintf("updating policies for secret=%s", secretID[:12]))
+			logInfo("ds.policy", fmt.Sprintf("updating policies for secret=%s", shortID(secretID)))
 			updated, err := c.UpdatePolicy(secretID, update)
 			if err != nil {
 				return err
@@ -658,12 +623,12 @@ Examples:
 			printSuccess(fmt.Sprintf("Policies updated for %s (%s)", updated.ID, updated.Name))
 			fmt.Fprintln(os.Stderr)
 			if updated.ExpiresAt != nil {
-				printKeyValue("TTL", "expires "+*updated.ExpiresAt)
+				printKeyValue("TTL", "expires "+safe(*updated.ExpiresAt))
 			} else {
 				printKeyValue("TTL", "none")
 			}
 			if len(updated.AllowedIPs) > 0 {
-				printKeyValue("IP Lock", strings.Join(updated.AllowedIPs, ", "))
+				printKeyValue("IP Lock", safe(strings.Join(updated.AllowedIPs, ", ")))
 			} else {
 				printKeyValue("IP Lock", "none")
 			}
@@ -673,10 +638,15 @@ Examples:
 		},
 	}
 
-	cmd.Flags().StringVar(&ttl, "ttl", "", "Set TTL (e.g. \"24h\", \"7d\")")
-	cmd.Flags().StringSliceVar(&allowedIPs, "ip", nil, "Set allowed IPs/CIDRs (replaces existing)")
-	cmd.Flags().BoolVar(&clearTTL, "clear-ttl", false, "Remove TTL policy")
-	cmd.Flags().BoolVar(&clearIPs, "clear-ips", false, "Remove IP lock policy")
+	f := cmd.Flags()
+	f.Var(&ttlFlag{&ttl}, "ttl", "Expire the secret this long from now: 2m to 365d, like 30m, 24h or 7d")
+	f.Var(&ipList{&allowedIPs}, "ip", "Allow access only from these IP addresses or CIDR ranges, replacing the current list (at most 50)")
+	f.BoolVar(&clearTTL, "clear-ttl", false, "Remove the TTL")
+	f.BoolVar(&clearIPs, "clear-ips", false, "Remove the IP lock")
+	setGroup(f, groupPolicies, "ttl", "ip", "clear-ttl", "clear-ips")
+	cmd.MarkFlagsMutuallyExclusive("ttl", "clear-ttl")
+	cmd.MarkFlagsMutuallyExclusive("ip", "clear-ips")
+	cmd.MarkFlagsOneRequired("ttl", "ip", "clear-ttl", "clear-ips")
 
 	return cmd
 }
@@ -754,11 +724,14 @@ func recipientsSummary(rs []sdk.SecretRecipient) string {
 	}
 }
 
+// ellipsis shortens s to max characters for a table column, through safe:
+// what it shortens comes from the server.
 func ellipsis(s string, max int) string {
-	if len(s) <= max {
-		return s
+	r := []rune(safe(s))
+	if len(r) <= max {
+		return string(r)
 	}
-	return s[:max-3] + "..."
+	return string(r[:max-3]) + "..."
 }
 
 // isArchivedRevision reports whether the revision was sent as a single
@@ -810,29 +783,6 @@ func formatBytes(b int64) string {
 	}
 }
 
-func parseDuration(s string) (time.Duration, error) {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return 0, fmt.Errorf("empty duration")
-	}
-	if strings.HasSuffix(s, "d") {
-		numStr := strings.TrimSuffix(s, "d")
-		var days int
-		if _, err := fmt.Sscanf(numStr, "%d", &days); err != nil || days <= 0 {
-			return 0, fmt.Errorf("invalid days: %s", s)
-		}
-		return time.Duration(days) * 24 * time.Hour, nil
-	}
-	d, err := time.ParseDuration(s)
-	if err != nil {
-		return 0, err
-	}
-	if d <= 0 {
-		return 0, fmt.Errorf("duration must be positive")
-	}
-	return d, nil
-}
-
 // fingerprintWithStatus annotates an identity fingerprint with its trust
 // status for inline display in revision details. Mirrors the colored
 // indicator in the web UI:
@@ -844,6 +794,7 @@ func parseDuration(s string) (time.Duration, error) {
 // When the fingerprint is empty or the status is unset, returns the
 // fingerprint as-is so the details surface degrades gracefully.
 func fingerprintWithStatus(fp string, status *string) string {
+	fp = safe(fp)
 	if fp == "" || status == nil || *status == "" {
 		return fp
 	}
