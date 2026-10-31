@@ -11,6 +11,8 @@ import (
 
 const testRevisionID = "4f9c1e5a-8b2d-4c3e-9f1a-2b3c4d5e6f70"
 
+const testSecretName = "db-password"
+
 type testParty struct {
 	kp  *crypto.KeyPair
 	fp  string
@@ -53,7 +55,7 @@ func sealFor(t *testing.T, plaintext []byte, sender testParty, p crypto.SealPara
 // openAs opens the revision as r with r's own wrap and decrypts payload.
 func openAs(sealed *crypto.Sealed, payload []byte, r testParty, senderED25519 string) ([]byte, *crypto.Manifest, error) {
 	wrap, _ := sealed.Wrap(r.fp)
-	opened, err := crypto.Open(sealed.ManifestData, wrap, r.kp, crypto.OpenParams{RevisionID: testRevisionID, SenderED25519: senderED25519})
+	opened, err := crypto.Open(sealed.ManifestData, wrap, r.kp, crypto.OpenParams{RevisionID: testRevisionID, SecretName: testSecretName, SenderED25519: senderED25519})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -65,7 +67,7 @@ func openAs(sealed *crypto.Sealed, payload []byte, r testParty, senderED25519 st
 func TestSealOpenRoundtrip(t *testing.T) {
 	sender, alice, bob := newTestParty(t), newTestParty(t), newTestParty(t)
 	plaintext := []byte("hello deepsecret - one payload, every recipient")
-	payload, sealed := sealFor(t, plaintext, sender, crypto.SealParams{RevisionID: testRevisionID, PayloadType: "message"}, alice, bob)
+	payload, sealed := sealFor(t, plaintext, sender, crypto.SealParams{RevisionID: testRevisionID, SecretName: testSecretName, PayloadType: "message"}, alice, bob)
 
 	m, err := crypto.UnmarshalManifest(sealed.ManifestData)
 	if err != nil {
@@ -97,6 +99,7 @@ func TestDecryptWithCompression(t *testing.T) {
 	plaintext := []byte("compressed payload with repeated data repeated data repeated data")
 	payload, sealed := sealFor(t, plaintext, sender, crypto.SealParams{
 		RevisionID:  testRevisionID,
+		SecretName:  testSecretName,
 		PayloadType: "files",
 		Compressed:  true,
 		Compression: "zstd",
@@ -119,17 +122,17 @@ func TestDecryptWithCompression(t *testing.T) {
 
 func TestDecryptWrongKey(t *testing.T) {
 	sender, recipient, wrong := newTestParty(t), newTestParty(t), newTestParty(t)
-	_, sealed := sealFor(t, []byte("secret"), sender, crypto.SealParams{RevisionID: testRevisionID, PayloadType: "message"}, recipient)
+	_, sealed := sealFor(t, []byte("secret"), sender, crypto.SealParams{RevisionID: testRevisionID, SecretName: testSecretName, PayloadType: "message"}, recipient)
 
 	wrap, _ := sealed.Wrap(recipient.fp)
-	if _, err := crypto.Open(sealed.ManifestData, wrap, wrong.kp, crypto.OpenParams{RevisionID: testRevisionID}); err == nil {
+	if _, err := crypto.Open(sealed.ManifestData, wrap, wrong.kp, crypto.OpenParams{RevisionID: testRevisionID, SecretName: testSecretName}); err == nil {
 		t.Error("should fail with a key that is not a recipient")
 	}
 }
 
 func TestSignatureVerificationFails(t *testing.T) {
 	sender, recipient, fakeSender := newTestParty(t), newTestParty(t), newTestParty(t)
-	payload, sealed := sealFor(t, []byte("secret"), sender, crypto.SealParams{RevisionID: testRevisionID, PayloadType: "message"}, recipient)
+	payload, sealed := sealFor(t, []byte("secret"), sender, crypto.SealParams{RevisionID: testRevisionID, SecretName: testSecretName, PayloadType: "message"}, recipient)
 
 	if _, _, err := openAs(sealed, payload, recipient, fakeSender.kp.ED25519Public); err == nil {
 		t.Error("should fail with wrong expected sender key")
@@ -188,7 +191,7 @@ func TestKeyBundleSignVerify(t *testing.T) {
 func TestSelfEncryptDecrypt(t *testing.T) {
 	self := newTestParty(t)
 	msg := "self-encrypted message"
-	payload, sealed := sealFor(t, []byte(msg), self, crypto.SealParams{RevisionID: testRevisionID, PayloadType: "message"}, self)
+	payload, sealed := sealFor(t, []byte(msg), self, crypto.SealParams{RevisionID: testRevisionID, SecretName: testSecretName, PayloadType: "message"}, self)
 	if len(sealed.Wraps) != 1 {
 		t.Fatalf("want a single wrap, got %d", len(sealed.Wraps))
 	}

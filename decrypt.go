@@ -369,6 +369,10 @@ plan and every change to it.`,
 				if errors.As(err, &interrupted) {
 					return withDetail(err, downloadResumeDetail(interrupted.Download))
 				}
+				var stale *sdk.StaleRevisionError
+				if errors.As(err, &stale) {
+					return withDetail(err, staleRevisionDetail(secretID, stale))
+				}
 				return err
 			}
 			result := opened.Result
@@ -380,6 +384,11 @@ plan and every change to it.`,
 			} else {
 				printKeyValue("Secret ID", secretID)
 			}
+			// The name and time the sender signed: the server names the
+			// secret too, so these show which secret and which version
+			// this is.
+			printKeyValue("Name", safe(result.SecretName))
+			printKeyValue("Signed", result.SignedAt.Local().Format("2006-01-02 15:04:05 MST")+" (by the sender's clock)")
 			printKeyValue("Type", safe(result.PayloadType))
 			switch {
 			case written != nil && written.Archived:
@@ -451,6 +460,13 @@ plan and every change to it.`,
 		cmd.MarkFlagsMutuallyExclusive("local", serverOnly)
 	}
 	return cmd
+}
+
+// staleRevisionDetail says, for the Error block of a decrypt refused as a
+// possible rollback, how to open that older revision on purpose.
+func staleRevisionDetail(secretID string, e *sdk.StaleRevisionError) string {
+	return fmt.Sprintf("The server may be serving an old version of this secret. If %s confirms this older revision is the one you want, open it by id:\n\n"+
+		"  secret decrypt %s --revision %s", safe(e.SenderEmail), secretID, safe(e.RevisionID))
 }
 
 // filesDir is where a files payload is written: dir (--dir), or
