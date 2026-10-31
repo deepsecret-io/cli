@@ -288,15 +288,7 @@ plan and every change to it.`,
 					if p.PayloadType != "files" {
 						return nil
 					}
-					dir, err := filesDir(outputDir, p.RevisionID)
-					if err != nil {
-						return err
-					}
-					if err := sdk.CheckDestination(dir, p.Files, forceOverwrite); err != nil {
-						return fmt.Errorf("%w (nothing was downloaded)", err)
-					}
-					dbg("destination", "%s can take the %d file(s) the server lists", dir, len(p.Files))
-					return nil
+					return checkFilesDestination(outputDir, p, forceOverwrite)
 				},
 			}
 
@@ -484,6 +476,46 @@ func filesDir(dir, revisionID string) (string, error) {
 		return "", fmt.Errorf("the revision ID %q is not a UUID; pass --dir to choose the output directory", revisionID)
 	}
 	return "./" + revisionID, nil
+}
+
+// checkFilesDestination checks, before the download, that the files of p
+// can be written where decrypt writes them (dirFlag is --dir), so a decrypt
+// that cannot finish fails without fetching a possibly large payload.
+//
+// The server lists the files of a revision, except an archive's: a folder
+// is sent as one archive, and the server keeps no names from inside it.
+// Then only one conflict is foreseeable: the default ./<revision-id>/
+// already holding files, which only an earlier decrypt of this revision
+// writes there. A --dir the caller chose may well hold other files, so an
+// archive's conflicts there show only once it is extracted.
+func checkFilesDestination(dirFlag string, p sdk.UpcomingDownload, overwrite bool) error {
+	dir, err := filesDir(dirFlag, p.RevisionID)
+	if err != nil {
+		return err
+	}
+	if err := sdk.CheckDestination(dir, p.Files, overwrite); err != nil {
+		return fmt.Errorf("%w (nothing was downloaded)", err)
+	}
+	if len(p.Files) > 0 {
+		dbg("destination", "%s can take the %d file(s) the server lists", dir, len(p.Files))
+		return nil
+	}
+	if dirFlag == "" && !overwrite && dirHasEntries(dir) {
+		return fmt.Errorf("%s already holds an earlier decrypt of this revision: pass --overwrite to replace its files, or --dir to write elsewhere (nothing was downloaded)", dir)
+	}
+	dbg("destination", "%s is writable; the server keeps no file names for this archive, so name conflicts show only once it is extracted", dir)
+	return nil
+}
+
+// dirHasEntries reports whether dir is a directory holding anything.
+func dirHasEntries(dir string) bool {
+	f, err := os.Open(dir) // #nosec G304 -- the directory this decrypt writes into.
+	if err != nil {
+		return false
+	}
+	defer func() { _ = f.Close() }() // read only.
+	names, _ := f.Readdirnames(1)
+	return len(names) > 0
 }
 
 // printWrittenFiles lists what WriteFiles wrote: each file with its size
