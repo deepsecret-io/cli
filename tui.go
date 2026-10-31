@@ -130,8 +130,8 @@ func logLine(level logLevel, ctx, format string, args ...any) {
 		tag, color = "DEBUG", ansiDim
 	}
 	// For DEBUG keep the entire line dim. For others, color only the tag
-	// so the message text stays legible. A live view moves below the line.
-	withLiveCleared(func() {
+	// so the message text stays legible. A live view stays below the line.
+	aboveLive(func() {
 		if level == lvlDebug {
 			fmt.Fprintf(os.Stderr, "%s%s  %s: %s%s\n", color, tag, ctx, msg, ansiReset)
 		} else {
@@ -276,7 +276,7 @@ func runPipeline(title string, steps []step, summary []keyValue) error {
 					// frozen while the goroutine drains.
 					if !cancelled {
 						cancelled = true
-						withLiveCleared(func() {
+						aboveLive(func() {
 							fmt.Fprintf(os.Stderr, "  %s⏳%s cancelling, please wait...\n", ansiYellow, ansiReset)
 						})
 					}
@@ -377,7 +377,9 @@ func logInfo(prefix, msg string) {
 	if !debug {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "%s%s:%s %s\n", ansiCyan, prefix, ansiReset, msg)
+	aboveLive(func() {
+		fmt.Fprintf(os.Stderr, "%s%s:%s %s\n", ansiCyan, prefix, ansiReset, msg)
+	})
 }
 
 // ── Simple Output Helpers ───────────────────────────────────────────────────

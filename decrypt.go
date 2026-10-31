@@ -282,6 +282,22 @@ plan and every change to it.`,
 				DownloadThreads:      downloadThreads,
 				PresignExpiryMinutes: presignExpiry,
 				OnDebug:              func(step, msg string) { dbg(step, "%s", msg) },
+				// The download can be large: check that the files can be
+				// written before fetching them.
+				BeforeDownload: func(p sdk.UpcomingDownload) error {
+					if p.PayloadType != "files" {
+						return nil
+					}
+					dir, err := filesDir(outputDir, p.RevisionID)
+					if err != nil {
+						return err
+					}
+					if err := sdk.CheckDestination(dir, p.Files, forceOverwrite); err != nil {
+						return fmt.Errorf("%w (nothing was downloaded)", err)
+					}
+					dbg("destination", "%s can take the %d file(s) the server lists", dir, len(p.Files))
+					return nil
+				},
 			}
 
 			// Live progress: each connection of the download, or reading
@@ -349,18 +365,10 @@ plan and every change to it.`,
 							}
 							return "verified", nil
 						}
-						// Files default to ./<revision-id>/ so an unintended
-						// decrypt never dumps a tree on top of the caller's CWD.
-						if outputDir == "" {
-							// The revision ID names a directory, so it must
-							// be a UUID and never a path.
-							id, err := uuid.Parse(opened.Result.RevisionID)
-							if err != nil || id.String() != opened.Result.RevisionID {
-								return "", fmt.Errorf("the revision ID %q is not a UUID; pass --dir to choose the output directory", opened.Result.RevisionID)
-							}
-							outputDir = "./" + opened.Result.RevisionID
-						}
 						var err error
+						if outputDir, err = filesDir(outputDir, opened.Result.RevisionID); err != nil {
+							return "", err
+						}
 						written, err = opened.WriteFiles(outputDir, sdk.WriteOptions{Overwrite: forceOverwrite})
 						if err != nil {
 							dbgErr("decrypt", err)
@@ -461,6 +469,21 @@ plan and every change to it.`,
 		cmd.MarkFlagsMutuallyExclusive("local", serverOnly)
 	}
 	return cmd
+}
+
+// filesDir is where a files payload is written: dir (--dir), or
+// ./<revision-id>/ so an unintended decrypt never dumps a tree on top of
+// the working directory. The revision ID then names a directory, so it
+// must be a UUID and never a path.
+func filesDir(dir, revisionID string) (string, error) {
+	if dir != "" {
+		return dir, nil
+	}
+	id, err := uuid.Parse(revisionID)
+	if err != nil || id.String() != revisionID {
+		return "", fmt.Errorf("the revision ID %q is not a UUID; pass --dir to choose the output directory", revisionID)
+	}
+	return "./" + revisionID, nil
 }
 
 // printWrittenFiles lists what WriteFiles wrote: each file with its size

@@ -27,9 +27,10 @@ func uploadFrame(conns []sdk.ConnectionStatus) liveFrame {
 			Threads: 4, MaxThreads: 32, Connections: conns}}
 }
 
-// The live view shows the step, then the transfer's numbers, then one
-// line per connection: the part it moves and how far, a retry, or that it
-// is free.
+// The live view shows the step, then the transfer's numbers, then a line
+// for each connection moving a part: the part and how far, or a retry. A
+// free connection, or one whose part is all moved, gets no line; the
+// others keep their numbers.
 func TestLiveLinesShowEachConnection(t *testing.T) {
 	now := time.Now()
 	lines := liveLines("ds.encrypt_upload: Encrypting locally, then uploading", uploadFrame([]sdk.ConnectionStatus{
@@ -37,8 +38,9 @@ func TestLiveLinesShowEachConnection(t *testing.T) {
 		{Part: 5, Size: 8 << 20, Attempt: 2, Waiting: true},
 		{},
 		{Part: 12, Size: 1 << 20, Moved: 1 << 19, Attempt: 3, Since: now.Add(-time.Second)},
+		{Part: 7, Size: 8 << 20, Moved: 8 << 20, Attempt: 1, Since: now.Add(-3 * time.Second)},
 	}), now, 200, 40, true)
-	if len(lines) != 6 {
+	if len(lines) != 5 {
 		t.Fatalf("%d lines:\n%s", len(lines), strings.Join(lines, "\n"))
 	}
 	for i, want := range []string{
@@ -46,7 +48,6 @@ func TestLiveLinesShowEachConnection(t *testing.T) {
 		"  uploading 40.0 MB/96.0 MB 42%  8.0 MB/s, 7s left  4 connections, up to 32",
 		"1 part  4 of 12  █████░░░░░░░░░░░░░░░  2.0 MB/8.0 MB  1.0 MB/s",
 		"2 part  5 of 12  ░░░░░░░░░░░░░░░░░░░░  retrying, attempt 2 of 8",
-		"3 free",
 		"4 part 12 of 12  ██████████░░░░░░░░░░  512.0 KB/1.0 MB  512.0 KB/s  attempt 3 of 8",
 	} {
 		if got := ansiEscape.ReplaceAllString(lines[i], ""); !strings.Contains(got, want) {
@@ -258,5 +259,45 @@ func TestProgressOnlyWithTheFlag(t *testing.T) {
 	out := run()
 	if redraw(out) || !strings.Contains(out, "Encrypting  encrypting 1.0 MB/4.0 MB 25%\n") {
 		t.Fatalf("--progress redirected got %q, want plain progress lines", out)
+	}
+}
+
+// A log line printed while the live view is shown goes above it, and the
+// view is drawn again straight below, so --debug lines scroll above a
+// progress view that stays at the bottom instead of mixing with it. A step
+// that ends clears the view, and later log lines do not bring it back.
+func TestLogLinesPrintAboveTheLiveView(t *testing.T) {
+	savedCursor, savedDebug := liveCursor, debug
+	liveCursor, debug = true, true
+	t.Cleanup(func() {
+		liveCursor, debug = savedCursor, savedDebug
+		withLiveCleared(func() {})
+	})
+	view := []string{"ds.decrypt: Downloading", "  downloading 1.0 MB/4.0 MB 25%", "  1 part 2 of 4"}
+	out := stderrOf(t, func() {
+		drawLive(view)
+		logDebug("range", "piece 3 split")
+	})
+	line := strings.Index(out, "piece 3 split")
+	if line < 0 {
+		t.Fatalf("no debug line in %q", out)
+	}
+	// The view is erased before the line and drawn whole after it.
+	if erase := strings.Index(out, "\r\033[2A\033[J"); erase < 0 || erase > line {
+		t.Fatalf("the view was not erased before the debug line: %q", out)
+	}
+	if !strings.HasSuffix(out, strings.Join(view, "\n")) {
+		t.Fatalf("the view was not drawn again below the debug line: %q", out)
+	}
+	if live.lines != len(view) {
+		t.Fatalf("live.lines = %d, want %d", live.lines, len(view))
+	}
+
+	out = stderrOf(t, func() {
+		withLiveCleared(func() {})
+		logDebug("decrypt", "after the step")
+	})
+	if strings.Contains(out, view[0]) || live.lines != 0 {
+		t.Fatalf("the view came back after the step ended: %q (%d lines)", out, live.lines)
 	}
 }

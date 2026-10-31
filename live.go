@@ -168,22 +168,39 @@ func liveLines(head string, f liveFrame, now time.Time, width, height int, multi
 		return lines
 	}
 
-	conns := f.snap.Connections
+	// Only connections moving a part get a row, numbered as the transfer
+	// numbers them: a free one, or one whose part is all moved, drops out
+	// until it takes another part.
+	var active []int
+	for i, c := range f.snap.Connections {
+		if !connDone(c) {
+			active = append(active, i)
+		}
+	}
 	room := max(1, height-3)
-	shown := conns
-	if len(conns) > room {
-		shown = conns[:room-1]
+	shown := active
+	if len(active) > room {
+		shown = active[:room-1]
 	}
-	numWidth := len(fmt.Sprint(len(conns)))
+	numWidth := len(fmt.Sprint(len(f.snap.Connections)))
 	partWidth := len(fmt.Sprint(f.snap.Parts))
-	for i, c := range shown {
-		lines = append(lines, fit(connLine(i+1, numWidth, partWidth, f.snap.Parts, c, now), width))
+	for _, i := range shown {
+		lines = append(lines, fit(connLine(i+1, numWidth, partWidth, f.snap.Parts, f.snap.Connections[i], now), width))
 	}
-	if len(shown) < len(conns) {
-		more := len(conns) - len(shown)
+	if len(shown) < len(active) {
+		more := len(active) - len(shown)
 		lines = append(lines, fit(fmt.Sprintf("  %s... and %d more connection%s%s", ansiDim, more, pluralS(more), ansiReset), width))
 	}
 	return lines
+}
+
+// connDone reports whether a connection has nothing in flight: it is free,
+// or its part is all moved. A connection waiting to retry is not done.
+func connDone(c sdk.ConnectionStatus) bool {
+	if c.Waiting {
+		return false
+	}
+	return c.Part == 0 || (c.Size > 0 && c.Moved >= c.Size)
 }
 
 // liveStats is a frame's numbers: the stage, bytes, rate, time left and
@@ -321,7 +338,8 @@ func escapeEnd(s string, i int) int {
 // it may be shown holds mu, so a log line never lands inside it.
 var live struct {
 	mu    sync.Mutex
-	lines int // lines of the live view on screen; 0 when none
+	lines int      // lines of the live view on screen; 0 when none
+	last  []string // the view drawn last, put back under a line printed above it
 }
 
 // terminalSize is stderr's size, or 80 by 24 when it cannot be read.
@@ -341,12 +359,14 @@ func drawLive(lines []string) {
 	eraseLive(&b)
 	b.WriteString(strings.Join(lines, "\n"))
 	live.lines = len(lines)
+	live.last = lines
 	// A redraw that fails on stderr has nowhere to be reported.
 	_, _ = io.WriteString(os.Stderr, b.String())
 }
 
 // withLiveCleared removes the live view, if shown, and runs write, which
-// writes to stderr. The next redraw puts the view back below.
+// writes to stderr. The view stays off until the next redraw: a step that
+// ends uses it to leave no view behind.
 func withLiveCleared(write func()) {
 	live.mu.Lock()
 	defer live.mu.Unlock()
@@ -355,7 +375,25 @@ func withLiveCleared(write func()) {
 		eraseLive(&b)
 		_, _ = io.WriteString(os.Stderr, b.String()) // as in drawLive
 	}
+	live.last = nil
 	write()
+}
+
+// aboveLive runs write, which writes whole lines to stderr, above the live
+// view: the view, if shown, is removed and put straight back below them,
+// so log lines scroll above a view that stays at the bottom.
+func aboveLive(write func()) {
+	live.mu.Lock()
+	defer live.mu.Unlock()
+	shown := live.lines > 0
+	var b strings.Builder
+	eraseLive(&b)
+	_, _ = io.WriteString(os.Stderr, b.String()) // as in drawLive
+	write()
+	if shown {
+		_, _ = io.WriteString(os.Stderr, strings.Join(live.last, "\n"))
+		live.lines = len(live.last)
+	}
 }
 
 // eraseLive writes what removes the live view, leaving the cursor where
