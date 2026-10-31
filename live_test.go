@@ -45,10 +45,10 @@ func TestLiveLinesShowEachConnection(t *testing.T) {
 	}
 	for i, want := range []string{
 		"ds.encrypt_upload: Encrypting locally, then uploading",
-		"  uploading 40.0 MB/96.0 MB 42%  8.0 MB/s, 7s left  4 connections, up to 32",
-		"1 part  4 of 12  █████░░░░░░░░░░░░░░░  2.0 MB/8.0 MB  1.0 MB/s",
+		"  uploading 40.0 MiB/96.0 MiB 42%  8.0 MiB/s, 7s left  4 connections, up to 32",
+		"1 part  4 of 12  █████░░░░░░░░░░░░░░░  2.0 MiB/8.0 MiB  1.0 MiB/s",
 		"2 part  5 of 12  ░░░░░░░░░░░░░░░░░░░░  retrying, attempt 2 of 8",
-		"4 part 12 of 12  ██████████░░░░░░░░░░  512.0 KB/1.0 MB  512.0 KB/s  attempt 3 of 8",
+		"4 part 12 of 12  ██████████░░░░░░░░░░  512.0 KiB/1.0 MiB  512.0 KiB/s  attempt 3 of 8",
 	} {
 		if got := ansiEscape.ReplaceAllString(lines[i], ""); !strings.Contains(got, want) {
 			t.Errorf("line %d: %q, want it to hold %q", i, got, want)
@@ -87,8 +87,8 @@ func TestLiveLinesWithoutRows(t *testing.T) {
 	f := uploadFrame([]sdk.ConnectionStatus{{Part: 1, Size: 10, Attempt: 1}})
 	head := "ds.encrypt: Encrypting to /a/very/long/path/that/fills/the/line/report-2026.tar.cbor      "
 	lines := liveLines(head, f, now, 100, 40, false)
-	if len(lines) != 1 || columns(lines[0]) > 99 || !strings.HasPrefix(lines[0], "ds.encrypt: Encrypt") ||
-		!strings.Contains(lines[0], "...  uploading 40.0 MB/96.0 MB 42%  8.0 MB/s, 7s left  4 connections, up to 32") {
+	if len(lines) != 1 || columns(lines[0]) > 99 || !strings.HasPrefix(lines[0], "ds.encrypt: Encryp") ||
+		!strings.Contains(lines[0], "...  uploading 40.0 MiB/96.0 MiB 42%  8.0 MiB/s, 7s left  4 connections, up to 32") {
 		t.Fatalf("no cursor moves: %q", lines)
 	}
 	if lines := liveLines("head  ", f, now, 200, 40, false); lines[0] != "head  "+liveStats(f) {
@@ -251,13 +251,13 @@ func TestProgressOnlyWithTheFlag(t *testing.T) {
 	}
 
 	showProgress, stderrIsTerminal, liveCursor = true, true, true
-	if out := run(); !strings.Contains(out, "\033[J") || !strings.Contains(out, "encrypting 1.0 MB/4.0 MB 25%") {
+	if out := run(); !strings.Contains(out, "\033[J") || !strings.Contains(out, "encrypting 1.0 MiB/4.0 MiB 25%") {
 		t.Fatalf("--progress on a terminal got %q, want the live view redrawn", out)
 	}
 
 	showProgress, stderrIsTerminal, liveCursor = true, false, false
 	out := run()
-	if redraw(out) || !strings.Contains(out, "Encrypting  encrypting 1.0 MB/4.0 MB 25%\n") {
+	if redraw(out) || !strings.Contains(out, "Encrypting  encrypting 1.0 MiB/4.0 MiB 25%\n") {
 		t.Fatalf("--progress redirected got %q, want plain progress lines", out)
 	}
 }
@@ -273,7 +273,7 @@ func TestLogLinesPrintAboveTheLiveView(t *testing.T) {
 		liveCursor, debug = savedCursor, savedDebug
 		withLiveCleared(func() {})
 	})
-	view := []string{"ds.decrypt: Downloading", "  downloading 1.0 MB/4.0 MB 25%", "  1 part 2 of 4"}
+	view := []string{"ds.decrypt: Downloading", "  downloading 1.0 MiB/4.0 MiB 25%", "  1 part 2 of 4"}
 	out := stderrOf(t, func() {
 		drawLive(view)
 		logDebug("range", "piece 3 split")
@@ -299,5 +299,23 @@ func TestLogLinesPrintAboveTheLiveView(t *testing.T) {
 	})
 	if strings.Contains(out, view[0]) || live.lines != 0 {
 		t.Fatalf("the view came back after the step ended: %q (%d lines)", out, live.lines)
+	}
+}
+
+// The Files line of an archived send counts its regular files, and its
+// entries when folders or links add to them.
+func TestArchivedFiles(t *testing.T) {
+	for _, tc := range []struct {
+		files, entries int
+		want           string
+	}{
+		{1880, 2208, "1880 in one archive (2208 entries with folders and links)"},
+		{12, 12, "12 in one archive"},
+		{0, 1, "1 entry in one archive"},
+		{0, 5, "5 entries in one archive"},
+	} {
+		if got := archivedFiles(tc.files, tc.entries); got != tc.want {
+			t.Errorf("archivedFiles(%d, %d) = %q, want %q", tc.files, tc.entries, got, tc.want)
+		}
 	}
 }

@@ -389,13 +389,14 @@ your account. Recipients open the file with "secret decrypt --local".`,
 			}
 			printKeyValue("Type", result.PayloadType)
 			if result.Archived && result.ArchiveEntryCount > 0 {
-				printKeyValue("Files", fmt.Sprintf("%d (archived)", result.ArchiveEntryCount))
+				printKeyValue("Files", archivedFiles(result.ArchiveFileCount, result.ArchiveEntryCount))
 			} else if result.FilesCount > 0 {
 				printKeyValue("Files", fmt.Sprintf("%d", result.FilesCount))
 			}
 			// Three-line split mirrors what the frontend's integrity panel
 			// shows so a side-by-side compare reads identically:
-			//   Original Size : plaintext bytes before any compression
+			//   Original Size : the files' own bytes, before tar and
+			//                   compression
 			//   Size          : the one encrypted payload uploaded to storage,
 			//                   shared by every recipient
 			//   Compression   : algo + reduction ratio only (no intermediate
@@ -510,6 +511,18 @@ func pluralS(n int) string {
 		return ""
 	}
 	return "s"
+}
+
+// archivedFiles is the Files line of a send that went as one archive: its
+// regular files, and its entries when folders or links add to them.
+func archivedFiles(files, entries int) string {
+	switch {
+	case files <= 0:
+		return fmt.Sprintf("%d entr%s in one archive", entries, map[bool]string{true: "y", false: "ies"}[entries == 1])
+	case entries > files:
+		return fmt.Sprintf("%d in one archive (%d entries with folders and links)", files, entries)
+	}
+	return fmt.Sprintf("%d in one archive", files)
 }
 
 // splitListFlag splits each entry on commas, semicolons, and whitespace,
