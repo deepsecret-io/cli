@@ -80,3 +80,39 @@ func TestLocalFileName(t *testing.T) {
 		}
 	}
 }
+
+// A fingerprint is read aloud in two lines of eight groups of four, the
+// same in identity show and identity verify, so both sides compare one
+// layout.
+func TestGroupFingerprint(t *testing.T) {
+	got := groupFingerprint(fullFP)
+	want := []string{"0123 4567 89ab cdef 0123 4567 89ab cdef", "0123 4567 89ab cdef 0123 4567 89ab cdef"}
+	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+// What this device knows of the key the server lists for someone.
+func TestKnownKeyStatus(t *testing.T) {
+	seen := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	other := strings.Repeat("f", 64)
+	if got := knownKeyStatus(fullFP, nil); !strings.HasPrefix(got, "not known yet") {
+		t.Errorf("unknown: %q", got)
+	}
+	if got := knownKeyStatus(fullFP, []sdk.KnownKey{{Fingerprint: fullFP, State: sdk.KeyVerified, FirstSeen: seen}}); !strings.HasPrefix(got, "verified, since ") {
+		t.Errorf("known: %q", got)
+	}
+	if got := knownKeyStatus(fullFP, []sdk.KnownKey{{Fingerprint: other, State: sdk.KeyFirstUse, FirstSeen: seen}}); !strings.Contains(got, "changed") || !strings.HasSuffix(got, " from "+other[:16]) {
+		t.Errorf("changed: %q", got)
+	}
+	replaced := []sdk.KnownKey{
+		{Fingerprint: fullFP, State: sdk.KeyVerified, FirstSeen: seen, Replaced: true},
+		{Fingerprint: other, State: sdk.KeyAccepted, FirstSeen: seen},
+	}
+	if got := knownKeyStatus(fullFP, replaced); !strings.Contains(got, "replaced") || !strings.HasSuffix(got, " by "+other[:16]) {
+		t.Errorf("replaced: %q", got)
+	}
+	if got := knownKeyStatus(fullFP, []sdk.KnownKey{{Fingerprint: fullFP, State: sdk.KeyOwn, FirstSeen: seen}}); !strings.HasPrefix(got, "yours, since ") {
+		t.Errorf("own: %q", got)
+	}
+}

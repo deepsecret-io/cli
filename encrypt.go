@@ -44,12 +44,13 @@ func newEncryptCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "encrypt [files...]",
 		Aliases: []string{"enc"},
-		Short:   "Encrypt and send a secret (alias: enc)",
-		Long: `Encrypt files, directories, key-value pairs or text from stdin for one or
-more recipients with hybrid post-quantum encryption (X25519 + ML-KEM-768 +
-AES-256-GCM), and send it as one secret: the payload is encrypted and
-uploaded once, with a key wrap for every recipient. You are a recipient only
-when you list yourself; with no recipients it is sent to you.
+		Short:   "Encrypt data locally and upload it as a secret (alias: enc)",
+		Long: `Encrypt files, directories, key-value pairs or text from stdin on this
+machine for one or more recipients with hybrid post-quantum encryption
+(X25519 + ML-KEM-768 + AES-256-GCM), then upload the encrypted result as one
+secret: the payload is encrypted and uploaded once, with a key wrap for
+every recipient. You are a recipient only when you list yourself; with no
+recipients it is sent to you. To encrypt without uploading, use --local.
 
 Files and directories can be given as arguments or with --file; directories
 keep their structure. Sending again under an existing name adds a revision
@@ -151,11 +152,13 @@ your account. Recipients open the file with "secret decrypt --local".`,
 			//   1. -g/--group  : every group member except self
 			//   2. -t/--to     : the explicit recipients
 			//   3. (none)      : send to self
-			// Whatever the source, it is one send.
-			verb := "sending to"
+			// Whatever the source, it is one send. Its lines say it
+			// uploads; --local only encrypts.
+			pipelineTitle, verb := "Encrypt & Upload", "sending to"
 			if local {
-				verb = "encrypting for"
+				pipelineTitle, verb = "Encrypt", "encrypting for"
 			}
+			prefix := toPrefix(pipelineTitle)
 			var recipients []string
 			switch {
 			case groupName != "":
@@ -201,8 +204,8 @@ your account. Recipients open the file with "secret decrypt --local".`,
 					return fmt.Errorf("group %q has no other members to send to.\n  Tip: drop -g/--group to self-send this secret, or add another member to the group first", matched.Name)
 				}
 				groupName = matched.Name
-				fmt.Fprintf(os.Stderr, "%sds.encrypt:%s %s→%s %s group %q (%d recipient%s)\n",
-					ansiCyan, ansiReset, ansiDim, ansiReset, verb, safe(matched.Name), len(recipients), pluralS(len(recipients)))
+				fmt.Fprintf(os.Stderr, "%s%s:%s %s→%s %s group %q (%d recipient%s)\n",
+					ansiCyan, prefix, ansiReset, ansiDim, ansiReset, verb, safe(matched.Name), len(recipients), pluralS(len(recipients)))
 			case len(recipientEmails) > 0:
 				recipients = recipientEmails
 			default:
@@ -211,7 +214,7 @@ your account. Recipients open the file with "secret decrypt --local".`,
 					return fmt.Errorf("fetch account info: %w", err)
 				}
 				recipients = []string{info.Email}
-				fmt.Fprintf(os.Stderr, "%sds.encrypt:%s %s→%s %s self (%s)\n", ansiCyan, ansiReset, ansiDim, ansiReset, verb, safe(info.Email))
+				fmt.Fprintf(os.Stderr, "%s%s:%s %s→%s %s self (%s)\n", ansiCyan, prefix, ansiReset, ansiDim, ansiReset, verb, safe(info.Email))
 			}
 
 			logDebug("setup", "recipients=%d", len(recipients))
@@ -322,16 +325,14 @@ your account. Recipients open the file with "secret decrypt --local".`,
 				logDebug("config", "local-file=%s", opts.LocalFile)
 			}
 
-			// One send: the SDK encrypts the payload once, wraps its key for
-			// every recipient, and uploads it once.
-			label := "Encrypting and uploading"
+			// One send: the SDK encrypts the payload once on this machine,
+			// wraps its key for every recipient, and uploads it once.
+			label := "Encrypting locally, then uploading"
 			if len(recipients) > 1 {
-				label = fmt.Sprintf("Encrypting and uploading for %d recipients", len(recipients))
+				label = fmt.Sprintf("Encrypting locally, then uploading for %d recipients", len(recipients))
 			}
-			pipelineTitle := "Encrypt & Send"
 			if local {
 				label = "Encrypting to " + opts.LocalFile
-				pipelineTitle = "Encrypt"
 			}
 			var result *sdk.EncryptResult
 			stepDef := step{
@@ -416,6 +417,7 @@ your account. Recipients open the file with "secret decrypt --local".`,
 				sentTo[i] = fmt.Sprintf("%s  %s%s%s", safe(r.Email), ansiDim, safe(crypto.ShortFingerprint(r.Fingerprint)), ansiReset)
 			}
 			printKeyValues("Recipient"+pluralS(len(sentTo)), sentTo)
+			printFirstUse(result.FirstUse)
 			if len(result.Revoked) > 0 {
 				revoked := make([]string, len(result.Revoked))
 				for i, r := range result.Revoked {
@@ -462,7 +464,7 @@ your account. Recipients open the file with "secret decrypt --local".`,
 	f.Var(&ipList{&allowedIPs}, "ip", "Allow access only from these IP addresses or CIDR ranges, repeatable or comma-separated (at most 50)")
 	setGroup(f, groupPolicies, "ttl", "ip")
 
-	f.BoolVar(&local, "local", false, "Encrypt to a local .cbor file instead of sending; nothing is uploaded")
+	f.BoolVar(&local, "local", false, "Write the encrypted secret to a local .cbor file instead of uploading it")
 	f.StringVarP(&localOutput, "output", "o", "", "Output `file` for --local (default: ./<input name>.cbor)")
 	f.BoolVar(&localOverwrite, "overwrite", false, "With --local, replace an existing file at the output path")
 	setGroup(f, groupLocal, "local", "output", "overwrite")

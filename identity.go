@@ -29,6 +29,10 @@ func newIdentityCmd() *cobra.Command {
 		newIdentitySyncCmd(),
 		newIdentityShowCmd(),
 		newIdentitySetPrimaryCmd(),
+		newIdentityKnownCmd(),
+		newIdentityVerifyCmd(),
+		newIdentityAcceptCmd(),
+		newIdentityForgetCmd(),
 	)
 
 	return cmd
@@ -431,7 +435,11 @@ func newIdentityShowCmd() *cobra.Command {
 		Short: "Show public keys for a local identity",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			resolved := resolveIdentityName(identityFP)
+			name := identityFP
+			if name == "" {
+				name = primaryLocalKey()
+			}
+			resolved := resolveIdentityName(name)
 			kp, err := loadKeyPair(resolved)
 			if err != nil {
 				return fmt.Errorf("identity '%s' not found", identityFP)
@@ -444,12 +452,15 @@ func newIdentityShowCmd() *cobra.Command {
 			if encrypted {
 				lock = " (encrypted)"
 			}
+			if identityFP == "" && name != "" {
+				lock += " (primary)"
+			}
 
 			logInfo("ds.identity_show", fmt.Sprintf("loaded identity fingerprint=%s%s", fp[:16], lock))
 
 			printHeader("Identity: " + fp[:16] + lock)
 			fmt.Println()
-			printKeyValue("Fingerprint", fp[:16]+" "+fp[16:])
+			printKeyValues("Fingerprint", groupFingerprint(fp))
 			printKeyValue("Ed25519", safe(kp.ED25519Public))
 			printKeyValue("X25519", safe(kp.X25519Public))
 			printKeyValue("ML-KEM-768", abbrev(kp.MLKEM768PK, 32, 16))
@@ -463,6 +474,34 @@ func newIdentityShowCmd() *cobra.Command {
 	cmd.Flags().VarP(&fingerprintFlag{&identityFP}, "identity", "i", "Local identity `fingerprint`, or a prefix of 16+ characters")
 	setGroup(cmd.Flags(), groupIdentity, "identity")
 	return cmd
+}
+
+// primaryLocalKey returns the primary identity registered on the server
+// when this device holds several key pairs, one of them that one: it is the
+// key others send to and compare. It returns "" with one key pair or none,
+// or when the server cannot be asked.
+func primaryLocalKey() string {
+	if local, err := listKeyPairs(); err != nil || len(local) < 2 {
+		return ""
+	}
+	if _, err := resolveAuth(); err != nil {
+		return ""
+	}
+	c, err := newAuthenticatedClient()
+	if err != nil {
+		return ""
+	}
+	keys, err := c.ListRemoteKeys()
+	if err != nil {
+		logDebug("identity.show", "primary identity lookup failed: %v", err)
+		return ""
+	}
+	for _, k := range keys {
+		if k.IsPrimary {
+			return findLocalKeyByFingerprint(k.Fingerprint)
+		}
+	}
+	return ""
 }
 
 func newIdentitySetPrimaryCmd() *cobra.Command {

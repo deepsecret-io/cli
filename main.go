@@ -63,6 +63,7 @@ func main() {
 		if _, ok := err.(*displayedError); !ok {
 			printError(err.Error())
 		}
+		printKeyChangedHint(err)
 		os.Exit(1)
 	}
 }

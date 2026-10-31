@@ -32,7 +32,7 @@ func uploadFrame(conns []sdk.ConnectionStatus) liveFrame {
 // is free.
 func TestLiveLinesShowEachConnection(t *testing.T) {
 	now := time.Now()
-	lines := liveLines("ds.encrypt_send: Sending", uploadFrame([]sdk.ConnectionStatus{
+	lines := liveLines("ds.encrypt_upload: Encrypting locally, then uploading", uploadFrame([]sdk.ConnectionStatus{
 		{Part: 4, Size: 8 << 20, Moved: 2 << 20, Attempt: 1, Since: now.Add(-2 * time.Second)},
 		{Part: 5, Size: 8 << 20, Attempt: 2, Waiting: true},
 		{},
@@ -42,7 +42,7 @@ func TestLiveLinesShowEachConnection(t *testing.T) {
 		t.Fatalf("%d lines:\n%s", len(lines), strings.Join(lines, "\n"))
 	}
 	for i, want := range []string{
-		"ds.encrypt_send: Sending",
+		"ds.encrypt_upload: Encrypting locally, then uploading",
 		"  uploading 40.0 MB/96.0 MB 42%  8.0 MB/s, 7s left  4 connections, up to 32",
 		"1 part  4 of 12  █████░░░░░░░░░░░░░░░  2.0 MB/8.0 MB  1.0 MB/s",
 		"2 part  5 of 12  ░░░░░░░░░░░░░░░░░░░░  retrying, attempt 2 of 8",
@@ -64,7 +64,7 @@ func TestLiveLinesFitTheTerminal(t *testing.T) {
 		conns[i] = sdk.ConnectionStatus{Part: i + 1, Size: 8 << 20, Moved: 3 << 20, Attempt: 1, Since: now.Add(-time.Minute)}
 	}
 	for _, width := range []int{1, 20, 50, 300} {
-		lines := liveLines("ds.encrypt_send: Sending", uploadFrame(conns), now, width, 10, true)
+		lines := liveLines("ds.encrypt_upload: Encrypting locally, then uploading", uploadFrame(conns), now, width, 10, true)
 		if len(lines) != 9 || (width == 300 && strings.Count(strings.Join(lines, "\n"), "part ") != 6) {
 			t.Fatalf("width %d: %d lines for a 10-row terminal", width, len(lines))
 		}

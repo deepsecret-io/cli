@@ -150,10 +150,11 @@ func (m *rateMeter) sample(stage string, done int64, now time.Time) float64 {
 const barCells = 20
 
 // liveLines lays out a frame for a terminal of width columns and height
-// rows. head is the step's own text, like "ds.encrypt_send: ⇅ Encrypting".
-// With cursor moves (multi), head has a line of its own, the numbers the
-// next, and then come the connections, as many as fit; without, it is one
-// line, where the label gives way to the numbers.
+// rows. head is the step's own text, like
+// "ds.encrypt_upload: ⇅ Encrypting locally, then uploading". With cursor
+// moves (multi), head has a line of its own, the numbers the next, and
+// then come the connections, as many as fit; without, it is one line,
+// where the label gives way to the numbers.
 func liveLines(head string, f liveFrame, now time.Time, width, height int, multi bool) []string {
 	head = strings.TrimRight(head, " ")
 	stats := liveStats(f)

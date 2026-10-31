@@ -28,6 +28,9 @@ func runRoot(args ...string) error {
 
 const testID = "10000000-0000-4000-8000-000000000001"
 
+// fullFP is a well-formed full key fingerprint.
+const fullFP = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
 // Every bad value or combination is refused before anything runs, with an
 // error that names what is wrong.
 func TestFlagAndArgumentChecks(t *testing.T) {
@@ -110,6 +113,16 @@ func TestFlagAndArgumentChecks(t *testing.T) {
 		{[]string{"identity", "set-primary", "xyz"}, "16 to 64 hex characters"},
 		{[]string{"identity", "show", "-i", "../key"}, "16 to 64 hex characters"},
 		{[]string{"identity", "list", "extra"}, `unknown command "extra"`},
+		{[]string{"identity", "accept", "bob@example.com"}, "accepts 2 arg(s), received 1"},
+		{[]string{"identity", "accept", "nobody", fullFP}, "invalid recipient email"},
+		{[]string{"identity", "accept", "bob@example.com", fullFP[:16]}, "give the full 64-character fingerprint"},
+		{[]string{"identity", "accept", "bob@example.com", "../" + fullFP}, "give the full 64-character fingerprint"},
+		{[]string{"identity", "verify"}, "accepts between 1 and 2 arg(s), received 0"},
+		{[]string{"identity", "verify", "bob@example.com", "xyz"}, "give the full 64-character fingerprint"},
+		{[]string{"identity", "forget", "bob@example.com", fullFP[:20]}, "give the full 64-character fingerprint"},
+		{[]string{"identity", "forget", "a b@example.com"}, "invalid recipient email"},
+		{[]string{"identity", "known", "a@example.com", "b@example.com"}, "accepts at most 1 arg(s), received 2"},
+		{[]string{"identity", "known", "nobody"}, "invalid recipient email"},
 		{[]string{"groups", "describe", " "}, "the group name is blank"},
 		{[]string{"whoami", "extra"}, `unknown command "extra"`},
 		{[]string{"config", "--api-key", "a", "--api-key-file", "b"}, "none of the others can be"},

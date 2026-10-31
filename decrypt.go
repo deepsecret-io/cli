@@ -407,6 +407,9 @@ plan and every change to it.`,
 			} else {
 				printKeyValue("Sender", crypto.ShortFingerprint(result.SenderFingerprint))
 			}
+			if result.SenderFirstUse {
+				printFirstUse([]sdk.Recipient{{Email: result.SenderEmail, Fingerprint: result.SenderFingerprint}})
+			}
 			// The recipient list is the one the sender signed; emails are
 			// the server's labels for those keys (the sender's, in a local
 			// file).
