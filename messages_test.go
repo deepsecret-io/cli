@@ -17,6 +17,7 @@ import (
 	"github.com/deepsecret-io/sdk"
 	"github.com/deepsecret-io/sdk/api"
 	"github.com/deepsecret-io/sdk/crypto"
+	"github.com/deepsecret-io/sdk/secrets"
 )
 
 // An interrupted command says so, and keeps what its error says to do
@@ -306,5 +307,17 @@ func TestConfigReportsAnUnreadableFile(t *testing.T) {
 	}
 	if err := runRoot("config"); err == nil || !strings.Contains(err.Error(), "could not read "+configPath()) {
 		t.Fatalf("%v", err)
+	}
+}
+
+// A send's done line names the secret, and the revision when the send
+// added one to a secret of the same name.
+func TestSendDetail(t *testing.T) {
+	id := "0724ba1f-c173-46ef-88e2-6ea3056d8fb4"
+	if got := sendDetail(secrets.Secret{ID: id, RevisionNumber: 1}); got != "id=0724ba1f" {
+		t.Errorf("first revision: %q", got)
+	}
+	if got := sendDetail(secrets.Secret{ID: id, RevisionNumber: 3}); got != "id=0724ba1f revision=3" {
+		t.Errorf("third revision: %q", got)
 	}
 }

@@ -21,6 +21,7 @@ import (
 	"github.com/deepsecret-io/sdk"
 	"github.com/deepsecret-io/sdk/api"
 	"github.com/deepsecret-io/sdk/crypto"
+	"github.com/deepsecret-io/sdk/secrets"
 )
 
 func newEncryptCmd() *cobra.Command {
@@ -314,7 +315,7 @@ your account. Recipients open the file with "secret decrypt --local".`,
 					if local {
 						return "", nil
 					}
-					return "id=" + shortID(result.Secret.ID), nil
+					return sendDetail(result.Secret), nil
 				},
 			}
 			if err := runPipeline("secret", []step{stepDef}); err != nil {
@@ -340,6 +341,9 @@ your account. Recipients open the file with "secret decrypt --local".`,
 			} else {
 				printKeyValue("Secret ID", safe(result.Secret.ID))
 				printKeyValue("Name", safe(result.Secret.Name))
+				if n := result.Secret.RevisionNumber; n > 1 {
+					printKeyValue("Revision", fmt.Sprintf("%d, added to your secret of this name", n))
+				}
 			}
 			if groupName != "" {
 				printKeyValue("Group", safe(groupName))
@@ -536,4 +540,13 @@ func splitListFlag(values []string) []string {
 		}
 	}
 	return out
+}
+
+// sendDetail is the detail of a send's done line: the secret's ID, and its
+// revision when the send added one to a secret of the same name.
+func sendDetail(s secrets.Secret) string {
+	if s.RevisionNumber > 1 {
+		return fmt.Sprintf("id=%s revision=%d", shortID(s.ID), s.RevisionNumber)
+	}
+	return "id=" + shortID(s.ID)
 }
