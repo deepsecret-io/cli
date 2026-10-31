@@ -16,6 +16,14 @@ cli
 # Release upload settings (R2 keys) for task release-upload.
 .env
 
+# Decrypted secrets never belong here: a decrypt writes into
+# ./<revision-id>/ unless --dir says otherwise.
+/????????-????-????-????-????????????/
+
+# Local encrypted files (secret encrypt --local) and Windows builds.
+*.cbor
+*.exe
+
 # task security reports.
 reports/
 
