@@ -4,6 +4,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -47,34 +48,11 @@ func describeGroup(name string) error {
 
 	info, err := c.WhoAmI()
 	if err != nil {
-		return fmt.Errorf("fetch account info: %w", err)
+		return fmt.Errorf("could not fetch your account: %w", apiCause(err))
 	}
-	if info.OrgID == "" {
-		return fmt.Errorf("you must be a member of an organization to describe groups")
-	}
-
-	groups, err := c.ListGroups(info.OrgID)
+	matched, err := findGroup(c, info, name)
 	if err != nil {
-		return fmt.Errorf("list groups: %w", err)
-	}
-
-	wanted := strings.ToLower(name)
-	var matched *sdk.GroupInfo
-	for i := range groups {
-		if strings.ToLower(groups[i].Name) == wanted {
-			matched = &groups[i]
-			break
-		}
-	}
-	if matched == nil {
-		available := make([]string, 0, len(groups))
-		for _, g := range groups {
-			available = append(available, g.Name)
-		}
-		if len(available) == 0 {
-			return fmt.Errorf("group %q not found (no groups exist in this organization)", name)
-		}
-		return fmt.Errorf("group %q not found (available: %s)", name, strings.Join(available, ", "))
+		return err
 	}
 
 	printHeader(fmt.Sprintf("Group: %s", matched.Name))
@@ -108,7 +86,7 @@ func describeGroup(name string) error {
 		_, _ = fmt.Fprintf(w, "  %s\t%s\t%s\n", safe(m.Email), safe(fullName), safe(role))
 	}
 	if err := w.Flush(); err != nil {
-		return fmt.Errorf("write to stdout: %w", err)
+		return fmt.Errorf("could not write to stdout: %w", err)
 	}
 	fmt.Fprintln(os.Stderr)
 	return nil
@@ -128,19 +106,15 @@ func newGroupsListCmd() *cobra.Command {
 
 			info, err := c.WhoAmI()
 			if err != nil {
-				return fmt.Errorf("fetch account info: %w", err)
+				return fmt.Errorf("could not fetch your account: %w", apiCause(err))
 			}
-			if info.OrgID == "" {
-				return fmt.Errorf("you must be a member of an organization to list groups")
-			}
-
-			groups, err := c.ListGroups(info.OrgID)
+			groups, err := orgGroups(c, info)
 			if err != nil {
-				return fmt.Errorf("list groups: %w", err)
+				return err
 			}
 
 			if len(groups) == 0 {
-				printDim("No groups in this organization.")
+				printDim("Your organization has no groups yet.")
 				return nil
 			}
 
@@ -157,12 +131,54 @@ func newGroupsListCmd() *cobra.Command {
 				_, _ = fmt.Fprintf(w, "  %s\t%d\t%s\n", safe(g.Name), len(g.Members), safe(g.ID))
 			}
 			if err := w.Flush(); err != nil {
-				return fmt.Errorf("write to stdout: %w", err)
+				return fmt.Errorf("could not write to stdout: %w", err)
 			}
 			fmt.Fprintln(os.Stderr)
 			return nil
 		},
 	}
+}
+
+// orgGroups lists the groups of the organization of the account info
+// describes.
+func orgGroups(c *Client, info *sdk.ActorInfo) ([]sdk.GroupInfo, error) {
+	if info.OrgID == "" {
+		return nil, errors.New("your account is not in an organization, so it has no groups")
+	}
+	groups, err := c.ListGroups(info.OrgID)
+	if err != nil {
+		return nil, fmt.Errorf("could not list your organization's groups: %w", apiCause(err))
+	}
+	return groups, nil
+}
+
+// findGroup finds the group named name, in any case, in the organization
+// of the account info describes.
+func findGroup(c *Client, info *sdk.ActorInfo, name string) (*sdk.GroupInfo, error) {
+	groups, err := orgGroups(c, info)
+	if err != nil {
+		return nil, err
+	}
+	for i := range groups {
+		if strings.EqualFold(groups[i].Name, name) {
+			return &groups[i], nil
+		}
+	}
+	return nil, withDetail(fmt.Errorf("group %q not found", name), groupNames(groups))
+}
+
+// groupNames names an organization's groups, for the error of a group not
+// found among them.
+func groupNames(groups []sdk.GroupInfo) string {
+	if len(groups) == 0 {
+		return "Your organization has no groups yet."
+	}
+	names := make([]string, len(groups))
+	for i, g := range groups {
+		names[i] = safe(g.Name)
+	}
+	sort.Strings(names)
+	return "Your organization's groups: " + strings.Join(names, ", ") + "."
 }
 
 // groupNameArg accepts exactly one group name that is not blank.

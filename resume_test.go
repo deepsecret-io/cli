@@ -72,12 +72,17 @@ func TestTransferDirs(t *testing.T) {
 func TestResumeExplainsADownload(t *testing.T) {
 	d := &sdk.PendingDownload{RevisionID: "7b11d0ab-0000-4000-8000-000000000005", SecretID: "3f2a9c1e-0000-4000-8000-000000000009"}
 	err := discardDownload(d, false)
-	if err == nil || !strings.Contains(err.Error(), "secret decrypt 3f2a9c1e-0000-4000-8000-000000000009 --revision 7b11d0ab-0000-4000-8000-000000000005") {
-		t.Fatalf("continue hint: %v", err)
+	if err == nil {
+		t.Fatal("no error for a download")
+	}
+	if summary, detail := describeError(err); !strings.HasPrefix(summary, "7b11d0ab is an interrupted download") ||
+		!strings.Contains(detail, "secret decrypt 3f2a9c1e-0000-4000-8000-000000000009 --revision 7b11d0ab-0000-4000-8000-000000000005") {
+		t.Fatalf("continue hint: %q, %q", summary, detail)
 	}
 	d.SecretID = "x; rm -rf ~"
-	if err := discardDownload(d, false); err == nil || strings.Contains(err.Error(), "rm -rf") {
-		t.Fatalf("a hostile secret ID reached the command: %v", err)
+	err = discardDownload(d, false)
+	if summary, detail := describeError(err); err == nil || strings.Contains(summary+detail, "rm -rf") {
+		t.Fatalf("a hostile secret ID reached the command: %q, %q", summary, detail)
 	}
 }
 

@@ -5,9 +5,11 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -84,23 +86,6 @@ your account. Recipients open the file with "secret decrypt --local".`,
 			// Merge positional args into inputFiles
 			inputFiles = append(inputFiles, args...)
 
-			// Debug: stat each input file
-			if debug && len(inputFiles) > 0 {
-				logDebug("input", "files=%d data_pairs=%d", len(inputFiles), len(dataPairs))
-				for _, f := range inputFiles {
-					info, err := os.Stat(f)
-					if err != nil {
-						logDebug("input", "%s: stat error: %s", f, err)
-						continue
-					}
-					if info.IsDir() {
-						logDebug("input", "%s: dir", f)
-					} else {
-						logDebug("input", "%s: file size=%s", f, formatBytes(info.Size()))
-					}
-				}
-			}
-
 			// Flag values are checked as they are parsed, and conflicting
 			// flags by cobra; what is left depends on several flags.
 			if len(inputFiles) > 0 && len(dataPairs) > 0 {
@@ -124,27 +109,27 @@ your account. Recipients open the file with "secret decrypt --local".`,
 					return fmt.Errorf("a file argument is empty")
 				}
 			}
+			logInputs(inputFiles)
 
 			// Read stdin early if no -f or -d (before network calls, needs raw terminal)
 			var stdinData []byte
 			if len(inputFiles) == 0 && len(dataPairs) == 0 {
-				stat, _ := os.Stdin.Stat()
-				if stat.Mode()&os.ModeCharDevice != 0 {
-					fmt.Fprintf(os.Stderr, "Reading from stdin (paste text, then press %s to finish):\n", stdinEOFKeys)
+				if stat, err := os.Stdin.Stat(); err == nil && stat.Mode()&os.ModeCharDevice != 0 {
+					fmt.Fprintf(os.Stderr, "Enter the text to encrypt, then press %s to finish:\n", stdinEOFKeys)
 				}
 				var err error
 				stdinData, err = io.ReadAll(os.Stdin)
 				if err != nil {
-					return fmt.Errorf("read stdin: %w", err)
+					return fmt.Errorf("could not read stdin: %w", err)
 				}
 				if len(bytes.TrimSpace(stdinData)) == 0 {
-					return fmt.Errorf("empty input: provide --file, --data, or pipe/paste content via stdin")
+					return withDetail(errors.New("nothing to encrypt: the input is empty"),
+						"Give files as arguments or with --file, key-value pairs with --data, or text on stdin.")
 				}
 			}
 
 			c, err := newAuthenticatedClient()
 			if err != nil {
-				dbgErr("encrypt", err)
 				return err
 			}
 
@@ -154,44 +139,23 @@ your account. Recipients open the file with "secret decrypt --local".`,
 			//   3. (none)      : send to self
 			// Whatever the source, it is one send. Its lines say it
 			// uploads; --local only encrypts.
-			pipelineTitle, verb := "Encrypt & Upload", "sending to"
+			verb := "Sending to"
 			if local {
-				pipelineTitle, verb = "Encrypt", "encrypting for"
+				verb = "Encrypting for"
 			}
-			prefix := toPrefix(pipelineTitle)
 			var recipients []string
+			recipientsFrom := "--to"
 			switch {
 			case groupName != "":
 				info, err := c.WhoAmI()
 				if err != nil {
-					return fmt.Errorf("fetch account info: %w", err)
+					return fmt.Errorf("could not fetch your account: %w", apiCause(err))
 				}
-				if info.OrgID == "" {
-					return fmt.Errorf("--group requires being a member of an organization")
-				}
-				groups, err := c.ListGroups(info.OrgID)
+				group, err := findGroup(c, info, groupName)
 				if err != nil {
-					return fmt.Errorf("list groups: %w", err)
+					return err
 				}
-				var matched *sdk.GroupInfo
-				wanted := strings.ToLower(groupName)
-				for i := range groups {
-					if strings.ToLower(groups[i].Name) == wanted {
-						matched = &groups[i]
-						break
-					}
-				}
-				if matched == nil {
-					available := make([]string, 0, len(groups))
-					for _, g := range groups {
-						available = append(available, g.Name)
-					}
-					if len(available) == 0 {
-						return fmt.Errorf("group %q not found (no groups exist in this organization)", groupName)
-					}
-					return fmt.Errorf("group %q not found (available: %s)", groupName, strings.Join(available, ", "))
-				}
-				for _, m := range matched.Members {
+				for _, m := range group.Members {
 					if m.Email == "" {
 						continue
 					}
@@ -201,51 +165,32 @@ your account. Recipients open the file with "secret decrypt --local".`,
 					recipients = append(recipients, m.Email)
 				}
 				if len(recipients) == 0 {
-					return fmt.Errorf("group %q has no other members to send to.\n  Tip: drop -g/--group to self-send this secret, or add another member to the group first", matched.Name)
+					return withDetail(fmt.Errorf("group %q has no other members to send to", group.Name),
+						"Add another member to the group, or leave out --group to send the secret to yourself.")
 				}
-				groupName = matched.Name
-				fmt.Fprintf(os.Stderr, "%s%s:%s %s→%s %s group %q (%d recipient%s)\n",
-					ansiCyan, prefix, ansiReset, ansiDim, ansiReset, verb, safe(matched.Name), len(recipients), pluralS(len(recipients)))
+				groupName, recipientsFrom = group.Name, "--group"
+				printSubject("secret", fmt.Sprintf("%s group %q (%d recipient%s)", verb, group.Name, len(recipients), pluralS(len(recipients))))
 			case len(recipientEmails) > 0:
 				recipients = recipientEmails
 			default:
 				info, err := c.WhoAmI()
 				if err != nil {
-					return fmt.Errorf("fetch account info: %w", err)
+					return fmt.Errorf("could not fetch your account: %w", apiCause(err))
 				}
-				recipients = []string{info.Email}
-				fmt.Fprintf(os.Stderr, "%s%s:%s %s→%s %s self (%s)\n", ansiCyan, prefix, ansiReset, ansiDim, ansiReset, verb, safe(info.Email))
-			}
-
-			logDebug("setup", "recipients=%d", len(recipients))
-			if name != "" {
-				logDebug("setup", "name=%q", name)
+				recipients, recipientsFrom = []string{info.Email}, "yourself"
+				printSubject("secret", fmt.Sprintf("%s yourself (%s)", verb, info.Email))
 			}
 
 			// Normalize list flags: support both repeating (--ip a --ip b) and
 			// comma/space-separated (--ip a,b,c) forms, and any mix.
 			normalizedIPs := splitListFlag(allowedIPs)
 
-			// Print resolved configuration once, before any phase logs.
-			identitySource := "primary"
-			if identityFP != "" {
-				identitySource = "explicit (--identity)"
-			}
-			if !local {
-				logDebug("config", "presign-expiry=%dm", presignExpiry)
-				logDebug("config", "upload-threads=%s", threadCountLabel(uploadThreads))
-			}
-			logDebug("config", "identity-source=%s", identitySource)
-			if revokeMissing {
-				logDebug("config", "revoke-missing=true")
-			}
-
 			// Prompt for key password if identity is encrypted
 			var keyPassword string
 			if identityFP != "" {
 				resolved := resolveKeystoreFingerprint(identityFP)
 				if isKeyPairEncrypted(resolved) {
-					pw, perr := readPassword("Enter key password: ")
+					pw, perr := readPassword(fmt.Sprintf("Password for key pair %s: ", crypto.ShortFingerprint(resolved)))
 					if perr != nil {
 						return perr
 					}
@@ -254,16 +199,16 @@ your account. Recipients open the file with "secret decrypt --local".`,
 			} else {
 				if _, _, err := c.LoadPrimaryIdentity(""); err != nil {
 					if strings.Contains(err.Error(), "password-encrypted") {
-						pw, perr := readPassword("Enter key password: ")
+						pw, perr := readPassword("Password for your primary key: ")
 						if perr != nil {
 							return perr
 						}
 						keyPassword = pw
 						if _, _, err := c.LoadPrimaryIdentity(keyPassword); err != nil {
-							return fmt.Errorf("failed to unlock identity: %w", err)
+							return fmt.Errorf("could not unlock your primary key: %w", err)
 						}
 					} else {
-						return fmt.Errorf("load identity: %w", err)
+						return fmt.Errorf("could not load your primary key: %w", err)
 					}
 				}
 			}
@@ -284,7 +229,7 @@ your account. Recipients open the file with "secret decrypt --local".`,
 				UploadThreads:        uploadThreads,
 				ResumeDir:            uploadsDir(),
 				PresignExpiryMinutes: presignExpiry,
-				OnDebug:              func(step, msg string) { logDebug(step, "%s", msg) },
+				Logger:               logger,
 			}
 
 			// Live progress: encrypting, then each connection of the
@@ -322,21 +267,31 @@ your account. Recipients open the file with "secret decrypt --local".`,
 					opts.LocalFile = localFileName(name, inputFiles, opts.Name)
 				}
 				opts.LocalOverwrite = localOverwrite
-				logDebug("config", "local-file=%s", opts.LocalFile)
 			}
+
+			// The settings this send resolved to, once, before the SDK logs
+			// its own plan.
+			settings := []any{"recipients", len(recipients), "recipients_from", recipientsFrom, "identity", identityLabel(identityFP)}
+			if local {
+				settings = append(settings, "local_file", opts.LocalFile)
+			} else {
+				settings = append(settings, "threads", threadCountLabel(uploadThreads), "presign_expiry", time.Duration(presignExpiry)*time.Minute)
+			}
+			api.Module(logger, "encrypt").Debug("options", settings...)
 
 			// One send: the SDK encrypts the payload once on this machine,
 			// wraps its key for every recipient, and uploads it once.
-			label := "Encrypting locally, then uploading"
+			label, done := "Encrypting and uploading", "Upload complete"
 			if len(recipients) > 1 {
-				label = fmt.Sprintf("Encrypting locally, then uploading for %d recipients", len(recipients))
+				label = fmt.Sprintf("Encrypting and uploading for %d recipients", len(recipients))
 			}
 			if local {
-				label = "Encrypting to " + opts.LocalFile
+				label, done = "Encrypting to "+opts.LocalFile, "Encryption complete"
 			}
 			var result *sdk.EncryptResult
 			stepDef := step{
 				label: label,
+				done:  done,
 				live:  progress,
 				action: func() (string, error) {
 					var err error
@@ -354,24 +309,26 @@ your account. Recipients open the file with "secret decrypt --local".`,
 						result, err = c.EncryptText(recipients, string(stdinData), opts)
 					}
 					if err != nil {
-						dbgErr("encrypt", err)
 						return "", err
 					}
-					return fmt.Sprintf("type=%s, size=%s, recipients=%d", result.PayloadType, formatBytes(result.EncryptedSize), len(result.Recipients)), nil
+					if local {
+						return "", nil
+					}
+					return "id=" + shortID(result.Secret.ID), nil
 				},
 			}
-			if err := runPipeline(pipelineTitle, []step{stepDef}, nil); err != nil {
+			if err := runPipeline("secret", []step{stepDef}); err != nil {
 				var interrupted *sdk.UploadInterruptedError
 				if errors.As(err, &interrupted) {
-					printResumeHint(interrupted.Upload.RevisionID)
+					return withDetail(err, resumeDetail(interrupted.Upload.RevisionID))
 				}
 				// A send under the name of an existing secret adds a revision
 				// to it. The name may have come from the input's file name,
 				// so say so, and how to send a new secret instead.
 				if errors.Is(err, api.ErrConflict) && !revokeMissing && strings.Contains(err.Error(), "leaves out") {
-					fmt.Fprintf(os.Stderr, "  Tip: you already have a secret named %q, and this send would add a revision to it.\n", opts.Name)
-					fmt.Fprintf(os.Stderr, "       To send a new secret instead, give it another name with -n.\n")
-					fmt.Fprintf(os.Stderr, "       To update %q, list everyone who should keep access with --to, or add --revoke-missing.\n", opts.Name)
+					return withDetail(err, fmt.Sprintf("You already have a secret named %q, and this send would add a revision to it.\n"+
+						"To send a new secret instead, give it another name with -n.\n"+
+						"To update %q, list everyone who should keep access with --to, or add --revoke-missing.", safe(opts.Name), safe(opts.Name)))
 				}
 				return err
 			}
@@ -408,9 +365,14 @@ your account. Recipients open the file with "secret decrypt --local".`,
 			}
 			printKeyValue("Size", formatBytes(result.EncryptedSize)+" encrypted")
 			if result.Compressed && result.OriginalSize > 0 {
-				reduction := 100 - result.CompressionRatio
-				printKeyValue("Compression", fmt.Sprintf("%s (%.0f%% reduction)",
-					strings.ToUpper(result.Compression), reduction))
+				// CompressionRatio is the compressed size as a percentage
+				// of the original; an archive is compressed even when that
+				// makes it larger.
+				change := fmt.Sprintf("%.0f%% reduction", 100-result.CompressionRatio)
+				if result.CompressionRatio > 100 {
+					change = fmt.Sprintf("%.0f%% larger", result.CompressionRatio-100)
+				}
+				printKeyValue("Compression", fmt.Sprintf("%s (%s)", strings.ToUpper(result.Compression), change))
 			}
 			printKeyValue("Sender", crypto.ShortFingerprint(result.SenderFingerprint))
 			sentTo := make([]string, len(result.Recipients))
@@ -418,7 +380,6 @@ your account. Recipients open the file with "secret decrypt --local".`,
 				sentTo[i] = fmt.Sprintf("%s  %s%s%s", safe(r.Email), ansiDim, safe(crypto.ShortFingerprint(r.Fingerprint)), ansiReset)
 			}
 			printKeyValues("Recipient"+pluralS(len(sentTo)), sentTo)
-			printFirstUse(result.FirstUse)
 			if len(result.Revoked) > 0 {
 				revoked := make([]string, len(result.Revoked))
 				for i, r := range result.Revoked {
@@ -433,9 +394,11 @@ your account. Recipients open the file with "secret decrypt --local".`,
 				printKeyValue("IP Lock", strings.Join(normalizedIPs, ", "))
 			}
 			fmt.Fprintln(os.Stderr)
+			printFirstUse(result.FirstUse)
 			if local {
-				fmt.Fprintf(os.Stderr, "  Nothing was uploaded. Send the file over any channel; recipients open it with:\n")
-				fmt.Fprintf(os.Stderr, "    secret decrypt --local %s\n\n", safe(filepath.Base(result.LocalFile)))
+				printDim("Nothing was uploaded. Send the file over any channel; recipients open it with:")
+				printDim("  secret decrypt --local " + safe(filepath.Base(result.LocalFile)))
+				fmt.Fprintln(os.Stderr)
 			}
 			return nil
 		},
@@ -466,7 +429,7 @@ your account. Recipients open the file with "secret decrypt --local".`,
 	setGroup(f, groupPolicies, "ttl", "ip")
 
 	f.BoolVar(&local, "local", false, "Write the encrypted secret to a local .cbor file instead of uploading it")
-	f.StringVarP(&localOutput, "output", "o", "", "Output `file` for --local (default: ./<input name>.cbor)")
+	f.StringVarP(&localOutput, "output", "o", "", "Output `file` for --local (default: ./<name>.cbor, after -n or the first input)")
 	f.BoolVar(&localOverwrite, "overwrite", false, "With --local, replace an existing file at the output path")
 	setGroup(f, groupLocal, "local", "output", "overwrite")
 
@@ -504,6 +467,34 @@ func localFileName(name string, inputs []string, fallback string) string {
 		base = "secret"
 	}
 	return base + sdk.LocalFileExt
+}
+
+// logInputs logs what each input path is, before the SDK reads them.
+func logInputs(paths []string) {
+	log := api.Module(logger, "input")
+	if len(paths) == 0 || !log.Enabled(context.Background(), slog.LevelDebug) {
+		return
+	}
+	for _, p := range paths {
+		info, err := os.Stat(p)
+		switch {
+		case err != nil:
+			log.Debug("path unreadable", "path", p, "error", err)
+		case info.IsDir():
+			log.Debug("path found", "path", p, "type", "directory")
+		default:
+			log.Debug("path found", "path", p, "type", "file", "size", api.Bytes(info.Size()))
+		}
+	}
+}
+
+// identityLabel is the identity a command uses, for a log field: the
+// --identity fingerprint, or "primary".
+func identityLabel(fp string) string {
+	if fp == "" {
+		return "primary"
+	}
+	return fp
 }
 
 func pluralS(n int) string {

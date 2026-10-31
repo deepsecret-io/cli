@@ -5,15 +5,18 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/deepsecret-io/sdk"
+	"github.com/deepsecret-io/sdk/api"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
@@ -93,14 +96,10 @@ Examples:
 				filterEmail = toEmail
 			}
 
-			dbg("list", "view=%s filter=%s limit=%d page=%d", view, filterEmail, limit, page)
-
 			c, err := newAuthenticatedClient()
 			if err != nil {
 				return err
 			}
-
-			logInfo("ds.list", fmt.Sprintf("fetching %s secrets (page=%d, limit=%d)", view, page, limit))
 
 			// The inbox merges two lists and Sent leaves out the secrets
 			// sent only to oneself, so server-side pagination would over-
@@ -110,35 +109,41 @@ Examples:
 			if sent {
 				all, _, err := c.ListSecrets("sent", sdk.ListOptions{Limit: fetchLimit, Email: toEmail})
 				if err != nil {
-					return err
+					return fmt.Errorf("could not list your sent secrets: %w", apiCause(err))
 				}
 				secretsList = sentSecrets(all)
 			} else {
 				received, _, err := c.ListSecrets("received", sdk.ListOptions{Limit: fetchLimit, Email: fromEmail})
 				if err != nil {
-					return err
+					return fmt.Errorf("could not list your inbox: %w", apiCause(err))
 				}
 				own, _, err := c.ListSecrets("sent", sdk.ListOptions{Limit: fetchLimit})
 				if err != nil {
-					return err
+					return fmt.Errorf("could not list your inbox: %w", apiCause(err))
 				}
 				secretsList = inboxSecrets(received, own, fromEmail)
 			}
 
 			total := len(secretsList)
-			offset := 0
+			offset, end := 0, total
 			if !noPagination {
-				offset = min((page-1)*limit, total)
-				secretsList = secretsList[offset:min(offset+limit, total)]
+				offset, end = pageBounds(total, page, limit)
 			}
+			secretsList = secretsList[offset:end]
+			api.Module(logger, "secret").Debug("secrets listed", "view", view, "filter", filterEmail, "total", total, "shown", len(secretsList))
 
 			if handled, err := outputFormatted(outputFmt, map[string]any{"secrets": secretsList, "total": total}); handled || err != nil {
 				return err
 			}
 
 			if total == 0 {
-				printDim("No secrets found.")
+				printDim(emptyListMessage(sent, filterEmail))
 				return nil
+			}
+			pages := (total + limit - 1) / limit
+			if len(secretsList) == 0 {
+				return withDetail(fmt.Errorf("there is no page %d", page),
+					fmt.Sprintf("At %d per page, the %d secret%s take %d page%s.", limit, total, pluralS(total), pages, pluralS(pages)))
 			}
 
 			header := "Inbox secrets"
@@ -190,14 +195,14 @@ Examples:
 				)
 			}
 			if err := w.Flush(); err != nil {
-				return fmt.Errorf("write to stdout: %w", err)
+				return fmt.Errorf("could not write to stdout: %w", err)
 			}
 
-			// Pagination hint
-			if !noPagination && offset+len(secretsList) < total {
-				fmt.Fprintf(os.Stderr, "\n  Page %d of %d. Use --page %d for next page.\n", page, (total+limit-1)/limit, page+1)
+			fmt.Fprintln(os.Stderr)
+			if !noPagination && end < total {
+				printDim(fmt.Sprintf("Page %d of %d. Show the next with: --page %d", page, pages, page+1))
+				fmt.Fprintln(os.Stderr)
 			}
-			fmt.Println()
 			return nil
 		},
 	}
@@ -252,7 +257,28 @@ func sentSecrets(sent []sdk.SecretInfo) []sdk.SecretInfo {
 	return out
 }
 
-// --- delete ---
+// pageBounds is where page, of limit secrets each, starts and ends among
+// total. A page past the last one is empty.
+func pageBounds(total, page, limit int) (start, end int) {
+	start = min((page-1)*limit, total)
+	return start, min(start+limit, total)
+}
+
+// emptyListMessage says that a list of secrets is empty: the sent ones
+// (sent), or the inbox, to or from filterEmail when it is set.
+func emptyListMessage(sent bool, filterEmail string) string {
+	switch {
+	case sent && filterEmail != "":
+		return "You have sent no secrets to " + filterEmail + "."
+	case sent:
+		return "You have sent no secrets to others."
+	case filterEmail != "":
+		return "Your inbox holds no secrets from " + filterEmail + "."
+	}
+	return "Your inbox is empty."
+}
+
+// --- describe ---
 
 func newDescribeCmd() *cobra.Command {
 	var (
@@ -278,19 +304,15 @@ Examples:
   secret desc 3f2a9c1e-... --format yaml`,
 		Args: idArgs(1, "secret ID"),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dbg("describe", "secret_id=%s all_revisions=%v", args[0], allRevisions)
 			c, err := newAuthenticatedClient()
 			if err != nil {
 				return err
 			}
 
 			secretID := args[0]
-
-			logInfo("ds.describe", fmt.Sprintf("fetching secret id=%s", shortID(secretID)))
-
 			detail, err := c.DescribeSecretFull(secretID)
 			if err != nil {
-				return fmt.Errorf("describe: %w", err)
+				return secretError(err, secretID)
 			}
 			s := detail.Secret
 
@@ -361,7 +383,8 @@ Examples:
 						}
 					}
 					if len(visible) == 0 {
-						return fmt.Errorf("revision %s not found", revisionID)
+						return withDetail(fmt.Errorf("revision %s not found in secret %s", shortID(revisionID), shortID(s.ID)),
+							"List the revisions you can see with: secret describe "+safe(s.ID)+" --all")
 					}
 				} else if allRevisions {
 					for i := len(detail.Revisions) - 1; i >= 0; i-- {
@@ -466,7 +489,7 @@ Examples:
 func newDescribeGroupCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "group <name>",
-		Short: "Show a group's members (alias: secret describe group <name>)",
+		Short: "Show a group's members (same as: secret groups describe <name>)",
 		Args:  groupNameArg,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return describeGroup(args[0])
@@ -478,28 +501,45 @@ func newDeleteCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "delete [secret-id...]",
 		Aliases: []string{"del", "rm"},
-		Short:   "Delete secrets (alias: del, rm)",
-		Long: `Delete secrets by their IDs. You can only delete secrets where you are
-the sender or recipient.
+		Short:   "Delete secrets you sent (alias: del, rm)",
+		Long: `Delete secrets by their IDs. Only a secret's sender can delete it; its
+recipients lose access to it.
 
 Examples:
   secret delete abc123-...
   secret delete abc123-... def456-...`,
 		Args: minIDArgs(1, "secret ID"),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dbg("delete", "ids=%v", args)
 			c, err := newAuthenticatedClient()
 			if err != nil {
 				return err
 			}
 
-			dbg("delete", "deleting %d secret(s)", len(args))
-
-			if err := c.DeleteSecrets(args); err != nil {
-				return fmt.Errorf("delete secrets: %w", err)
+			// The server deletes only the secrets the caller sent, and
+			// skips any other without saying so. Check each first, so the
+			// command deletes all of them or none, and says which.
+			ids := slices.Compact(slices.Sorted(slices.Values(args)))
+			me, err := c.ResolveActorID()
+			if err != nil {
+				return fmt.Errorf("could not fetch your account: %w", apiCause(err))
+			}
+			for _, id := range ids {
+				info, err := c.DescribeSecret(id)
+				if err != nil {
+					return secretError(err, id)
+				}
+				if info.SenderID != me {
+					return withDetail(fmt.Errorf("you did not send secret %s, so you cannot delete it", shortID(id)),
+						"Only a secret's sender can delete it. Nothing was deleted.")
+				}
 			}
 
-			printSuccess(fmt.Sprintf("Deleted %d secret(s)", len(args)))
+			if err := c.DeleteSecrets(ids); err != nil {
+				return fmt.Errorf("could not delete the secret%s: %w", pluralS(len(ids)), apiCause(err))
+			}
+			api.Module(logger, "secret").Info("secrets deleted", "ids", ids)
+
+			printSuccess(fmt.Sprintf("Deleted %d secret%s.", len(ids), pluralS(len(ids))))
 			return nil
 		},
 	}
@@ -532,14 +572,18 @@ Examples:
 				return err
 			}
 
-			dbg("revoke", "secret_id=%s recipients=%d", secretID, len(recipientEmails))
 			for _, email := range recipientEmails {
-				logInfo("ds.revoke", fmt.Sprintf("revoking %s on secret=%s", email, shortID(secretID)))
+				// A 404 here is the secret's or the recipient's access, so
+				// the server's message says which.
 				res, err := c.RevokeRecipient(secretID, email)
-				if err != nil {
-					return fmt.Errorf("revoke %s: %w", email, err)
+				switch {
+				case errors.Is(err, api.ErrForbidden):
+					return fmt.Errorf("only the sender of secret %s can revoke its recipients", shortID(secretID))
+				case err != nil:
+					return fmt.Errorf("could not revoke %s: %w", email, apiCause(err))
 				}
-				printSuccess(fmt.Sprintf("Revoked %s", res.Email))
+				api.Module(logger, "secret").Info("recipient revoked", "secret_id", secretID, "email", res.Email, "secret_deleted", res.SecretDeleted)
+				printSuccess(fmt.Sprintf("Revoked %s.", safe(res.Email)))
 				if res.SecretDeleted {
 					printDim("That was the last recipient, so the secret was deleted.")
 					return nil
@@ -611,16 +655,21 @@ Examples:
 			}
 
 			if !hasChanges {
-				return fmt.Errorf("no policy flags specified. Use --ttl, --ip, or --clear-* flags")
+				return fmt.Errorf("nothing to change: give --ttl, --ip, --clear-ttl or --clear-ips")
 			}
 
-			logInfo("ds.policy", fmt.Sprintf("updating policies for secret=%s", shortID(secretID)))
 			updated, err := c.UpdatePolicy(secretID, update)
-			if err != nil {
-				return err
+			switch {
+			case errors.Is(err, api.ErrNotFound):
+				return secretError(err, secretID)
+			case errors.Is(err, api.ErrForbidden):
+				return fmt.Errorf("only the sender of secret %s can change its policies", shortID(secretID))
+			case err != nil:
+				return fmt.Errorf("could not update the policies of secret %s: %w", shortID(secretID), apiCause(err))
 			}
+			api.Module(logger, "policy").Info("policies updated", "secret_id", updated.ID, "ttl_changed", update.TTLSeconds != nil, "ips_changed", update.AllowedIPs != nil)
 
-			printSuccess(fmt.Sprintf("Policies updated for %s (%s)", updated.ID, updated.Name))
+			printSuccess(fmt.Sprintf("Updated the policies of secret %s (%s).", shortID(updated.ID), safe(updated.Name)))
 			fmt.Fprintln(os.Stderr)
 			if updated.ExpiresAt != nil {
 				printKeyValue("TTL", "expires "+safe(*updated.ExpiresAt))
@@ -653,62 +702,18 @@ Examples:
 
 // --- shared helpers ---
 
-// resolveIdentityName resolves a local identity by fingerprint or prefix.
-// If empty, auto-selects the first (or only) available key.
-// Supports prefix matching: "e3a80e" matches "e3a80e8489cc6147..."
-func resolveIdentityName(fpOrPrefix string) string {
-	entries, err := os.ReadDir(keysDir())
-	if err != nil {
-		return fpOrPrefix
+// secretError is err, from fetching secret id, as the user reads it: a
+// secret not found, or not shared with them, says so plainly.
+func secretError(err error, id string) error {
+	switch {
+	case errors.Is(err, api.ErrNotFound):
+		return withDetail(fmt.Errorf("secret %s not found", shortID(id)),
+			"No secret with this ID is shared with you: it may have been deleted, or have expired. Check the ID with 'secret list'.")
+	case errors.Is(err, api.ErrForbidden):
+		return withDetail(fmt.Errorf("secret %s is not shared with you", shortID(id)),
+			"Only its sender and recipients can see it. Check the ID with 'secret list'.")
 	}
-
-	var keyFiles []string
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".json") {
-			keyFiles = append(keyFiles, strings.TrimSuffix(e.Name(), ".json"))
-		}
-	}
-
-	if len(keyFiles) == 0 {
-		return fpOrPrefix
-	}
-
-	// If no fingerprint specified, auto-select the only key or first key
-	if fpOrPrefix == "" {
-		if len(keyFiles) == 1 {
-			return keyFiles[0]
-		}
-		fmt.Fprintf(os.Stderr, "  Multiple identities found, using: %s\n\n", keyFiles[0][:16])
-		return keyFiles[0]
-	}
-
-	// Exact match
-	for _, kf := range keyFiles {
-		if kf == fpOrPrefix {
-			return kf
-		}
-	}
-
-	// Prefix match
-	var matches []string
-	for _, kf := range keyFiles {
-		if strings.HasPrefix(kf, fpOrPrefix) {
-			matches = append(matches, kf)
-		}
-	}
-	if len(matches) == 1 {
-		return matches[0]
-	}
-	if len(matches) > 1 {
-		fmt.Fprintf(os.Stderr, "  Ambiguous fingerprint prefix '%s' matches %d keys:\n", fpOrPrefix, len(matches))
-		for _, m := range matches {
-			fmt.Fprintf(os.Stderr, "    %s\n", m)
-		}
-		fmt.Fprintln(os.Stderr)
-		return "" // return empty to force error downstream
-	}
-
-	return fpOrPrefix
+	return fmt.Errorf("could not fetch secret %s: %w", shortID(id), apiCause(err))
 }
 
 // recipientsSummary renders a recipient list for a table cell: the first
@@ -771,7 +776,7 @@ func formatFilesCount(count int, archived bool) string {
 }
 
 // formatBytes writes b in binary units, named as such (KiB, MiB, GiB), as
-// the SDK's debug log and the web app do.
+// the logs and the web app name them.
 func formatBytes(b int64) string {
 	switch {
 	case b >= 1<<30:

@@ -4,7 +4,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"strings"
 	"time"
@@ -92,72 +94,22 @@ func abbrev(s string, head, tail int) string {
 	return s[:head] + "..." + s[len(s)-tail:]
 }
 
-// ── Structured logging ─────────────────────────────────────────────────────
+// ── Output ─────────────────────────────────────────────────────────────────
 //
-// Terraform-style level + context + message:
+// What a command reports to its user goes to stderr, as Terraform reports
+// a resource:
 //
-//	DEBUG  encrypt.upload: multipart parts=2 part_size=8 MiB
-//	INFO   encrypt: → sending to self (alaa@example.com)
-//	WARN   storage: presign URL expires in 30s
-//	ERROR  decrypt: AEAD verification failed
+//	secret: Encrypting and uploading...
+//	secret: Still encrypting and uploading... [10s elapsed]
+//	secret: Upload complete after 36s [id=0724ba1f]
 //
-// One line per event. No timestamps in interactive mode (terraform-style).
-// DEBUG is hidden unless --debug. WARN/ERROR/INFO are always shown.
+// then its result as aligned key-value lines, or for a failure an Error
+// block (printDiagnostic). Logs are apart from this (logging.go): off
+// unless asked for, and never needed to follow a command.
 
-type logLevel int
-
-const (
-	lvlError logLevel = iota
-	lvlWarn
-	lvlInfo
-	lvlDebug
-)
-
-func logLine(level logLevel, ctx, format string, args ...any) {
-	if level == lvlDebug && !debug {
-		return
-	}
-	msg := safeLines(fmt.Sprintf(format, args...))
-	var tag, color string
-	switch level {
-	case lvlError:
-		tag, color = "ERROR", ansiBoldRed
-	case lvlWarn:
-		tag, color = "WARN ", ansiYellow
-	case lvlInfo:
-		tag, color = "INFO ", ansiCyan
-	case lvlDebug:
-		tag, color = "DEBUG", ansiDim
-	}
-	// For DEBUG keep the entire line dim. For others, color only the tag
-	// so the message text stays legible. A live view stays below the line.
-	aboveLive(func() {
-		if level == lvlDebug {
-			fmt.Fprintf(os.Stderr, "%s%s  %s: %s%s\n", color, tag, ctx, msg, ansiReset)
-		} else {
-			fmt.Fprintf(os.Stderr, "%s%s%s  %s: %s\n", color, tag, ansiReset, ctx, msg)
-		}
-	})
-}
-
-func logDebug(ctx, format string, args ...any)  { logLine(lvlDebug, ctx, format, args...) }
-func logInfof(ctx, format string, args ...any)  { logLine(lvlInfo, ctx, format, args...) }
-func logWarnf(ctx, format string, args ...any)  { logLine(lvlWarn, ctx, format, args...) }
-func logErrorf(ctx, format string, args ...any) { logLine(lvlError, ctx, format, args...) }
-
-// dbg / dbgErr: kept as thin wrappers for any remaining call sites.
-// New code should use logDebug / logError directly.
-func dbg(context string, format string, args ...any) { logDebug(context, format, args...) }
-func dbgErr(context string, err error) {
-	if err == nil {
-		return
-	}
-	logErrorf(context, "%v", err)
-}
-
-// threadCountLabel renders a thread-count flag value for debug logs. 0
-// means the SDK adapts the count to the connection; say so, so the log
-// doesn't look like the user disabled parallelism.
+// threadCountLabel is a --threads value for a log field. 0 means the SDK
+// adapts the count to the connection; say so, so the log does not read as
+// parallelism turned off.
 func threadCountLabel(v int) string {
 	if v <= 0 {
 		return "adaptive"
@@ -165,9 +117,8 @@ func threadCountLabel(v int) string {
 	return fmt.Sprintf("%d", v)
 }
 
-// shortID truncates a UUID/hash to the first 8 chars for log readability.
-// Full values are still available with `--debug` and grep on the secret_id
-// in the summary block.
+// shortID is the first 8 characters of an ID, as step lines, tables and
+// errors show it. The result blocks and the logs carry the full ID.
 func shortID(s string) string {
 	if len(s) > 8 {
 		return s[:8]
@@ -175,156 +126,118 @@ func shortID(s string) string {
 	return s
 }
 
-// ── Logging ────────────────────────────────────────────────────────────────
-
-// step represents a single unit of work in a pipeline.
+// step is one unit of a command's work. label says what it does while it
+// runs ("Encrypting and uploading") and done what it did once it finished
+// ("Upload complete"). Its action returns a detail for the done line, such
+// as "id=0724ba1f", or "".
 type step struct {
 	label          string
+	done           string
 	action         func() (string, error)                        // simple step
 	progressAction func(progress chan<- float64) (string, error) // progress-tracked step
 	live           *liveProgress                                 // live progress (encrypt, upload, download)
 }
 
-type keyValue struct {
-	key   string
-	value string
-}
-
-// toPrefix converts a title like "Encrypt Secret" to "ds.encrypt_secret"
-func toPrefix(title string) string {
-	s := strings.ToLower(title)
-	s = strings.ReplaceAll(s, " ", "_")
-	s = strings.ReplaceAll(s, "&", "_")
-	s = strings.ReplaceAll(s, "(", "")
-	s = strings.ReplaceAll(s, ")", "")
-	for strings.Contains(s, "__") {
-		s = strings.ReplaceAll(s, "__", "_")
+// run runs the step's action.
+func (s step) run() (string, error) {
+	if s.progressAction == nil {
+		return s.action()
 	}
-	s = strings.TrimRight(s, "_")
-	return "ds." + s
-}
-
-// runPipeline executes steps sequentially, printing each as a log line.
-func runPipeline(title string, steps []step, summary []keyValue) error {
-	prefix := toPrefix(title)
-
-	// Compute max label width for alignment
-	maxLabel := 0
-	for _, s := range steps {
-		if len(s.label) > maxLabel {
-			maxLabel = len(s.label)
+	ch := make(chan float64, 100)
+	go func() {
+		for range ch {
 		}
-	}
+	}()
+	return s.progressAction(ch)
+}
 
+// stillEvery is how often a step that shows no live progress says it is
+// still running; tests shorten it.
+var stillEvery = 10 * time.Second
+
+// runPipeline runs steps one after another, each reported on subject's
+// lines: started, still running every stillEvery, and done, with how long
+// it took. A step's live progress shows with --progress instead of the
+// still lines. The first failure stops the pipeline and is returned, for
+// main to print.
+func runPipeline(subject string, steps []step) error {
+	head := ansiBold + safe(subject) + ":" + ansiReset + " "
 	for _, s := range steps {
+		// A label can hold a name from outside the CLI: a file's, a
+		// secret's.
+		label, doneLabel := safe(s.label), safe(s.done)
 		start := time.Now()
+		aboveLive(func() { fmt.Fprintf(os.Stderr, "%s%s...\n", head, label) })
 
-		var detail string
-		var err error
+		type outcome struct {
+			detail string
+			err    error
+		}
+		done := make(chan outcome, 1)
+		go func() {
+			detail, err := s.run()
+			done <- outcome{detail, err}
+		}()
 
-		if s.live != nil {
-			// Run action in background, redraw its live progress
-			done := make(chan struct{})
-			var actionDetail string
-			var actionErr error
-
-			go func() {
-				if s.progressAction != nil {
-					ch := make(chan float64, 100)
-					go func() {
-						for range ch {
-						}
-					}()
-					actionDetail, actionErr = s.progressAction(ch)
-				} else {
-					actionDetail, actionErr = s.action()
-				}
-				close(done)
-			}()
-
-			head := liveHead(prefix, s.label, maxLabel)
-			ticker := time.NewTicker(200 * time.Millisecond)
-			cancelled := false
-			logged := time.Now()
-		transferLoop:
-			for {
-				select {
-				case now := <-ticker.C:
-					// Progress shows only with --progress, so the output
-					// stays plain for pipes, scripts and logs. On a terminal
-					// it redraws in place; redirected, redraws would fill
-					// the output with partial lines, so it is a line every
-					// progressLogEvery instead.
-					if !showProgress || cancelled {
-						continue
-					}
-					f := s.live.frame(now)
-					switch {
-					case stderrIsTerminal:
-						width, height := terminalSize()
-						drawLive(liveLines(head, f, now, width, height, liveCursor))
-					case now.Sub(logged) >= progressLogEvery:
-						logged = now
-						withLiveCleared(func() {
-							fmt.Fprintf(os.Stderr, "%s  %s\n", strings.TrimRight(head, " "), liveStats(f))
-						})
-					}
-				case <-rootCtx.Done():
-					// Ctrl+C arrived. The SDK's retry loops also see the
-					// cancellation and unwind in a few ms, but show the user
-					// immediate feedback so the live view doesn't look
-					// frozen while the goroutine drains.
-					if !cancelled {
-						cancelled = true
+		liveHead := head + label + "..."
+		progress := s.live != nil && showProgress
+		ticker := time.NewTicker(200 * time.Millisecond)
+		cancelled := false
+		logged, said := start, start
+		var out outcome
+	wait:
+		for {
+			select {
+			case now := <-ticker.C:
+				switch {
+				case cancelled:
+				case !progress:
+					if now.Sub(said) >= stillEvery {
+						said = now
 						aboveLive(func() {
-							fmt.Fprintf(os.Stderr, "  %s⏳%s cancelling, please wait...\n", ansiYellow, ansiReset)
+							fmt.Fprintf(os.Stderr, "%sStill %s... [%s elapsed]\n", head, lowerFirst(label), now.Sub(start).Round(time.Second))
 						})
 					}
-				case <-done:
-					break transferLoop
+				case stderrIsTerminal:
+					// Progress redraws in place on a terminal.
+					f := s.live.frame(now)
+					width, height := terminalSize()
+					drawLive(liveLines(liveHead, f, now, width, height, liveCursor))
+				case now.Sub(logged) >= progressLogEvery:
+					// Redirected, redraws would fill the output with partial
+					// lines, so it is a line every progressLogEvery instead.
+					logged = now
+					f := s.live.frame(now)
+					withLiveCleared(func() {
+						fmt.Fprintf(os.Stderr, "%s  %s\n", liveHead, liveStats(f))
+					})
 				}
-			}
-			ticker.Stop()
-			withLiveCleared(func() {})
-
-			detail = actionDetail
-			err = actionErr
-		} else if s.progressAction != nil {
-			ch := make(chan float64, 100)
-			go func() {
-				for range ch {
+			case <-rootCtx.Done():
+				// Ctrl+C or SIGTERM. The SDK's requests see the cancellation
+				// and unwind within moments; say so at once, so the output
+				// does not look frozen meanwhile.
+				if !cancelled {
+					cancelled = true
+					aboveLive(func() {
+						fmt.Fprintf(os.Stderr, "%sInterrupt received. Stopping, please wait...%s\n", ansiYellow, ansiReset)
+					})
 				}
-			}()
-			detail, err = s.progressAction(ch)
-		} else {
-			detail, err = s.action()
-		}
-
-		elapsed := time.Since(start)
-
-		if err != nil {
-			logStepError(prefix, s.label, maxLabel, err, elapsed)
-			return &displayedError{err: err}
-		}
-
-		logStep(prefix, s.label, maxLabel, detail, elapsed)
-	}
-
-	// Print summary
-	if len(summary) > 0 && debug {
-		fmt.Fprintln(os.Stderr)
-		maxKeyLen := 0
-		for _, kv := range summary {
-			if len(kv.key) > maxKeyLen {
-				maxKeyLen = len(kv.key)
+			case out = <-done:
+				break wait
 			}
 		}
-		for _, kv := range summary {
-			fmt.Fprintf(os.Stderr, "  %s%-*s%s  %s\n", ansiDim, maxKeyLen, kv.key, ansiReset, kv.value)
-		}
-		fmt.Fprintln(os.Stderr)
-	}
+		ticker.Stop()
+		withLiveCleared(func() {})
 
+		if out.err != nil {
+			return out.err
+		}
+		line := head + doneLabel + " after " + stepDuration(time.Since(start))
+		if out.detail != "" {
+			line += " [" + safe(out.detail) + "]"
+		}
+		aboveLive(func() { fmt.Fprintln(os.Stderr, line) })
+	}
 	return nil
 }
 
@@ -332,69 +245,139 @@ func runPipeline(title string, steps []step, summary []keyValue) error {
 // not a terminal; tests shorten it.
 var progressLogEvery = 5 * time.Second
 
-// liveHead is the start of a step's live view: its prefix and label,
-// padded to width.
-func liveHead(prefix, label string, width int) string {
-	return fmt.Sprintf("%s%s:%s %s⇅%s %-*s", ansiCyan, prefix, ansiReset, ansiYellow, ansiReset, width, safe(label))
+// lowerFirst is s with its first letter in lower case.
+func lowerFirst(s string) string {
+	r, n := utf8.DecodeRuneInString(s)
+	return string(unicode.ToLower(r)) + s[n:]
 }
 
-// displayedError wraps an error that has already been printed to stderr.
-// main() checks for this to avoid double-printing.
-type displayedError struct{ err error }
+// upperFirst is s with its first letter in upper case.
+func upperFirst(s string) string {
+	r, n := utf8.DecodeRuneInString(s)
+	return string(unicode.ToUpper(r)) + s[n:]
+}
 
-func (e *displayedError) Error() string { return e.err.Error() }
-func (e *displayedError) Unwrap() error { return e.err }
-
-// logStep prints a single aligned log line.
-// Always shows label + checkmark + duration. Detail only in debug mode.
-func logStep(prefix, label string, padWidth int, detail string, d time.Duration) {
-	detailStr := ""
-	if debug && detail != "" {
-		detailStr = ansiDim + " " + safe(detail) + ansiReset
+// stepDuration is how long a step took: milliseconds under a second,
+// tenths of a second under a minute, then minutes and seconds.
+func stepDuration(d time.Duration) string {
+	switch {
+	case d < time.Second:
+		return fmt.Sprintf("%dms", d.Milliseconds())
+	case d < time.Minute:
+		return fmt.Sprintf("%.1fs", d.Seconds())
 	}
-	fmt.Fprintf(os.Stderr, "%s%s:%s %s✓%s %-*s%s  %s%s%s\n",
-		ansiCyan, prefix, ansiReset,
-		ansiGreen, ansiReset,
-		padWidth, label,
-		detailStr,
-		ansiDim, fmtDuration(d), ansiReset,
-	)
+	return d.Round(time.Second).String()
 }
 
-// logStepError prints a failed step log line.
-func logStepError(prefix, label string, padWidth int, err error, d time.Duration) {
-	fmt.Fprintf(os.Stderr, "%s%s:%s %s✗%s %-*s  %s%s%s  %s%s%s\n",
-		ansiCyan, prefix, ansiReset,
-		ansiBoldRed, ansiReset,
-		padWidth, safe(label),
-		ansiRed, safeLines(err.Error()), ansiReset,
-		ansiDim, fmtDuration(d), ansiReset,
-	)
-}
+// ── Errors and warnings ────────────────────────────────────────────────────
 
-// logInfo prints a general info line with prefix.
-func logInfo(prefix, msg string) {
-	if !debug {
-		return
+// severity is an Error or a Warning block.
+type severity int
+
+const (
+	sevError severity = iota
+	sevWarning
+)
+
+// printDiagnostic prints an error or a warning as Terraform does: the
+// severity and a one-line summary, then the detail, indented, on the
+// lines below:
+//
+//	Error: Secret not found
+//
+//	  No secret 0724ba1f is shared with you. Check the ID with
+//	  'secret list'.
+func printDiagnostic(sev severity, summary, detail string) {
+	label, color := "Error:", ansiBoldRed
+	if sev == sevWarning {
+		label, color = "Warning:", ansiBold+ansiYellow
 	}
-	aboveLive(func() {
-		fmt.Fprintf(os.Stderr, "%s%s:%s %s\n", ansiCyan, prefix, ansiReset, msg)
-	})
+	var b strings.Builder
+	b.WriteString("\n")
+	fmt.Fprintf(&b, "%s%s%s %s%s%s\n", color, label, ansiReset, ansiBold, safe(summary), ansiReset)
+	if detail = strings.TrimSpace(detail); detail != "" {
+		b.WriteString("\n")
+		for _, line := range strings.Split(safeLines(detail), "\n") {
+			if strings.TrimSpace(line) == "" {
+				b.WriteString("\n")
+				continue
+			}
+			b.WriteString("  " + line + "\n")
+		}
+	}
+	aboveLive(func() { fmt.Fprint(os.Stderr, b.String()) })
+}
+
+// printWarning prints a Warning block.
+func printWarning(summary, detail string) { printDiagnostic(sevWarning, summary, detail) }
+
+// detailedError is an error with the detail its Error block shows under
+// the summary: what it means, and what to check or do next.
+type detailedError struct {
+	err    error
+	detail string
+}
+
+func (e *detailedError) Error() string { return e.err.Error() }
+func (e *detailedError) Unwrap() error { return e.err }
+
+// withDetail gives err a detail for its Error block.
+func withDetail(err error, detail string) error {
+	if err == nil {
+		return nil
+	}
+	return &detailedError{err: err, detail: detail}
+}
+
+// describeError is err as an Error block: the first line of its message,
+// starting with a capital, as the summary; the rest of the message and the
+// detail it carries (withDetail) as the detail.
+func describeError(err error) (summary, detail string) {
+	first, rest, _ := strings.Cut(strings.TrimSpace(err.Error()), "\n")
+	var parts []string
+	if rest != "" {
+		lines := strings.Split(rest, "\n")
+		for i, l := range lines {
+			lines[i] = strings.TrimPrefix(l, "  ")
+		}
+		parts = append(parts, strings.Join(lines, "\n"))
+	}
+	var d *detailedError
+	if errors.As(err, &d) && d.detail != "" {
+		parts = append(parts, d.detail)
+	}
+	if kc := keyChangedDetail(err); kc != "" {
+		parts = append(parts, kc)
+	}
+	return upperFirst(first), strings.Join(parts, "\n\n")
+}
+
+// pathCause is what went wrong in a file operation, without the operation
+// and the path that *fs.PathError and *os.LinkError put before it, for an
+// error that names the file itself.
+func pathCause(err error) error {
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		return pe.Err
+	}
+	var le *os.LinkError
+	if errors.As(err, &le) {
+		return le.Err
+	}
+	return err
 }
 
 // ── Simple Output Helpers ───────────────────────────────────────────────────
 
-// printSuccess, printError, printDim and printHeader print text that can
-// hold values from outside the CLI, so they print it through safeLines.
-// printKeyValue takes values that may carry the CLI's own styles: callers
-// pass outside values through safe.
+// printSuccess, printDim and printHeader print text that can hold values
+// from outside the CLI, so they print it through safeLines. printKeyValue
+// takes values that may carry the CLI's own styles: callers pass outside
+// values through safe.
 
+// printSuccess prints a command's closing result as one green sentence,
+// as Terraform prints "Apply complete!".
 func printSuccess(msg string) {
-	fmt.Fprintf(os.Stderr, "  %s✓%s %s\n", ansiGreen, ansiReset, safeLines(msg))
-}
-
-func printError(msg string) {
-	fmt.Fprintf(os.Stderr, "  %s✗%s %s\n", ansiRed, ansiReset, safeLines(msg))
+	fmt.Fprintf(os.Stderr, "%s%s%s%s\n", ansiBold, ansiGreen, safeLines(msg), ansiReset)
 }
 
 func printKeyValue(key, value string) {
@@ -423,11 +406,10 @@ func printDim(msg string) {
 	fmt.Fprintf(os.Stderr, "  %s%s%s\n", ansiDim, safeLines(msg), ansiReset)
 }
 
-// ── Timer helper ────────────────────────────────────────────────────────────
-
-func fmtDuration(d time.Duration) string {
-	if d < time.Second {
-		return fmt.Sprintf("%dms", d.Milliseconds())
-	}
-	return fmt.Sprintf("%.1fs", d.Seconds())
+// printSubject prints a line of subject's, as runPipeline does: the
+// subject, then msg.
+func printSubject(subject, msg string) {
+	aboveLive(func() {
+		fmt.Fprintf(os.Stderr, "%s%s:%s %s\n", ansiBold, safe(subject), ansiReset, safeLines(msg))
+	})
 }

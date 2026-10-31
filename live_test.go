@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/deepsecret-io/sdk"
+	"github.com/deepsecret-io/sdk/api"
 )
 
 var ansiEscape = regexp.MustCompile("\033\\[[0-9;]*[A-Za-z]")
@@ -33,7 +34,7 @@ func uploadFrame(conns []sdk.ConnectionStatus) liveFrame {
 // others keep their numbers.
 func TestLiveLinesShowEachConnection(t *testing.T) {
 	now := time.Now()
-	lines := liveLines("ds.encrypt_upload: Encrypting locally, then uploading", uploadFrame([]sdk.ConnectionStatus{
+	lines := liveLines("secret: Encrypting and uploading...", uploadFrame([]sdk.ConnectionStatus{
 		{Part: 4, Size: 8 << 20, Moved: 2 << 20, Attempt: 1, Since: now.Add(-2 * time.Second)},
 		{Part: 5, Size: 8 << 20, Attempt: 2, Waiting: true},
 		{},
@@ -44,7 +45,7 @@ func TestLiveLinesShowEachConnection(t *testing.T) {
 		t.Fatalf("%d lines:\n%s", len(lines), strings.Join(lines, "\n"))
 	}
 	for i, want := range []string{
-		"ds.encrypt_upload: Encrypting locally, then uploading",
+		"secret: Encrypting and uploading...",
 		"  uploading 40.0 MiB/96.0 MiB 42%  8.0 MiB/s, 7s left  4 connections, up to 32",
 		"1 part  4 of 12  █████░░░░░░░░░░░░░░░  2.0 MiB/8.0 MiB  1.0 MiB/s",
 		"2 part  5 of 12  ░░░░░░░░░░░░░░░░░░░░  retrying, attempt 2 of 8",
@@ -65,7 +66,7 @@ func TestLiveLinesFitTheTerminal(t *testing.T) {
 		conns[i] = sdk.ConnectionStatus{Part: i + 1, Size: 8 << 20, Moved: 3 << 20, Attempt: 1, Since: now.Add(-time.Minute)}
 	}
 	for _, width := range []int{1, 20, 50, 300} {
-		lines := liveLines("ds.encrypt_upload: Encrypting locally, then uploading", uploadFrame(conns), now, width, 10, true)
+		lines := liveLines("secret: Encrypting and uploading...", uploadFrame(conns), now, width, 10, true)
 		if len(lines) != 9 || (width == 300 && strings.Count(strings.Join(lines, "\n"), "part ") != 6) {
 			t.Fatalf("width %d: %d lines for a 10-row terminal", width, len(lines))
 		}
@@ -85,9 +86,9 @@ func TestLiveLinesFitTheTerminal(t *testing.T) {
 func TestLiveLinesWithoutRows(t *testing.T) {
 	now := time.Now()
 	f := uploadFrame([]sdk.ConnectionStatus{{Part: 1, Size: 10, Attempt: 1}})
-	head := "ds.encrypt: Encrypting to /a/very/long/path/that/fills/the/line/report-2026.tar.cbor      "
+	head := "secret: Encrypting to /a/very/long/path/that/fills/the/line/report-2026.tar.cbor..."
 	lines := liveLines(head, f, now, 100, 40, false)
-	if len(lines) != 1 || columns(lines[0]) > 99 || !strings.HasPrefix(lines[0], "ds.encrypt: Encryp") ||
+	if len(lines) != 1 || columns(lines[0]) > 99 || !strings.HasPrefix(lines[0], "secret: Encrypting") ||
 		!strings.Contains(lines[0], "...  uploading 40.0 MiB/96.0 MiB 42%  8.0 MiB/s, 7s left  4 connections, up to 32") {
 		t.Fatalf("no cursor moves: %q", lines)
 	}
@@ -176,12 +177,19 @@ func TestFit(t *testing.T) {
 	}
 }
 
-// A step's label can hold a secret's name, from outside the CLI: the live
-// view shows it without its control characters.
-func TestLiveHeadNeutralizesTheLabel(t *testing.T) {
-	head := liveHead("ds.resume_upload", "Uploading evil\033]0;owned\a\033[2J", 0)
-	if !strings.Contains(head, "Uploading evil?]0;owned??[2J") {
-		t.Fatalf("%q", head)
+// A step's label can hold a secret's name, from outside the CLI: its lines
+// show it without its control characters.
+func TestStepLinesNeutralizeTheLabel(t *testing.T) {
+	savedCtx := rootCtx
+	t.Cleanup(func() { rootCtx = savedCtx })
+	rootCtx = context.Background()
+	out := stderrOf(t, func() {
+		_ = runPipeline("upload", []step{{label: "Uploading evil\033]0;owned\a\033[2J", done: "Upload complete", action: func() (string, error) {
+			return "id=evil\033[2J", nil
+		}}})
+	})
+	if strings.Contains(out, "\033]") || strings.Contains(out, "\a") || !strings.Contains(out, "Uploading evil?]0;owned??[2J...") || !strings.Contains(out, "[id=evil?[2J]") {
+		t.Fatalf("%q", out)
 	}
 }
 
@@ -231,11 +239,11 @@ func TestProgressOnlyWithTheFlag(t *testing.T) {
 	run := func() string {
 		return stderrOf(t, func() {
 			p := newStageProgress("encrypting")
-			err := runPipeline("Encrypt", []step{{label: "Encrypting", live: p, action: func() (string, error) {
+			err := runPipeline("secret", []step{{label: "Encrypting", done: "Encryption complete", live: p, action: func() (string, error) {
 				p.pre.set(1<<20, 4<<20)
 				time.Sleep(700 * time.Millisecond)
 				return "", nil
-			}}}, nil)
+			}}})
 			if err != nil {
 				t.Error(err)
 			}
@@ -245,8 +253,8 @@ func TestProgressOnlyWithTheFlag(t *testing.T) {
 
 	for _, terminal := range []bool{false, true} {
 		showProgress, stderrIsTerminal, liveCursor = false, terminal, terminal
-		if out := run(); redraw(out) || strings.Count(out, "\n") != 1 || !strings.Contains(out, "Encrypting") {
-			t.Fatalf("by default (terminal %v) stderr got %q, want only the step line", terminal, out)
+		if out := run(); redraw(out) || !strings.HasPrefix(out, "secret: Encrypting...\nsecret: Encryption complete after ") || strings.Count(out, "\n") != 2 {
+			t.Fatalf("by default (terminal %v) stderr got %q, want only the step's start and done lines", terminal, out)
 		}
 	}
 
@@ -257,7 +265,7 @@ func TestProgressOnlyWithTheFlag(t *testing.T) {
 
 	showProgress, stderrIsTerminal, liveCursor = true, false, false
 	out := run()
-	if redraw(out) || !strings.Contains(out, "Encrypting  encrypting 1.0 MiB/4.0 MiB 25%\n") {
+	if redraw(out) || !strings.Contains(out, "secret: Encrypting...  encrypting 1.0 MiB/4.0 MiB 25%\n") {
 		t.Fatalf("--progress redirected got %q, want plain progress lines", out)
 	}
 }
@@ -267,16 +275,21 @@ func TestProgressOnlyWithTheFlag(t *testing.T) {
 // progress view that stays at the bottom instead of mixing with it. A step
 // that ends clears the view, and later log lines do not bring it back.
 func TestLogLinesPrintAboveTheLiveView(t *testing.T) {
-	savedCursor, savedDebug := liveCursor, debug
-	liveCursor, debug = true, true
+	savedCursor, savedLogger := liveCursor, logger
+	liveCursor = true
 	t.Cleanup(func() {
-		liveCursor, debug = savedCursor, savedDebug
+		liveCursor, logger = savedCursor, savedLogger
 		withLiveCleared(func() {})
 	})
-	view := []string{"ds.decrypt: Downloading", "  downloading 1.0 MiB/4.0 MiB 25%", "  1 part 2 of 4"}
+	t.Setenv("DS_LOG", "")
+	t.Setenv("DS_LOG_PATH", "")
+	if _, err := setupLogging(true); err != nil {
+		t.Fatal(err)
+	}
+	view := []string{"secret: Downloading...", "  downloading 1.0 MiB/4.0 MiB 25%", "  1 part 2 of 4"}
 	out := stderrOf(t, func() {
 		drawLive(view)
-		logDebug("range", "piece 3 split")
+		api.Module(logger, "range").Debug("piece 3 split")
 	})
 	line := strings.Index(out, "piece 3 split")
 	if line < 0 {
@@ -295,7 +308,7 @@ func TestLogLinesPrintAboveTheLiveView(t *testing.T) {
 
 	out = stderrOf(t, func() {
 		withLiveCleared(func() {})
-		logDebug("decrypt", "after the step")
+		api.Module(logger, "decrypt").Debug("after the step")
 	})
 	if strings.Contains(out, view[0]) || live.lines != 0 {
 		t.Fatalf("the view came back after the step ended: %q (%d lines)", out, live.lines)

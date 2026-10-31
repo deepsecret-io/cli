@@ -36,8 +36,12 @@ func TestCheckFilesDestination(t *testing.T) {
 		t.Fatal(err)
 	}
 	err := checkFilesDestination("", archive, false)
-	if err == nil || !strings.Contains(err.Error(), "earlier decrypt") || !strings.Contains(err.Error(), "nothing was downloaded") {
-		t.Fatalf("./%s holding an earlier decrypt: %v", rev, err)
+	if err == nil {
+		t.Fatalf("./%s holding an earlier decrypt was accepted", rev)
+	}
+	if summary, detail := describeError(err); !strings.Contains(summary, "is not empty") ||
+		!strings.Contains(detail, "earlier decrypt") || !strings.Contains(detail, "Nothing was downloaded") {
+		t.Fatalf("./%s holding an earlier decrypt: %q, %q", rev, summary, detail)
 	}
 	if err := checkFilesDestination("", archive, true); err != nil {
 		t.Fatalf("with --overwrite: %v", err)
@@ -49,8 +53,12 @@ func TestCheckFilesDestination(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(rev, "notes.txt"), []byte("hello"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := checkFilesDestination(rev, listed, false); err == nil || !strings.Contains(err.Error(), "already exists") {
+	err = checkFilesDestination(rev, listed, false)
+	if err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("a listed file that exists: %v", err)
+	}
+	if _, detail := describeError(err); !strings.Contains(detail, "Nothing was downloaded") || !strings.Contains(detail, "--overwrite") {
+		t.Fatalf("a listed file that exists: the detail %q", detail)
 	}
 	if err := checkFilesDestination(rev, listed, true); err != nil {
 		t.Fatalf("a listed file that exists, with --overwrite: %v", err)

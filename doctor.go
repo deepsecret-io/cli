@@ -4,14 +4,15 @@
 package main
 
 import (
-	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/deepsecret-io/sdk/api"
 	"github.com/deepsecret-io/sdk/crypto"
 )
 
@@ -21,14 +22,16 @@ func newDoctorCmd() *cobra.Command {
 		Aliases: []string{"doc"},
 		Args:    cobra.NoArgs,
 		Short:   "Check CLI health and configuration (alias: doc)",
-		Long: `Run diagnostic checks on your DeepSecret CLI setup.
+		Long: `Run diagnostic checks on your DeepSecret CLI setup, and fail when one
+does.
 
 Checks:
   - API URL configuration
-  - Authentication (login token or API key)
-  - Local identity keys
-  - Remote key sync status
-  - Key fingerprint matching
+  - Authentication: the login session and any API key, each verified with
+    the server
+  - Your plan
+  - The key pairs on this device
+  - The keys registered on the server, and which of them this device holds
 
 Examples:
   secret doctor
@@ -47,255 +50,249 @@ type checkResult struct {
 }
 
 func runDoctor() error {
-	dbg("doctor", "starting diagnostics")
 	var checks []checkResult
-
-	// 1. Config / API URL
 	checks = append(checks, checkAPIURL())
-
-	// 2. Authentication
 	checks = append(checks, checkAuth()...)
-
-	// 3. Active plan
 	if hasAuth() {
 		checks = append(checks, checkPlan())
 	}
-
-	// 4. Local identities
-	localKeys := checkLocalKeys()
-	checks = append(checks, localKeys...)
-
-	// 5. Remote sync (only if authenticated and has local keys)
+	checks = append(checks, checkLocalKeys()...)
 	if hasAuth() && hasLocalKeys() {
 		checks = append(checks, checkRemoteSync()...)
 	}
 
-	// Compute max name width for alignment
-	maxName := 0
-	for _, c := range checks {
-		if len(c.name) > maxName {
-			maxName = len(c.name)
-		}
+	if failed := printChecks(checks); failed > 0 {
+		return fmt.Errorf("%d of %d checks failed", failed, len(checks))
 	}
-
-	// Print results
-	pass := 0
-	fail := 0
-	for _, c := range checks {
-		if c.ok {
-			fmt.Fprintf(os.Stderr, "%sds.doctor:%s %s✓%s %-*s  %s%s%s\n",
-				ansiCyan, ansiReset, ansiGreen, ansiReset, maxName, c.name, ansiDim, c.detail, ansiReset)
-			pass++
-		} else {
-			fmt.Fprintf(os.Stderr, "%sds.doctor:%s %s✗%s %-*s  %s%s%s\n",
-				ansiCyan, ansiReset, ansiBoldRed, ansiReset, maxName, c.name, ansiRed, c.detail, ansiReset)
-			if c.fix != "" {
-				fmt.Fprintf(os.Stderr, "%sds.doctor:%s   %sfix: %s%s\n",
-					ansiCyan, ansiReset, ansiDim, c.fix, ansiReset)
-			}
-			fail++
-		}
-	}
-
 	fmt.Fprintln(os.Stderr)
-	summary := fmt.Sprintf("%d passed, %d failed", pass, fail)
-	if fail == 0 {
-		fmt.Fprintf(os.Stderr, "%sds.doctor:%s %s%s, all good%s\n", ansiCyan, ansiReset, ansiGreen, summary, ansiReset)
-	} else {
-		fmt.Fprintf(os.Stderr, "%sds.doctor:%s %s%s%s\n", ansiCyan, ansiReset, ansiRed, summary, ansiReset)
-	}
+	printSuccess(fmt.Sprintf("All %d checks passed.", len(checks)))
 	return nil
+}
+
+// printChecks prints each check on a line, a checklist: a mark, its name
+// and what it found, and under a failed one how to fix it. It returns how
+// many failed.
+func printChecks(checks []checkResult) int {
+	width := 0
+	for _, c := range checks {
+		width = max(width, len(c.name))
+	}
+	failed := 0
+	for _, c := range checks {
+		mark, color := ansiGreen+"✓"+ansiReset, ansiDim
+		if !c.ok {
+			mark, color = ansiBoldRed+"✗"+ansiReset, ansiRed
+			failed++
+		}
+		fmt.Fprintf(os.Stderr, "  %s %-*s  %s%s%s\n", mark, width, c.name, color, safe(c.detail), ansiReset)
+		if !c.ok && c.fix != "" {
+			fmt.Fprintf(os.Stderr, "    %-*s  %sfix: %s%s\n", width, "", ansiDim, safe(c.fix), ansiReset)
+		}
+	}
+	return failed
 }
 
 func checkAPIURL() checkResult {
 	return checkResult{name: "API URL", ok: true, detail: apiBaseURL + " (compiled in)"}
 }
 
+// credential is an API key doctor checks: the check's name, the key, and
+// how to fix it when the server refuses it.
+type credential struct {
+	name, key, fix string
+}
+
 func checkAuth() []checkResult {
-	var results []checkResult
-	apiBase := apiBaseURL
-
-	// Check login token
-	tf, err := loadTokenFile()
-	if err == nil && tf.Token != "" {
-		exp, _ := time.Parse(time.RFC3339, tf.ExpiresAt)
-		if time.Now().After(exp) {
-			results = append(results, checkResult{name: "Login token", ok: false, detail: "expired", fix: "secret login"})
-		} else {
-			remaining := time.Until(exp).Round(time.Minute)
-			// Test token against API
-			if apiBase != "" {
-				tc, tcErr := NewClient(apiBase, "bearer:"+tf.Token)
-				if tcErr != nil {
-					results = append(results, checkResult{name: "Login token", ok: false, detail: fmt.Sprintf("%s: %v", tf.Email, tcErr), fix: "secret login"})
-				} else if _, err := tc.WhoAmI(); err != nil {
-					results = append(results, checkResult{name: "Login token", ok: false, detail: fmt.Sprintf("%s: rejected by the server", tf.Email), fix: "secret login"})
-				} else {
-					results = append(results, checkResult{name: "Login token", ok: true, detail: fmt.Sprintf("%s (%s remaining, verified)", tf.Email, remaining)})
-				}
-			} else {
-				results = append(results, checkResult{name: "Login token", ok: true, detail: fmt.Sprintf("%s (%s remaining)", tf.Email, remaining)})
-			}
+	var session *TokenFile
+	if tf, err := loadTokenFile(); err == nil && tf.Token != "" {
+		session = tf
+	}
+	var keys []credential
+	if apiKey != "" {
+		fix := "give a valid key with " + keyOrigin
+		if keyOrigin == "DS_API_KEY" {
+			fix = "unset DS_API_KEY, or set it to a valid key"
 		}
+		keys = append(keys, credential{"API key (" + keyOrigin + ")", apiKey, fix})
+	}
+	if cfg, err := loadConfig(); err == nil && cfg.APIKey != "" && cfg.APIKey != apiKey {
+		keys = append(keys, credential{"API key (saved)", cfg.APIKey, "secret config --save-api-key --api-key-stdin"})
+	}
+	return authChecks(session, keys, verifyCredential, time.Now())
+}
+
+// verifyCredential asks the server whose key is. A login token gets a
+// client that saves the token it renews: a renewal revokes the stored one.
+func verifyCredential(key string) error {
+	var c *Client
+	var err error
+	if token, ok := strings.CutPrefix(key, "bearer:"); ok {
+		c, err = newSessionClient(token)
 	} else {
-		results = append(results, checkResult{name: "Login token", ok: false, detail: "not found", fix: "secret login"})
+		c, err = NewClient(apiBaseURL, key)
 	}
-
-	// Check the API key, reporting each source separately
-	envKey := os.Getenv("DS_API_KEY")
-	var cfgKey string
-	if cfg, err := loadConfig(); err == nil {
-		cfgKey = cfg.APIKey
+	if err != nil {
+		return err
 	}
+	_, err = c.WhoAmI()
+	return err
+}
 
-	if envKey != "" {
-		if apiBase != "" {
-			tc, tcErr := NewClient(apiBase, envKey)
-			if tcErr != nil {
-				results = append(results, checkResult{name: "API key (env)", ok: false, detail: tcErr.Error()})
-			} else if _, err := tc.WhoAmI(); err != nil {
-				results = append(results, checkResult{name: "API key (env)", ok: false, detail: "rejected by server", fix: "unset DS_API_KEY or update it"})
-			} else {
-				results = append(results, checkResult{name: "API key (env)", ok: true, detail: "set (verified)"})
+// authChecks checks the login session (nil when there is none) and the
+// API keys, verify asking the server about each. One working credential
+// is enough, so none is missing unless all are.
+func authChecks(session *TokenFile, keys []credential, verify func(key string) error, now time.Time) []checkResult {
+	var results []checkResult
+	if session != nil {
+		results = append(results, checkLogin(session, verify, now))
+	}
+	for _, k := range keys {
+		r := checkResult{name: k.name, ok: true, detail: "verified"}
+		if err := verify(k.key); err != nil {
+			var rejected bool
+			r.ok = false
+			if r.detail, rejected = verifyFailure(err); rejected {
+				r.fix = k.fix
 			}
-		} else {
-			results = append(results, checkResult{name: "API key (env)", ok: true, detail: "set"})
 		}
+		results = append(results, r)
 	}
-
-	if cfgKey != "" && cfgKey != envKey {
-		if apiBase != "" {
-			tc, tcErr := NewClient(apiBase, cfgKey)
-			if tcErr != nil {
-				results = append(results, checkResult{name: "API key (config)", ok: false, detail: tcErr.Error()})
-			} else if _, err := tc.WhoAmI(); err != nil {
-				results = append(results, checkResult{name: "API key (config)", ok: false, detail: "rejected by server", fix: "secret config --save-api-key --api-key-stdin"})
-			} else {
-				results = append(results, checkResult{name: "API key (config)", ok: true, detail: "set (verified)"})
-			}
-		} else {
-			results = append(results, checkResult{name: "API key (config)", ok: true, detail: "set"})
-		}
+	if len(results) == 0 {
+		results = append(results, checkResult{name: "Login", detail: "not logged in, and no API key is set", fix: "secret login"})
 	}
-
-	if envKey == "" && cfgKey == "" {
-		results = append(results, checkResult{name: "API key", ok: false, detail: "not set (optional if logged in)", fix: "secret config --save-api-key --api-key-stdin"})
-	}
-
 	return results
+}
+
+// checkLogin checks the stored login session tf.
+func checkLogin(tf *TokenFile, verify func(key string) error, now time.Time) checkResult {
+	r := checkResult{name: "Login"}
+	account := orDefault(tf.Email, "account not recorded")
+	if tf.ExpiresAt != "" {
+		// As loadToken does, an expiry that does not parse counts as
+		// passed.
+		if exp, err := time.Parse(time.RFC3339, tf.ExpiresAt); err != nil || !now.Before(exp) {
+			r.detail, r.fix = account+": the session expired", "secret login"
+			return r
+		}
+	}
+	if err := verify("bearer:" + tf.Token); err != nil {
+		var rejected bool
+		if r.detail, rejected = verifyFailure(err); rejected {
+			r.fix = "secret login"
+		}
+		r.detail = account + ": " + r.detail
+		return r
+	}
+	r.ok, r.detail = true, account+" (verified)"
+	return r
+}
+
+// verifyFailure says why a credential did not verify, and whether the
+// server refused it, rather than not being reached.
+func verifyFailure(err error) (detail string, rejected bool) {
+	if errors.Is(err, api.ErrUnauthorized) || errors.Is(err, api.ErrForbidden) {
+		return "rejected by the server", true
+	}
+	return "could not be checked: " + apiCause(err).Error(), false
 }
 
 func checkLocalKeys() []checkResult {
 	names, err := listKeyPairs()
 	if err != nil {
-		return []checkResult{{name: "Local identities", ok: false, detail: err.Error()}}
+		return []checkResult{{name: "Key pairs", detail: "could not list them: " + err.Error()}}
 	}
 	if len(names) == 0 {
-		return []checkResult{{name: "Local identities", ok: false, detail: "none found", fix: "secret id gen"}}
+		return []checkResult{{name: "Key pairs", detail: "none on this device", fix: "secret identity generate --sync"}}
 	}
 
 	var results []checkResult
 	for _, n := range names {
-		data, err := os.ReadFile(filepath.Join(keysDir(), n+".json")) // #nosec G304 -- n is a file name listKeyPairs read from the keys directory.
+		kp, fp, err := readPublicKeys(n)
 		if err != nil {
-			results = append(results, checkResult{name: "Identity", ok: false, detail: safe(crypto.ShortFingerprint(n)) + " unreadable"})
+			results = append(results, checkResult{name: "Key pair", detail: n + ".json: " + err.Error()})
 			continue
 		}
-		var raw crypto.KeyPair
-		if json.Unmarshal(data, &raw) != nil {
-			results = append(results, checkResult{name: "Identity", ok: false, detail: safe(crypto.ShortFingerprint(n)) + " corrupt"})
-			continue
+		detail := crypto.ShortFingerprint(fp)
+		if kp.Encrypted {
+			detail += " (encrypted)"
 		}
-		fp, _ := crypto.Fingerprint(&raw)
-		encrypted := ""
-		if raw.Encrypted {
-			encrypted = " (encrypted)"
-		}
-		results = append(results, checkResult{name: "Identity", ok: true, detail: crypto.ShortFingerprint(fp) + encrypted})
+		results = append(results, checkResult{name: "Key pair", ok: true, detail: detail})
 	}
 	return results
 }
 
+// checkRemoteSync checks the keys registered on the server against the key
+// pairs on this device: the primary key must be here, since secrets are
+// sent to it, and each key pair here should be registered. A registered
+// key elsewhere is fine.
 func checkRemoteSync() []checkResult {
-	c, err := newAuthenticatedClient()
+	remote, err := fetchRegisteredKeys()
 	if err != nil {
-		return nil
+		return []checkResult{{name: "Registered keys", detail: err.Error()}}
+	}
+	if len(remote) == 0 {
+		return []checkResult{{name: "Registered keys", detail: "none on the server", fix: "secret identity sync"}}
 	}
 
-	// Fetch remote keys (source of truth)
-	remoteKeys, err := c.ListRemoteKeys()
-	if err != nil {
-		return []checkResult{{name: "Remote sync", ok: false, detail: "failed to fetch remote keys", fix: "check your authentication"}}
+	names, _ := listKeyPairs() // checkLocalKeys reported a failure to list them
+	here := func(fp string) bool {
+		for _, n := range names {
+			if fingerprintMatch(n, fp) {
+				return true
+			}
+		}
+		return false
 	}
-
-	if len(remoteKeys) == 0 {
-		return []checkResult{{name: "Remote sync", ok: false, detail: "no keys registered on server", fix: "secret id sync"}}
-	}
-
 	var results []checkResult
-
-	// Check each server key has a local match (server is source of truth)
-	for _, k := range remoteKeys {
-		label := "Sync"
-		if k.IsPrimary {
-			label = "Primary key"
+	for _, k := range remote {
+		short := crypto.ShortFingerprint(k.Fingerprint)
+		switch {
+		case k.IsPrimary && here(k.Fingerprint):
+			results = append(results, checkResult{name: "Primary key", ok: true, detail: short + " is on this device"})
+		case k.IsPrimary:
+			results = append(results, checkResult{name: "Primary key", detail: short + " is not on this device, so secrets sent to you cannot be decrypted here",
+				fix: "decrypt on the device that holds it, or make a key pair here your primary key: secret identity set-primary <fingerprint>"})
+		case here(k.Fingerprint):
+			results = append(results, checkResult{name: "Registered key", ok: true, detail: short + " is on this device"})
+		default:
+			results = append(results, checkResult{name: "Registered key", ok: true, detail: short + " is not on this device"})
 		}
-		_, err := loadKeyPair(k.Fingerprint)
-		if err != nil {
-			results = append(results, checkResult{name: label, ok: false, detail: safe(crypto.ShortFingerprint(k.Fingerprint)) + " not found locally", fix: "key may have been generated on another machine"})
-		} else {
-			results = append(results, checkResult{name: label, ok: true, detail: safe(crypto.ShortFingerprint(k.Fingerprint)) + " synced"})
-		}
-	}
-
-	// Check local keys not on server
-	names, _ := listKeyPairs()
-	remoteFPs := make(map[string]bool)
-	for _, k := range remoteKeys {
-		remoteFPs[k.Fingerprint] = true
 	}
 	for _, n := range names {
-		data, err := os.ReadFile(filepath.Join(keysDir(), n+".json")) // #nosec G304 -- n is a file name listKeyPairs read from the keys directory.
-		if err != nil {
+		_, fp, err := readPublicKeys(n)
+		if err != nil || registeredKey(remote, fp) != nil {
 			continue
 		}
-		var raw crypto.KeyPair
-		if json.Unmarshal(data, &raw) != nil {
-			continue
-		}
-		fp, _ := crypto.Fingerprint(&raw)
-		if !remoteFPs[fp] {
-			results = append(results, checkResult{name: "Local only", ok: false, detail: crypto.ShortFingerprint(fp) + " not on server", fix: fmt.Sprintf("secret identity sync -i %s", crypto.ShortFingerprint(fp))})
-		}
+		results = append(results, checkResult{name: "Key pair", detail: crypto.ShortFingerprint(fp) + " is not registered", fix: "secret identity sync -i " + fp})
 	}
-
 	return results
 }
 
 func checkPlan() checkResult {
+	r := checkResult{name: "Plan"}
 	c, err := newAuthenticatedClient()
 	if err != nil {
-		return checkResult{name: "Active plan", ok: false, detail: "could not resolve config"}
+		r.detail = "not checked: " + err.Error()
+		return r
 	}
 	actor, err := c.WhoAmI()
 	if err != nil {
-		return checkResult{name: "Active plan", ok: false, detail: "failed to fetch account info"}
+		r.detail = "could not fetch your account: " + apiCause(err).Error()
+		return r
 	}
 	if actor.TierName == "" {
-		return checkResult{name: "Active plan", ok: false, detail: "no active plan", fix: "activate a plan at https://app.deepsecret.io/tiers"}
+		r.detail, r.fix = "no active plan", "choose one at https://app.deepsecret.io/tiers"
+		return r
 	}
-	status := actor.SubscriptionStatus
-	if status == "" || status == "inactive" {
-		status = "free"
-	}
-	return checkResult{name: "Active plan", ok: true, detail: fmt.Sprintf("%s (%s)", actor.TierName, status)}
+	r.ok, r.detail = true, fmt.Sprintf("%s (%s)", actor.TierName, subscriptionStatus(actor.SubscriptionStatus, actor.Subscription.TrialEndsAt, time.Now()))
+	return r
 }
 
 func hasAuth() bool {
-	if _, err := loadToken(); err == nil {
+	if apiKey != "" {
 		return true
 	}
-	if key := os.Getenv("DS_API_KEY"); key != "" {
+	if _, err := loadToken(); err == nil {
 		return true
 	}
 	if cfg, err := loadConfig(); err == nil && cfg.APIKey != "" {

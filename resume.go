@@ -81,7 +81,7 @@ func newResumeCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "resume [id]",
-		Short: "Finish an interrupted upload, or list interrupted transfers",
+		Short: "Finish or discard an interrupted upload, or list interrupted transfers",
 		Long: `A large send keeps its encrypted payload until its upload finishes. If the
 upload is interrupted (network loss, Ctrl+C, a closed laptop), finish it here:
 the parts already uploaded are kept and the rest are sent. Nothing is
@@ -110,11 +110,11 @@ download unused for a week is removed.`,
 			dir := uploadsDir()
 			pending, err := sdk.ListPendingUploads(dir)
 			if err != nil {
-				return fmt.Errorf("list interrupted uploads: %w", err)
+				return fmt.Errorf("could not list the interrupted uploads: %w", err)
 			}
 			downloads, err := sdk.ListPendingDownloads(downloadsDir())
 			if err != nil {
-				return fmt.Errorf("list interrupted downloads: %w", err)
+				return fmt.Errorf("could not list the interrupted downloads: %w", err)
 			}
 			if len(args) == 0 {
 				if discard {
@@ -135,48 +135,50 @@ download unused for a week is removed.`,
 			}
 
 			if discard {
-				discardStep := step{label: "Discarding the upload", action: func() (string, error) {
-					return "", c.DiscardPendingUpload(dir, p.RevisionID)
+				discardStep := step{label: "Discarding the upload of " + p.Name, done: "Upload discarded", action: func() (string, error) {
+					if err := c.DiscardPendingUpload(dir, p.RevisionID); err != nil {
+						return "", err
+					}
+					api.Module(logger, "resume").Info("upload discarded", "revision_id", p.RevisionID, "secret_id", p.SecretID)
+					return "", nil
 				}}
-				if err := runPipeline("Discard Upload", []step{discardStep}, nil); err != nil {
-					return err
-				}
-				printSuccess(fmt.Sprintf("Discarded the upload of %q", p.Name))
-				return nil
+				return runPipeline("upload", []step{discardStep})
 			}
 
 			progress := newUploadProgress()
 			uploadStep := step{
 				label: "Uploading " + p.Name,
+				done:  "Upload complete",
 				live:  progress,
 				action: func() (string, error) {
 					_, err := c.ResumeUpload(dir, p.RevisionID, sdk.ResumeOptions{
 						UploadThreads: threads,
 						UploadStatus:  &progress.transfer,
-						OnDebug:       func(step, msg string) { logDebug(step, "%s", msg) },
+						Logger:        logger,
 					})
 					if err != nil {
 						return "", err
 					}
-					return "size=" + formatBytes(p.Size), nil
+					return "id=" + shortID(p.SecretID), nil
 				},
 			}
-			if err := runPipeline("Resume Upload", []step{uploadStep}, nil); err != nil {
+			if err := runPipeline("upload", []step{uploadStep}); err != nil {
 				var interrupted *sdk.UploadInterruptedError
 				if errors.As(err, &interrupted) {
-					printResumeHint(interrupted.Upload.RevisionID)
+					return withDetail(err, resumeDetail(interrupted.Upload.RevisionID))
 				}
 				return err
 			}
 			fmt.Fprintln(os.Stderr)
-			printSuccess(fmt.Sprintf("Sent %q", p.Name))
 			printKeyValue("Secret ID", safe(p.SecretID))
+			printKeyValue("Name", safe(p.Name))
+			printKeyValue("Size", formatBytes(p.Size)+" encrypted")
 			fmt.Fprintln(os.Stderr)
 			return nil
 		},
 	}
 	f := cmd.Flags()
-	f.BoolVar(&discard, "discard", false, "Abort the upload and delete its encrypted payload instead of finishing it")
+	f.BoolVar(&discard, "discard", false, "Discard the interrupted upload or download instead of finishing it, deleting what it kept")
 	setGroup(f, groupOptions, "discard")
 	f.Var(newIntRange(&threads, 0, 0, api.MaxUploadThreads, " (0 adapts to the connection, 1 is one at a time)"), "threads", "Parallel part uploads: 0 adapts to the connection, up to 32")
 	setGroup(f, groupPerformance, "threads")
@@ -208,7 +210,7 @@ func findPending(uploads []sdk.PendingUpload, downloads []sdk.PendingDownload, i
 	}
 	switch n := len(up) + len(down); {
 	case n == 0:
-		return nil, nil, fmt.Errorf("no interrupted upload or download %q. Run: secret resume", id)
+		return nil, nil, withDetail(fmt.Errorf("no interrupted upload or download %q", id), "List them with: secret resume")
 	case n > 1:
 		return nil, nil, fmt.Errorf("%q matches %d transfers; give more of the ID", id, n)
 	case len(up) == 1:
@@ -223,18 +225,19 @@ func findPending(uploads []sdk.PendingUpload, downloads []sdk.PendingDownload, i
 // decrypt's own output choices.
 func discardDownload(d *sdk.PendingDownload, discard bool) error {
 	if !discard {
-		msg := fmt.Sprintf("%s is an interrupted download, which continues when you decrypt it again", shortID(d.RevisionID))
+		detail := "A download continues when you decrypt it again."
 		// The secret ID comes from a local file: it goes into a command
 		// to copy only as the UUID it must be.
 		if id, err := uuid.Parse(d.SecretID); err == nil && id.String() == d.SecretID {
-			msg += fmt.Sprintf(": secret decrypt %s --revision %s", d.SecretID, d.RevisionID)
+			detail = "A download continues when you decrypt it again:\n  secret decrypt " + d.SecretID + " --revision " + d.RevisionID
 		}
-		return errors.New(msg)
+		return withDetail(fmt.Errorf("%s is an interrupted download, which resume does not finish", shortID(d.RevisionID)), detail)
 	}
 	if err := sdk.DiscardPendingDownload(downloadsDir(), d.RevisionID); err != nil {
-		return err
+		return fmt.Errorf("could not discard the download of %q: %w", d.Name, err)
 	}
-	printSuccess(fmt.Sprintf("Discarded the download of %q", safe(d.Name)))
+	api.Module(logger, "resume").Info("download discarded", "revision_id", d.RevisionID, "secret_id", d.SecretID)
+	printSuccess(fmt.Sprintf("Discarded the download of %q.", d.Name))
 	return nil
 }
 
@@ -271,19 +274,19 @@ func printPendingDownloads(downloads []sdk.PendingDownload) error {
 		_, _ = fmt.Fprintf(w, "  %s\t%s\t%s\t%s\n", safe(shortID(d.RevisionID)), safe(d.Name), got, ago(d.UpdatedAt))
 	}
 	if err := w.Flush(); err != nil {
-		return fmt.Errorf("write to stdout: %w", err)
+		return fmt.Errorf("could not write to stdout: %w", err)
 	}
 	fmt.Fprintln(os.Stderr)
-	printDim("A download continues when you decrypt it again (secret resume <id> shows the command).")
-	printDim("Discard with: secret resume <id> --discard")
+	printDim("A download continues when you decrypt it again ('secret resume <id>' shows the command).")
+	printDim("Discard one with: secret resume <id> --discard")
 	fmt.Fprintln(os.Stderr)
 	return nil
 }
 
-// printDownloadResumeHint says how to continue an interrupted download.
-func printDownloadResumeHint(d sdk.PendingDownload) {
-	fmt.Fprintf(os.Stderr, "  Tip: run the same command again to continue the download, keeping the %s already downloaded.\n",
-		formatBytes(d.Downloaded()))
+// downloadResumeDetail says how to continue an interrupted download, for
+// its Error block.
+func downloadResumeDetail(d sdk.PendingDownload) string {
+	return fmt.Sprintf("Run the same command again to continue the download, keeping the %s downloaded so far.", formatBytes(d.Downloaded()))
 }
 
 func printPendingUploads(pending []sdk.PendingUpload) error {
@@ -301,18 +304,19 @@ func printPendingUploads(pending []sdk.PendingUpload) error {
 		_, _ = fmt.Fprintf(w, "  %s\t%s\t%s\t%s\n", safe(shortID(p.RevisionID)), safe(p.Name), formatBytes(p.Size), activity)
 	}
 	if err := w.Flush(); err != nil {
-		return fmt.Errorf("write to stdout: %w", err)
+		return fmt.Errorf("could not write to stdout: %w", err)
 	}
 	fmt.Fprintln(os.Stderr)
-	printDim("Resume with: secret resume <id>    Discard with: secret resume <id> --discard")
+	printDim("Finish one with: secret resume <id>")
+	printDim("Discard one with: secret resume <id> --discard")
 	fmt.Fprintln(os.Stderr)
 	return nil
 }
 
-// printResumeHint says how to finish an interrupted upload.
-func printResumeHint(revisionID string) {
-	fmt.Fprintf(os.Stderr, "  Tip: the upload can be resumed, keeping the parts already sent:\n")
-	fmt.Fprintf(os.Stderr, "       secret resume %s\n", shortID(revisionID))
+// resumeDetail says how to finish an interrupted upload, for its Error
+// block.
+func resumeDetail(revisionID string) string {
+	return "To finish it, keeping the parts already sent, run:\n  secret resume " + shortID(revisionID)
 }
 
 // ago renders how long ago t was.

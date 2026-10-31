@@ -43,12 +43,18 @@ func TestRecipientsSummary(t *testing.T) {
 }
 
 // whoami shows the free trial, not just "inactive", when there is no
-// subscription.
+// subscription, and a status in words.
 func TestSubscriptionStatus(t *testing.T) {
 	now := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
 	future, past := "2026-11-02T12:00:00Z", "2026-10-20T12:00:00Z"
-	if got := subscriptionStatus("inactive", &future, now); !strings.HasPrefix(got, "Free trial, ends ") {
+	if got := subscriptionStatus("inactive", &future, now); !strings.HasPrefix(got, "free trial, ends ") {
 		t.Errorf("in trial: %q", got)
+	}
+	if got := subscriptionStatus("", nil, now); got != "none" {
+		t.Errorf("no status: %q", got)
+	}
+	if got := subscriptionStatus("past_due", nil, now); got != "past due" {
+		t.Errorf("past due: %q", got)
 	}
 	if got := subscriptionStatus("inactive", &past, now); !strings.HasPrefix(got, "inactive, free trial ended ") {
 		t.Errorf("after trial: %q", got)

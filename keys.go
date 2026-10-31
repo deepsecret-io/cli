@@ -5,6 +5,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,7 +43,7 @@ func loadKeyPair(fingerprint string) (*crypto.KeyPair, error) {
 	resolved := resolveKeystoreFingerprint(fingerprint)
 	kp, err := crypto.LoadKeyPairFrom(keysDir(), resolved, "")
 	if err != nil && isKeyPairEncrypted(resolved) {
-		password, perr := readPassword("Enter key password: ")
+		password, perr := readPassword(fmt.Sprintf("Password for key pair %s: ", crypto.ShortFingerprint(resolved)))
 		if perr != nil {
 			return nil, perr
 		}
@@ -109,6 +110,59 @@ func isKeyPairEncrypted(fingerprint string) bool {
 		return false
 	}
 	return kp.Encrypted
+}
+
+// readPublicKeys reads the public keys of the key pair named name in the
+// keys directory, and computes its fingerprint, without the private keys:
+// an encrypted key pair needs no password.
+func readPublicKeys(name string) (*crypto.KeyPair, string, error) {
+	path, ok := keyFile(name)
+	if !ok {
+		return nil, "", fmt.Errorf("%q is not named after a key fingerprint", name)
+	}
+	data, err := os.ReadFile(path) // #nosec G304 -- keyFile accepts hex fingerprints only, so path stays in the keys directory.
+	if err != nil {
+		return nil, "", pathCause(err)
+	}
+	var kp crypto.KeyPair
+	if err := json.Unmarshal(data, &kp); err != nil {
+		return nil, "", fmt.Errorf("not a key pair file: %w", err)
+	}
+	fp, err := crypto.Fingerprint(&kp)
+	if err != nil {
+		return nil, "", fmt.Errorf("its public keys are not valid: %w", err)
+	}
+	return &kp, fp, nil
+}
+
+// resolveIdentityName finds the key pair on this device that fpOrPrefix,
+// a fingerprint or a prefix of 16+ characters of one, names, and returns
+// its name in the keys directory.
+func resolveIdentityName(fpOrPrefix string) (string, error) {
+	names, err := listKeyPairs()
+	if err != nil {
+		return "", fmt.Errorf("could not list the key pairs on this device: %w", err)
+	}
+	var matches []string
+	for _, n := range names {
+		if n == fpOrPrefix {
+			return n, nil
+		}
+		if strings.HasPrefix(n, fpOrPrefix) {
+			matches = append(matches, n)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return "", withDetail(fmt.Errorf("no key pair %s on this device", fpOrPrefix), "List them with: secret identity list")
+	case 1:
+		return matches[0], nil
+	}
+	for i, m := range matches {
+		matches[i] = safe(m)
+	}
+	return "", withDetail(fmt.Errorf("%s matches %d key pairs on this device", fpOrPrefix, len(matches)),
+		"Give more of the fingerprint:\n  "+strings.Join(matches, "\n  "))
 }
 
 // listKeyPairs returns fingerprints of all locally stored key pairs.

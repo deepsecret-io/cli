@@ -19,7 +19,7 @@ import (
 func createExclusive(path string, mode os.FileMode) (*os.File, error) {
 	// Refuse a symlink or junction at path before opening it.
 	if info, err := os.Lstat(path); err == nil && info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
-		return nil, fmt.Errorf("refusing to write %q: it is a link", path)
+		return nil, fmt.Errorf("%s is a link: refusing to write through it", path)
 	}
 	return os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode) // #nosec G304 -- the user's own -o path, or a fresh name beside it; links at it are refused above.
 }

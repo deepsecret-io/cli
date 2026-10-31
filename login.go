@@ -9,6 +9,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -22,6 +23,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/deepsecret-io/sdk/api"
 )
 
 // callbackTemplate renders the browser landing page that extracts the JWT
@@ -39,7 +42,7 @@ var callbackTemplate = template.Must(template.New("callback").Parse(`<!DOCTYPE h
 <html><head><title>DeepSecret Login</title>
 <style>body{font-family:system-ui;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;background:#050508;color:#a1a1aa}
 .box{text-align:center;padding:2rem}.ok{color:#22c55e;font-size:1.5rem;margin-bottom:1rem}</style></head>
-<body><div class="box" id="msg"><p id="msg-text">Authenticating...</p></div>
+<body><div class="box" id="msg"><p id="msg-text">Signing in...</p></div>
 <script>
 (function(){
   var msg=document.getElementById('msg');
@@ -53,13 +56,13 @@ var callbackTemplate = template.Must(template.New("callback").Parse(`<!DOCTYPE h
   var f=new URLSearchParams(window.location.hash.slice(1));
   history.replaceState(null,'',window.location.pathname);
   var t=f.get('token'),s=f.get('client_state');
-  if(!t||!s){setMsg('Authentication failed.','#ef4444');return;}
+  if(!t||!s){setMsg('Sign-in failed.','#ef4444');return;}
   fetch('/receive',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:t,state:s})})
   .then(function(r){return r.json();})
   .then(function(d){
-    if(d.ok){setMsg('Authenticated. You can close this tab.','#22c55e');}
-    else{setMsg(String(d.error||'Authentication failed.'),'#ef4444');}
-  }).catch(function(){setMsg('Failed to complete login.','#ef4444');});
+    if(d.ok){setMsg('Signed in. You can close this tab and return to the terminal.','#22c55e');}
+    else{setMsg(String(d.error||'Sign-in failed.'),'#ef4444');}
+  }).catch(function(){setMsg('Could not finish signing in.','#ef4444');});
 })();
 </script></body></html>`))
 
@@ -99,20 +102,22 @@ func newLogoutCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			tf, err := loadTokenFile()
 			if err != nil || tf.Token == "" {
-				return fmt.Errorf("no active session")
+				return errors.New("not logged in: there is no login session on this device")
 			}
 			// Revoke server-side first so a copy of the token stops
 			// working, then remove it locally whatever the outcome.
 			revokeErr := revokeToken(apiBaseURL, tf.Token)
 			if err := removeToken(); err != nil {
-				return fmt.Errorf("remove token: %w", err)
+				return fmt.Errorf("could not remove the login token: %w", err)
 			}
 			if revokeErr != nil {
-				printDim("Token removed locally, but the server could not revoke it: " + revokeErr.Error())
-				printDim("It stays valid until it expires (at most 1 hour).")
+				printWarning("The server could not revoke the login token",
+					fmt.Sprintf("%v\n\nIt was removed from this device, but a copy of it stays valid until it expires, within an hour.", apiCause(revokeErr)))
+				printSuccess("Logged out on this device.")
 				return nil
 			}
-			printSuccess("Logged out. Token revoked and removed.")
+			api.Module(logger, "auth").Info("logged out", "email", tf.Email)
+			printSuccess("Logged out: the session is revoked, and its token removed.")
 			return nil
 		},
 	}
@@ -127,52 +132,54 @@ func revokeToken(apiBase, token string) error {
 	return c.Logout()
 }
 
+// showAuthStatus prints the login session, the saved API key, and which
+// credential commands use: an API key given with a flag or DS_API_KEY,
+// else the login session, else the saved key (resolveAuth).
 func showAuthStatus() error {
-	tf, err := loadTokenFile()
-	if err != nil {
-		printDim("Not logged in. Run: secret login")
-		if cfg, err := loadConfig(); err == nil && cfg.APIKey != "" {
-			fmt.Println()
-			printKeyValue("Auth", "API Key (configured)")
-			printKeyValue("API URL", apiBaseURL)
-		}
-		return nil
+	fmt.Fprintln(os.Stderr)
+	if tf, err := loadTokenFile(); err == nil && tf.Token != "" {
+		printKeyValue("Login", safe(orDefault(tf.Email, "account not recorded"))+" (browser sign-in)")
+		printKeyValue("Token expires", tokenExpiry(tf.ExpiresAt, time.Now()))
+	} else {
+		printKeyValue("Login", "not logged in (run: secret login)")
 	}
-
-	printHeader("Authentication Status")
-	fmt.Println()
-	printKeyValue("Email", tf.Email)
-	printKeyValue("Method", "SSO (browser login)")
-
-	if tf.ExpiresAt != "" {
-		exp, err := time.Parse(time.RFC3339, tf.ExpiresAt)
-		if err == nil {
-			remaining := time.Until(exp)
-			if remaining > 0 {
-				printKeyValue("Expires", fmt.Sprintf("%s (%s remaining)", exp.Format("15:04:05"), remaining.Round(time.Minute)))
-			} else {
-				printKeyValue("Expires", "EXPIRED (run: secret login)")
-			}
-		}
-	}
-
-	// Also show API key status
 	if cfg, err := loadConfig(); err == nil && cfg.APIKey != "" {
-		fmt.Println()
-		printKeyValue("API Key", "configured (takes priority over login token)")
+		printKeyValue("Saved API key", "set (used when not logged in)")
 	}
-	fmt.Println()
+	_, source, err := resolveAuth()
+	if err != nil {
+		source = "none"
+	}
+	printKeyValue("In use", source)
+	printKeyValue("API URL", apiBaseURL)
+	fmt.Fprintln(os.Stderr)
 	return nil
+}
+
+// tokenExpiry says when the stored session token, expiring at expiresAt,
+// expires: it renews while in use, so this is when an unused session ends.
+func tokenExpiry(expiresAt string, now time.Time) string {
+	if expiresAt == "" {
+		return "not recorded"
+	}
+	exp, err := time.Parse(time.RFC3339, expiresAt)
+	switch {
+	case err != nil:
+		return "not readable, so it counts as expired (run: secret login)"
+	case !now.Before(exp):
+		return "expired (run: secret login)"
+	}
+	return fmt.Sprintf("%s, in %s unless it renews while in use", exp.Local().Format("15:04:05"), fmtRemaining(exp.Sub(now)))
 }
 
 func browserLogin() error {
 	apiBase := apiBaseURL
-	logInfo("ds.login", fmt.Sprintf("starting browser SSO flow, api=%s", apiBase))
+	log := api.Module(logger, "auth")
 
 	// Generate state for CSRF protection
 	stateBytes := make([]byte, 32)
 	if _, err := rand.Read(stateBytes); err != nil {
-		return fmt.Errorf("generate state: %w", err)
+		return fmt.Errorf("could not generate the sign-in state: %w", err)
 	}
 	state := base64.RawURLEncoding.EncodeToString(stateBytes)
 
@@ -180,11 +187,12 @@ func browserLogin() error {
 	// don't lose the port in a TOCTOU window between Close() and rebind.
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		return fmt.Errorf("start local server: %w", err)
+		return fmt.Errorf("could not start the local sign-in listener: %w", err)
 	}
 	port := listener.Addr().(*net.TCPAddr).Port
 
 	callbackURL := fmt.Sprintf("http://127.0.0.1:%d/callback", port)
+	log.Debug("browser sign-in started", "api_url", apiBase, "callback", callbackURL)
 	tokenCh := make(chan string, 1)
 	errCh := make(chan error, 1)
 
@@ -231,13 +239,23 @@ func browserLogin() error {
 	httpResp, err := httpClient.Get(ssoReqURL)
 	if err != nil {
 		stopServer()
-		return fmt.Errorf("failed to reach API: %w", err)
+		// The error names the request URL, whose query holds the sign-in
+		// state: keep it out of the error and the logs.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			err = ue.Err
+		}
+		return fmt.Errorf("could not reach the DeepSecret API: %w", err)
 	}
 	defer httpResp.Body.Close()
+	if httpResp.StatusCode/100 != 2 {
+		stopServer()
+		return fmt.Errorf("the DeepSecret API refused the sign-in request: %s", httpResp.Status)
+	}
 	authURL, err := readAuthURL(httpResp.Body)
 	if err != nil {
 		stopServer()
-		return fmt.Errorf("failed to get auth URL from API (is the server running at %s?): %w", apiBase, err)
+		return fmt.Errorf("the DeepSecret API's answer to the sign-in request is not usable: %w", err)
 	}
 
 	// Validate the server-supplied URL before handing it to the OS browser
@@ -245,54 +263,59 @@ func browserLogin() error {
 	safeURL, err := safeBrowserURL(authURL)
 	if err != nil {
 		stopServer()
-		return fmt.Errorf("API returned an unsafe auth URL: %w", err)
+		return fmt.Errorf("the DeepSecret API returned an unsafe sign-in URL: %w", err)
 	}
-
-	fmt.Fprintln(os.Stderr, "ds.login: opening browser for authentication")
-	fmt.Fprintln(os.Stderr, "ds.login: if the browser doesn't open, visit:")
-	fmt.Fprintln(os.Stderr, "  "+safeURL)
-	fmt.Fprintln(os.Stderr)
 
 	// Open browser to Google directly (not the API server)
+	printSubject("account", "Opening your browser to sign in. If it does not open, visit:\n  "+safeURL)
 	_ = openBrowser(safeURL)
 
-	// Wait for token or timeout
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-
-	select {
-	case token := <-tokenCh:
-		stopServer()
-		logInfo("ds.login", "token received from browser callback")
-
-		// Parse JWT to get expiry; email is fetched from the server below.
-		expiresAt := extractJWTExpiry(token)
-		email := fetchEmailForToken(apiBase, token)
-
-		if err := saveToken(token, email, expiresAt); err != nil {
-			return fmt.Errorf("save token: %w", err)
-		}
-
-		printSuccess("Authenticated")
-		if email != "" {
-			printKeyValue("Email", email)
-		}
-		if expiresAt != "" {
-			exp, _ := time.Parse(time.RFC3339, expiresAt)
-			printKeyValue("Expires", exp.Format("15:04:05"))
-		}
-		fmt.Println()
-		return nil
-
-	case err := <-errCh:
-		stopServer()
-		return fmt.Errorf("local server error: %w", err)
-
-	case <-ctx.Done():
-		stopServer()
-		return fmt.Errorf("login timed out (2 minutes). Try again with: secret login")
+	var token string
+	wait := step{
+		label: "Waiting for the browser sign-in",
+		done:  "Signed in",
+		action: func() (string, error) {
+			timeout := time.NewTimer(loginTimeout)
+			defer timeout.Stop()
+			select {
+			case token = <-tokenCh:
+				return "", nil
+			case err := <-errCh:
+				return "", fmt.Errorf("the local sign-in listener failed: %w", err)
+			case <-timeout.C:
+				return "", withDetail(errors.New("timed out waiting for the browser sign-in"),
+					"No sign-in arrived within 2 minutes. Run 'secret login' to try again.")
+			case <-rootCtx.Done():
+				return "", rootCtx.Err()
+			}
+		},
 	}
+	err = runPipeline("account", []step{wait})
+	stopServer()
+	if err != nil {
+		return err
+	}
+
+	// Parse JWT to get expiry; email is fetched from the server below.
+	expiresAt := extractJWTExpiry(token)
+	email, err := fetchEmailForToken(apiBase, token)
+	if err != nil {
+		log.Warn("account lookup failed", "error", err)
+	}
+	if err := saveToken(token, email, expiresAt); err != nil {
+		return fmt.Errorf("could not save the login token: %w", err)
+	}
+	log.Info("logged in", "email", email)
+	if email == "" {
+		printSuccess("Logged in.")
+	} else {
+		printSuccess("Logged in as " + email + ".")
+	}
+	return nil
 }
+
+// loginTimeout is how long login waits for the browser sign-in.
+const loginTimeout = 2 * time.Minute
 
 // Bounds on the login flow's bodies, each holding one URL or one session
 // token of a few KB, so neither the API nor a local process can make the
@@ -312,7 +335,7 @@ func readAuthURL(r io.Reader) (string, error) {
 		return "", err
 	}
 	if len(body) > maxAuthURLResponse {
-		return "", fmt.Errorf("the answer is over %d bytes", maxAuthURLResponse)
+		return "", fmt.Errorf("it is over %d bytes", maxAuthURLResponse)
 	}
 	var resp struct {
 		Data struct {
@@ -320,10 +343,10 @@ func readAuthURL(r io.Reader) (string, error) {
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &resp); err != nil {
-		return "", fmt.Errorf("decode the answer: %w", err)
+		return "", fmt.Errorf("it is not JSON: %w", err)
 	}
 	if resp.Data.AuthURL == "" {
-		return "", fmt.Errorf("the answer has no auth URL")
+		return "", fmt.Errorf("it holds no sign-in URL")
 	}
 	return resp.Data.AuthURL, nil
 }
@@ -412,18 +435,18 @@ func extractJWTExpiry(tokenStr string) string {
 	return ""
 }
 
-// fetchEmailForToken calls whoami with the given bearer token to retrieve the
-// actor's email. Returns empty string on any failure so login still succeeds.
-func fetchEmailForToken(apiBase, token string) string {
+// fetchEmailForToken asks the server whose the new session token is, for
+// the email the token file keeps. Login succeeds without it.
+func fetchEmailForToken(apiBase, token string) (string, error) {
 	c, err := NewClient(apiBase, "bearer:"+token)
 	if err != nil {
-		return ""
+		return "", err
 	}
 	info, err := c.WhoAmI()
-	if err != nil || info == nil {
-		return ""
+	if err != nil {
+		return "", err
 	}
-	return info.Email
+	return info.Email, nil
 }
 
 // safeBrowserURL returns the URL only if it parses, has a safe scheme

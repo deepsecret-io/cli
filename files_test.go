@@ -158,8 +158,12 @@ func TestSafeWriteFileOverwriteReplaces(t *testing.T) {
 	if err := os.Chmod(dest, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := safeWriteFile(dest, []byte("new"), 0o600, false); err == nil || !strings.Contains(err.Error(), "use --overwrite") {
-		t.Fatalf("without --overwrite: %v", err)
+	err := safeWriteFile(dest, []byte("new"), 0o600, false)
+	if err == nil {
+		t.Fatal("without --overwrite an existing file was replaced")
+	}
+	if summary, detail := describeError(err); !strings.HasSuffix(summary, "secret.txt already exists") || !strings.Contains(detail, "--overwrite") {
+		t.Fatalf("without --overwrite: %q, %q", summary, detail)
 	}
 	if err := safeWriteFile(dest, []byte("new"), 0o600, true); err != nil {
 		t.Fatal(err)

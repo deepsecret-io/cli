@@ -5,7 +5,9 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +18,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/deepsecret-io/sdk"
+	"github.com/deepsecret-io/sdk/api"
 )
 
 // Config stored at ~/.deepsecret/config.json
@@ -26,7 +29,14 @@ type Config struct {
 func configDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
-		fmt.Fprintf(os.Stderr, "  %s✗%s cannot determine home directory: %v\n", ansiRed, ansiReset, err)
+		// Every caller needs the login, the keys or the settings, and
+		// there is nowhere to keep them.
+		detail := "The CLI keeps its login, keys and settings in ~/.deepsecret. Set HOME (USERPROFILE on Windows) and try again."
+		if err != nil {
+			detail = err.Error() + "\n\n" + detail
+		}
+		printDiagnostic(sevError, "Cannot find your home directory", detail)
+		closeLog()
 		os.Exit(1)
 	}
 	return filepath.Join(home, ".deepsecret")
@@ -65,7 +75,7 @@ func saveConfig(c *Config) error {
 	// #nosec G117 -- the API key is what the config file holds; writePrivateFile keeps it 0600.
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
-		return fmt.Errorf("failed to marshal config: %w", err)
+		return fmt.Errorf("could not encode the config: %w", err)
 	}
 	return writePrivateFile(configPath(), data)
 }
@@ -110,25 +120,31 @@ func saveToken(token, email, expiresAt string) error {
 	tf := TokenFile{Token: token, Email: email, ExpiresAt: expiresAt}
 	data, err := json.MarshalIndent(tf, "", "  ")
 	if err != nil {
-		return fmt.Errorf("failed to marshal token: %w", err)
+		return fmt.Errorf("could not encode the login token: %w", err)
 	}
 	return writePrivateFile(tokenPath(), data)
 }
 
 // saveRefreshedToken stores a session token the SDK refreshed, keeping the
-// email on record. The server revoked the previous token.
+// email on record. The server revoked the previous token, so a token that
+// cannot be saved leaves the next command without a session: the user is
+// told, since the SDK carries on with the request that renewed it.
 func saveRefreshedToken(token string, expiresAt time.Time) error {
 	email := ""
 	if tf, err := loadTokenFile(); err == nil {
 		email = tf.Email
 	}
 	if err := saveToken(token, email, expiresAt.UTC().Format(time.RFC3339)); err != nil {
-		dbgErr("auth", fmt.Errorf("save refreshed session: %w", err))
+		printWarning("Could not save the renewed login session",
+			fmt.Sprintf("%v\n\nThis command goes on, but the next one will fail until you sign in again with 'secret login'.", err))
 		return err
 	}
-	dbg("auth", "session refreshed, expires %s", expiresAt.Local().Format("15:04:05"))
+	api.Module(logger, "auth").Debug("session renewed", "expires_at", expiresAt)
 	return nil
 }
+
+// errSessionExpired is a stored login session past its expiry.
+var errSessionExpired = errors.New("the login session expired")
 
 func loadToken() (string, error) {
 	data, err := os.ReadFile(tokenPath())
@@ -140,17 +156,17 @@ func loadToken() (string, error) {
 		return "", err
 	}
 	if tf.Token == "" {
-		return "", fmt.Errorf("empty token")
+		return "", errors.New("the login token file holds no token")
 	}
 	token := tf.Token
 	// Check expiry: if it does not parse, treat it as expired (fail closed)
 	if tf.ExpiresAt != "" {
 		exp, err := time.Parse(time.RFC3339, tf.ExpiresAt)
 		if err != nil {
-			return "", fmt.Errorf("token expiry parse failed, treating as expired: %w", err)
+			return "", fmt.Errorf("the login token's expiry is not a time, so it counts as expired: %w", err)
 		}
 		if time.Now().After(exp) {
-			return "", fmt.Errorf("token expired")
+			return "", errSessionExpired
 		}
 	}
 	return token, nil
@@ -172,41 +188,53 @@ func removeToken() error {
 	return os.Remove(tokenPath())
 }
 
-// resolveAuth picks the authentication credential to use, in priority order:
-// --api-key flag / DS_API_KEY env > login token > config-file api_key.
-// The API URL is hardcoded at compile time (see constants.go), so this
-// function deliberately returns no URL.
-func resolveAuth() (string, error) {
+// resolveAuth picks the credential to use, in priority order: the API key
+// given with a flag or DS_API_KEY, the login session, then the API key
+// saved in the config file. It returns the credential and where it came
+// from. The API URL is compiled in (see constants.go), so it returns no
+// URL.
+func resolveAuth() (key, source string, err error) {
 	if apiKey != "" {
-		return apiKey, nil
+		return apiKey, keyOrigin, nil
 	}
-	if token, err := loadToken(); err == nil {
-		return "bearer:" + token, nil
+	token, tokenErr := loadToken()
+	if tokenErr == nil {
+		return "bearer:" + token, "login session", nil
 	}
 	if cfg, err := loadConfig(); err == nil && cfg.APIKey != "" {
-		return cfg.APIKey, nil
+		return cfg.APIKey, "saved API key", nil
 	}
-	return "", fmt.Errorf("not authenticated. Run: secret login\n  Or save an API key: secret config --save-api-key --api-key-stdin")
+	summary := "not logged in"
+	if errors.Is(tokenErr, errSessionExpired) {
+		summary = "your login session expired"
+	}
+	return "", "", withDetail(errors.New(summary),
+		"Sign in with 'secret login', or save an API key for later commands:\n  secret config --save-api-key --api-key-stdin")
 }
 
 // newAuthenticatedClient creates an SDK client pointed at the compiled-in API
 // URL using whichever credential source resolveAuth picks.
 func newAuthenticatedClient() (*Client, error) {
-	key, err := resolveAuth()
-	if err != nil {
-		dbgErr("auth", err)
-		return nil, err
-	}
-	dbg("auth", "api_url=%s key_set=true", apiBaseURL)
-	c, err := NewClient(apiBaseURL, key)
+	key, source, err := resolveAuth()
 	if err != nil {
 		return nil, err
 	}
-	// A login session (not an API key) renews its token while in use; each
-	// new token is saved for the next command.
-	if apiKey == "" && strings.HasPrefix(key, "bearer:") {
-		c.SetSessionStore(sdk.SessionStore{Load: loadToken, Save: saveRefreshedToken})
+	api.Module(logger, "auth").Debug("credentials resolved", "source", source, "api_url", apiBaseURL)
+	if token, ok := strings.CutPrefix(key, "bearer:"); ok && apiKey == "" {
+		return newSessionClient(token)
 	}
+	return NewClient(apiBaseURL, key)
+}
+
+// newSessionClient creates a client for a login session's token. The
+// session renews its token while in use, and each renewal revokes the
+// token it replaces, so every new token is saved for the next command.
+func newSessionClient(token string) (*Client, error) {
+	c, err := NewClient(apiBaseURL, "bearer:"+token)
+	if err != nil {
+		return nil, err
+	}
+	c.SetSessionStore(sdk.SessionStore{Load: loadToken, Save: saveRefreshedToken})
 	return c, nil
 }
 
@@ -220,36 +248,43 @@ func newConfigCmd() *cobra.Command {
 		Long: `Show the CLI's settings, or save an API key for later commands.
 
 --save-api-key saves the key given with the global key options. Pass it on
-stdin or in a file so it stays out of the process list and shell history.`,
+stdin or in a file so it stays out of the process list and shell history.
+A saved key is used when you are not logged in; a key given with a flag or
+DS_API_KEY comes before the login.`,
 		Example: `  secret config
   secret config --save-api-key --api-key-stdin < key.txt
   secret config --save-api-key --api-key-file ./key.txt`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, _ := loadConfig()
-			if cfg == nil {
-				cfg = &Config{}
-			}
-
 			if saveKey {
 				if apiKey == "" {
 					return fmt.Errorf("--save-api-key needs a key: give it with --api-key-stdin, --api-key-file, --api-key or DS_API_KEY")
 				}
-				cfg.APIKey = apiKey
-				if err := saveConfig(cfg); err != nil {
-					return fmt.Errorf("failed to save config: %w", err)
+				// The file holds only the key, so one that cannot be read
+				// is replaced whole.
+				if err := saveConfig(&Config{APIKey: apiKey}); err != nil {
+					return fmt.Errorf("could not save the API key: %w", err)
 				}
-				fmt.Println("Configuration saved.")
+				printSuccess("API key saved to " + safe(configPath()) + ".")
 				return nil
 			}
 
-			fmt.Printf("Config file: %s\n", configPath())
-			fmt.Printf("API URL:     %s (compiled in)\n", apiBaseURL)
-			if cfg.APIKey != "" {
-				fmt.Println("API Key:     (set)")
-			} else {
-				fmt.Println("API Key:     (not set)")
+			cfg, err := loadConfig()
+			switch {
+			case errors.Is(err, fs.ErrNotExist):
+				cfg = &Config{}
+			case err != nil:
+				return fmt.Errorf("could not read %s: %w", configPath(), pathCause(err))
 			}
+			saved := "not set"
+			if cfg.APIKey != "" {
+				saved = "set"
+			}
+			fmt.Fprintln(os.Stderr)
+			printKeyValue("Config file", safe(configPath()))
+			printKeyValue("API URL", apiBaseURL+" (compiled in)")
+			printKeyValue("Saved API key", saved)
+			fmt.Fprintln(os.Stderr)
 			return nil
 		},
 	}
@@ -275,7 +310,7 @@ func readPassword(prompt string) (string, error) {
 		fmt.Fprintln(tty)
 		if err != nil {
 			zeroBytes(pw)
-			return "", fmt.Errorf("read password: %w", err)
+			return "", fmt.Errorf("could not read the password: %w", err)
 		}
 		defer zeroBytes(pw)
 		return strings.TrimSpace(string(pw)), nil
@@ -288,7 +323,7 @@ func readPassword(prompt string) (string, error) {
 	fmt.Fprintln(os.Stderr)
 	if err != nil {
 		zeroBytes(pw)
-		return "", fmt.Errorf("read password: %w", err)
+		return "", fmt.Errorf("could not read the password: %w", err)
 	}
 	defer zeroBytes(pw)
 	return strings.TrimSpace(string(pw)), nil

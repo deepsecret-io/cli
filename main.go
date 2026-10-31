@@ -11,9 +11,11 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"runtime"
 	rtdebug "runtime/debug"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -23,8 +25,10 @@ import (
 var (
 	// version is a release's vMAJOR.MINOR.PATCH, set by `task release`;
 	// every other build is "dev".
-	version     = "dev"
-	apiKey      string
+	version = "dev"
+	apiKey  string
+	// keyOrigin names where apiKey came from: a flag, or DS_API_KEY.
+	keyOrigin   string
 	apiKeyFile  string
 	apiKeyStdin bool
 	debug       bool
@@ -47,26 +51,48 @@ func main() {
 
 	root := newRootCmd()
 
-	if err := root.ExecuteContext(rootCtx); err != nil {
-		// Ctrl+C / SIGTERM: rootCtx fires, in-flight requests unblock with
-		// context.Canceled wrapped through the call stack. Render a
-		// single-line "cancelled" notice and exit 130 (UNIX convention for
-		// terminated by SIGINT) instead of dumping a noisy error chain.
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(rootCtx.Err(), context.Canceled) {
-			fmt.Fprintf(os.Stderr, "\n  %s✗%s cancelled by user\n", ansiYellow, ansiReset)
-			os.Exit(130)
-		}
-		if api.IsMaintenanceError(err) {
-			printError("The DeepSecret API is currently under maintenance.\n  " + api.MaintenanceMessage(err) + "\n  Please try again shortly.")
-			os.Exit(1)
-		}
-		if _, ok := err.(*displayedError); !ok {
-			printError(err.Error())
-		}
-		printKeyChangedHint(err)
-		os.Exit(1)
+	start := time.Now()
+	err := root.ExecuteContext(rootCtx)
+	elapsed := logDuration(time.Since(start))
+	if err == nil {
+		logger.Info("command finished", "elapsed", elapsed)
+		closeLog()
+		return
 	}
+	logger.Error("command failed", "error", err, "elapsed", elapsed)
+	closeLog()
+	os.Exit(reportError(err))
 }
+
+// reportError prints err as an Error block and returns the exit code.
+func reportError(err error) int {
+	switch {
+	case rootCtx != nil && rootCtx.Err() != nil:
+		// Ctrl+C or SIGTERM: requests in flight unwind with
+		// context.Canceled. Say so in one block rather than the error
+		// chain, keeping what the error says to do next (how to finish an
+		// interrupted transfer), and exit 130, the code of a command
+		// stopped by SIGINT. A timeout is not an interrupt: it is reported
+		// as the error it is.
+		detail := "The command stopped before it finished."
+		var d *detailedError
+		if errors.As(err, &d) && d.detail != "" {
+			detail += "\n\n" + d.detail
+		}
+		printDiagnostic(sevError, "Interrupted", detail)
+		return 130
+	case api.IsMaintenanceError(err):
+		printDiagnostic(sevError, "The DeepSecret API is under maintenance", api.MaintenanceMessage(err)+"\n\nTry again shortly.")
+		return 1
+	}
+	summary, detail := describeError(err)
+	printDiagnostic(sevError, summary, detail)
+	return 1
+}
+
+// closeLog closes the log file DS_LOG_PATH names, once the command is
+// done.
+var closeLog = func() {}
 
 // versionString is what --version prints: the version, then the commit it
 // was built from and the SDK version it uses, as the build recorded them.
@@ -117,14 +143,25 @@ func newRootCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if resolved != "" {
+			switch {
+			case resolved != "":
 				apiKey = resolved
-			} else if apiKey == "" {
+				keyOrigin = "--api-key-file"
+				if apiKeyStdin {
+					keyOrigin = "--api-key-stdin"
+				}
+			case apiKey != "":
+				keyOrigin = "--api-key"
+			default:
 				apiKey = os.Getenv("DS_API_KEY")
+				keyOrigin = "DS_API_KEY"
 			}
-			if !debug && os.Getenv("DS_DEBUG") == "1" {
-				debug = true
+			closeLogFile, err := setupLogging(debug)
+			if err != nil {
+				return err
 			}
+			closeLog = closeLogFile
+			logger.Info("command started", "command", cmd.CommandPath(), "version", version, "go", runtime.Version(), "platform", runtime.GOOS+"/"+runtime.GOARCH)
 			return nil
 		},
 	}
@@ -133,7 +170,7 @@ func newRootCmd() *cobra.Command {
 	pf.StringVar(&apiKeyFile, "api-key-file", "", "Read the API key from `file` (preferred over --api-key)")
 	pf.BoolVar(&apiKeyStdin, "api-key-stdin", false, "Read the API key from stdin (preferred over --api-key)")
 	pf.StringVar(&apiKey, "api-key", "", "API `key` (visible in process listings; prefer --api-key-file or DS_API_KEY)")
-	pf.BoolVar(&debug, "debug", false, "Show debug logs for every step, including each transfer's plan (or DS_DEBUG=1)")
+	pf.BoolVar(&debug, "debug", false, "Write debug logs to stderr, with each transfer's plan (DS_LOG sets the level, or json; DS_LOG_PATH a file instead)")
 	pf.BoolVar(&showProgress, "progress", false, "Show a transfer's progress: each connection, redrawn live, on a terminal; a line every 5s when redirected")
 	setGroup(pf, groupGlobal, "api-key-file", "api-key-stdin", "api-key", "debug", "progress")
 	root.MarkFlagsMutuallyExclusive("api-key", "api-key-file", "api-key-stdin")
@@ -170,7 +207,7 @@ func resolveAPIKey() (string, error) {
 	if apiKeyFile != "" {
 		f, err := os.Open(apiKeyFile) // #nosec G304 -- the user's own --api-key-file; the CLI runs with their permissions.
 		if err != nil {
-			return "", fmt.Errorf("read --api-key-file: %w", err)
+			return "", fmt.Errorf("could not read --api-key-file %s: %w", apiKeyFile, pathCause(err))
 		}
 		// Opened to read only: once the key is read, a close error loses
 		// nothing.
@@ -179,7 +216,7 @@ func resolveAPIKey() (string, error) {
 		// file cannot exhaust memory.
 		b, err := io.ReadAll(io.LimitReader(f, maxAPIKeyLen+1))
 		if err != nil {
-			return "", fmt.Errorf("read --api-key-file: %w", err)
+			return "", fmt.Errorf("could not read --api-key-file %s: %w", apiKeyFile, pathCause(err))
 		}
 		if len(b) > maxAPIKeyLen {
 			return "", fmt.Errorf("--api-key-file is over %d bytes; it should hold only the key", maxAPIKeyLen)
@@ -194,14 +231,14 @@ func resolveAPIKey() (string, error) {
 		r := bufio.NewReader(io.LimitReader(os.Stdin, maxAPIKeyLen+1))
 		line, err := r.ReadString('\n')
 		if err != nil && line == "" {
-			return "", fmt.Errorf("read --api-key-stdin: %w", err)
+			return "", fmt.Errorf("could not read the API key from stdin: %w", err)
 		}
 		if len(line) > maxAPIKeyLen {
 			return "", fmt.Errorf("--api-key-stdin read over %d bytes without a line end; send only the key", maxAPIKeyLen)
 		}
 		key := strings.TrimSpace(line)
 		if key == "" {
-			return "", fmt.Errorf("--api-key-stdin received empty input")
+			return "", fmt.Errorf("--api-key-stdin read an empty key")
 		}
 		return key, nil
 	}

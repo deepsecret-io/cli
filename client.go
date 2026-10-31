@@ -3,7 +3,12 @@
 
 package main
 
-import "github.com/deepsecret-io/sdk"
+import (
+	"errors"
+
+	"github.com/deepsecret-io/sdk"
+	"github.com/deepsecret-io/sdk/api"
+)
 
 // Client wraps the SDK client for CLI use.
 type Client struct {
@@ -23,4 +28,15 @@ func NewClient(baseURL, apiKey string) (*Client, error) {
 	}
 	c.SetRootContext(rootCtx)
 	return &Client{Client: c}, nil
+}
+
+// apiCause is the server's answer that err carries, without the steps the
+// SDK named on the way to it, for an error that names what the command
+// was doing; err itself when the server did not answer.
+func apiCause(err error) error {
+	var ae *api.APIError
+	if errors.As(err, &ae) {
+		return ae
+	}
+	return err
 }

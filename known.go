@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/deepsecret-io/sdk"
+	"github.com/deepsecret-io/sdk/api"
 	"github.com/deepsecret-io/sdk/crypto"
 )
 
@@ -28,7 +29,7 @@ import (
 func newIdentityKnownCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "known [email]",
-		Short: "List the keys this device accepted for other people",
+		Short: "List the keys this device accepted for other people, and your own",
 		Args: func(cmd *cobra.Command, args []string) error {
 			if err := cobra.MaximumNArgs(1)(cmd, args); err != nil {
 				return err
@@ -56,16 +57,16 @@ func newIdentityKnownCmd() *cobra.Command {
 				return nil
 			}
 			printHeader(fmt.Sprintf("Known keys (%d)", len(keys)))
-			fmt.Println()
+			fmt.Fprintln(os.Stderr)
 			for _, k := range keys {
 				state := keyStateLabel(k.State)
 				if k.Replaced {
 					state += ", replaced"
 				}
-				fmt.Printf("  %-32s  %s  %-20s  %s\n", safe(k.Email), crypto.ShortFingerprint(k.Fingerprint),
+				fmt.Printf("  %-32s  %s  %-20s  %s\n", safe(k.Email), safe(crypto.ShortFingerprint(k.Fingerprint)),
 					state, k.FirstSeen.Local().Format("2006-01-02"))
 			}
-			fmt.Println()
+			fmt.Fprintln(os.Stderr)
 			return nil
 		},
 	}
@@ -103,8 +104,8 @@ if this device did not know it.`,
 				if err := c.VerifyKey(email, args[1]); err != nil {
 					return err
 				}
-				logInfo("ds.identity_verify", fmt.Sprintf("verified key %s of %s", args[1], safe(email)))
-				printSuccess(fmt.Sprintf("Key %s of %s is verified", crypto.ShortFingerprint(args[1]), email))
+				api.Module(logger, "identity").Info("key verified", "email", email, "fingerprint", args[1])
+				printSuccess(fmt.Sprintf("Marked key %s of %s as verified.", crypto.ShortFingerprint(args[1]), email))
 				return nil
 			}
 
@@ -117,14 +118,14 @@ if this device did not know it.`,
 				return err
 			}
 			printHeader("Key of " + email)
-			fmt.Println()
+			fmt.Fprintln(os.Stderr)
 			printKeyValues("Server lists", groupFingerprint(current.Fingerprint))
 			printKeyValue("This device", knownKeyStatus(current.Fingerprint, known))
-			fmt.Println()
+			fmt.Fprintln(os.Stderr)
 			printDim(fmt.Sprintf("Compare it with %s over a channel you trust (they see theirs with: secret identity show).", email))
 			printDim("If it matches, run:")
-			printDim(fmt.Sprintf("  secret identity verify %s %s", email, current.Fingerprint))
-			fmt.Println()
+			printDim(fmt.Sprintf("  secret identity verify %s %s", email, safe(current.Fingerprint)))
+			fmt.Fprintln(os.Stderr)
 			return nil
 		},
 	}
@@ -158,8 +159,8 @@ check secrets they signed.`,
 			if err := c.AcceptKey(args[0], args[1]); err != nil {
 				return err
 			}
-			logInfo("ds.identity_accept", fmt.Sprintf("accepted key %s of %s", args[1], safe(args[0])))
-			printSuccess(fmt.Sprintf("Accepted key %s for %s", crypto.ShortFingerprint(args[1]), args[0]))
+			api.Module(logger, "identity").Info("key accepted", "email", args[0], "fingerprint", args[1])
+			printSuccess(fmt.Sprintf("Accepted key %s for %s.", crypto.ShortFingerprint(args[1]), args[0]))
 			return nil
 		},
 	}
@@ -198,11 +199,11 @@ use again. For one of your own accounts, it forgets that it is yours.`,
 				return err
 			}
 			if n == 0 {
-				printDim(fmt.Sprintf("No known key to forget for %s", args[0]))
+				printDim(fmt.Sprintf("This device knows no key to forget for %s.", args[0]))
 				return nil
 			}
-			logInfo("ds.identity_forget", fmt.Sprintf("forgot %d key(s) of %s", n, safe(args[0])))
-			printSuccess(fmt.Sprintf("Forgot %d key%s of %s", n, pluralS(n), args[0]))
+			api.Module(logger, "identity").Info("keys forgotten", "email", args[0], "fingerprint", fp, "count", n)
+			printSuccess(fmt.Sprintf("Forgot %d key%s of %s.", n, pluralS(n), args[0]))
 			return nil
 		},
 	}
@@ -278,30 +279,31 @@ func knownKeyStatus(fp string, known []sdk.KnownKey) string {
 	return ansiYellow + "changed" + ansiReset + " from " + strings.Join(current, ", ")
 }
 
-// printFirstUse notes keys accepted on first use: nothing yet shows they
-// are their owners', so they are worth comparing.
+// printFirstUse notes, under a result block, keys accepted on first use:
+// nothing yet shows they are their owners', so they are worth comparing.
 func printFirstUse(people []sdk.Recipient) {
 	for _, p := range people {
+		email := safe(p.Email)
 		printDim(fmt.Sprintf("First secret with %s on this device: their key %s is now the one expected. Compare it with them: secret identity verify %s",
-			p.Email, crypto.ShortFingerprint(p.Fingerprint), p.Email))
+			email, safe(crypto.ShortFingerprint(p.Fingerprint)), email))
+	}
+	if len(people) > 0 {
+		fmt.Fprintln(os.Stderr)
 	}
 }
 
-// printKeyChangedHint follows a send or decrypt refused because someone's
-// key changed with how to check and accept the new key.
-func printKeyChangedHint(err error) {
+// keyChangedDetail is the detail of the Error block of a send or decrypt
+// refused because someone's key changed: how to check the new key and
+// accept it. It is "" for any other error.
+func keyChangedDetail(err error) string {
 	var changed *sdk.KeyChangedError
 	if !errors.As(err, &changed) {
-		return
+		return ""
 	}
-	label := "New key"
-	if changed.Replaced {
-		label = "Replaced key"
-	}
-	fmt.Fprintln(os.Stderr)
-	printDim(fmt.Sprintf("Ask %s for their key fingerprint over a channel you trust, and compare it with:", changed.Email))
-	printKeyValues(label, groupFingerprint(changed.Got))
-	printDim("If it matches, accept it and try again:")
-	printDim(fmt.Sprintf("  secret identity accept %s %s", changed.Email, changed.Got))
-	fmt.Fprintln(os.Stderr)
+	email, got := safe(changed.Email), safe(changed.Got)
+	fp := groupFingerprint(got)
+	return fmt.Sprintf("Ask %s for their key fingerprint over a channel you trust, and compare it with this one:\n\n"+
+		"  %s\n  %s\n\n"+
+		"If it matches, accept it and try again:\n\n"+
+		"  secret identity accept %s %s", email, fp[0], fp[1], email, got)
 }

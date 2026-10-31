@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -49,25 +50,26 @@ func safeWriteFile(dest string, data []byte, mode os.FileMode, force bool) error
 		f, err := createExclusive(dest, mode)
 		if err != nil {
 			if os.IsExist(err) {
-				return fmt.Errorf("refusing to overwrite %q (use --overwrite)", dest)
+				return withDetail(fmt.Errorf("%s already exists", dest), "Pass --overwrite to replace it.")
 			}
-			return fmt.Errorf("open %s: %w", dest, err)
+			return fmt.Errorf("could not create %s: %w", dest, pathCause(err))
 		}
 		return writeAndClose(f, dest, data)
 	}
 	tmp := filepath.Join(filepath.Dir(dest), ".deepsecret-"+rand.Text()+".partial")
 	f, err := createExclusive(tmp, mode)
 	if err != nil {
-		return fmt.Errorf("open %s: %w", tmp, err)
+		return fmt.Errorf("could not create %s: %w", tmp, pathCause(err))
 	}
 	if err := writeAndClose(f, tmp, data); err != nil {
 		return err
 	}
 	if err := os.Rename(tmp, dest); err != nil {
 		if rmErr := os.Remove(tmp); rmErr != nil {
-			return fmt.Errorf("replace %s: %w (the decrypted %s is left behind: %v)", dest, err, tmp, rmErr)
+			return withDetail(fmt.Errorf("could not replace %s: %w", dest, pathCause(err)),
+				fmt.Sprintf("The decrypted content is left in %s, which could not be removed (%v). Delete it.", tmp, pathCause(rmErr)))
 		}
-		return fmt.Errorf("replace %s: %w", dest, err)
+		return fmt.Errorf("could not replace %s: %w", dest, pathCause(err))
 	}
 	return nil
 }
@@ -84,9 +86,10 @@ func writeAndClose(f *os.File, dest string, data []byte) error {
 		return nil
 	}
 	if rmErr := os.Remove(dest); rmErr != nil {
-		return fmt.Errorf("write %s: %w (the partly written file is left behind: %v)", dest, err, rmErr)
+		return withDetail(fmt.Errorf("could not write %s: %w", dest, pathCause(err)),
+			fmt.Sprintf("The partly written file could not be removed (%v). Delete it.", pathCause(rmErr)))
 	}
-	return fmt.Errorf("write %s: %w", dest, err)
+	return fmt.Errorf("could not write %s: %w", dest, pathCause(err))
 }
 
 func newDecryptCmd() *cobra.Command {
@@ -139,20 +142,11 @@ plan and every change to it.`,
 				secretID, localPath = "", args[0]
 				info, err := os.Stat(localPath)
 				if err != nil {
-					return err
+					return fmt.Errorf("could not read %s: %w", localPath, pathCause(err))
 				}
 				if !info.Mode().IsRegular() {
 					return fmt.Errorf("%s is not a file", localPath)
 				}
-				dbg("setup", "local_file=%s", localPath)
-			} else {
-				dbg("setup", "secret_id=%s", secretID)
-			}
-			if revisionID != "" {
-				dbg("setup", "revision=%s", revisionID)
-			}
-			if outputDir != "" {
-				dbg("setup", "output_dir=%s", outputDir)
 			}
 
 			// Validate an explicit --dir up front. The empty default is resolved
@@ -162,7 +156,7 @@ plan and every change to it.`,
 			if outputDir != "" {
 				if info, err := os.Stat(outputDir); err != nil {
 					if err := os.MkdirAll(outputDir, 0o700); err != nil {
-						return fmt.Errorf("failed to create output directory %q: %w", outputDir, err)
+						return fmt.Errorf("could not create the output directory %s: %w", outputDir, pathCause(err))
 					}
 				} else if !info.IsDir() {
 					return fmt.Errorf("--dir %s is not a directory", outputDir)
@@ -176,73 +170,70 @@ plan and every change to it.`,
 
 			c, err := newAuthenticatedClient()
 			if err != nil {
-				dbgErr("setup", err)
 				return err
 			}
-			dbg("setup", "authenticated client ready")
 
-			// Auto-select identity from the key the target revision was
-			// sealed for, for the caller, when the user did not pass
-			// --identity. The user may have rotated their primary identity,
-			// but still hold older keys locally that match older revisions.
+			// Without --identity, pick the key the target revision (or the
+			// file) was sealed with for the caller: the user may have
+			// changed their primary key, and still hold the older keys that
+			// older revisions were sealed for. Otherwise the primary key
+			// opens it.
+			idLog := api.Module(logger, "identity")
 			identitySource := "primary"
-			if identityFP != "" {
-				identitySource = "explicit (--identity)"
-			} else if local {
-				// The file lists the keys it was sealed for.
-				if rs, err := sdk.LocalFileRecipients(localPath); err == nil {
-					for _, r := range rs {
-						if matched := findLocalKeyByFingerprint(r.Fingerprint); matched != "" {
-							identityFP = matched
-							identitySource = "auto-selected from local keystore"
-							dbg("identity", "auto-selected key for recipient fingerprint=%s", crypto.ShortFingerprint(r.Fingerprint))
-							break
-						}
-					}
+			switch {
+			case identityFP != "":
+				identitySource = "--identity"
+			case local:
+				rs, err := sdk.LocalFileRecipients(localPath)
+				if err != nil {
+					// Opening the file reports what is wrong with it.
+					idLog.Debug("key selection skipped", "reason", "the file's recipients could not be read", "error", err)
 				}
-			} else {
-				detail, derr := c.DescribeSecretFull(secretID)
-				actorID, aerr := c.ResolveActorID()
-				if derr == nil && aerr == nil && len(detail.Revisions) > 0 {
-					targetID := revisionID
-					if targetID == "" {
-						targetID = detail.Secret.LatestRevisionID
-					}
-					var expectedFP string
-					for _, rev := range detail.Revisions {
-						if rev.ID != targetID {
-							continue
-						}
-						for _, r := range rev.Integrity.Recipients {
-							if r.ID == actorID {
-								expectedFP = r.KeyFingerprint
-								break
-							}
-						}
+				for _, r := range rs {
+					if matched := findLocalKeyByFingerprint(r.Fingerprint); matched != "" {
+						identityFP, identitySource = matched, "sealed for"
 						break
 					}
-					if expectedFP != "" {
-						if matched := findLocalKeyByFingerprint(expectedFP); matched != "" {
-							identityFP = matched
-							identitySource = "auto-selected from local keystore"
-							dbg("identity", "auto-selected key for recipient fingerprint=%s", crypto.ShortFingerprint(expectedFP))
-						} else {
-							dbg("identity", "no local key matches recipient fingerprint=%s", crypto.ShortFingerprint(expectedFP))
-							dbg("identity", "falling back to primary identity")
-						}
-					}
+				}
+			default:
+				detail, err := c.DescribeSecretFull(secretID)
+				if err != nil {
+					return secretError(err, secretID)
+				}
+				actorID, err := c.ResolveActorID()
+				if err != nil {
+					idLog.Warn("key selection skipped", "reason", "your account ID could not be fetched", "error", err)
+					break
+				}
+				expected := revisionKey(detail, revisionID, actorID)
+				switch matched := findLocalKeyByFingerprint(expected); {
+				case matched != "":
+					identityFP, identitySource = matched, "sealed for"
+				case expected != "":
+					idLog.Debug("revision key not on this device", "fingerprint", expected, "using", "primary key")
 				}
 			}
 
-			// Print resolved configuration once, before any phase logs.
-			if !local {
-				dbg("config", "presign-expiry=%dm", presignExpiry)
-				dbg("config", "download-threads=%s", threadCountLabel(downloadThreads))
+			// The settings this decrypt resolved to, once, before the SDK
+			// logs its own plan.
+			settings := []any{"identity", identityLabel(identityFP), "identity_source", identitySource}
+			if local {
+				settings = append(settings, "local_file", localPath)
+			} else {
+				revision := revisionID
+				if revision == "" {
+					revision = "latest"
+				}
+				settings = append(settings, "secret_id", secretID, "revision", revision,
+					"threads", threadCountLabel(downloadThreads), "presign_expiry", time.Duration(presignExpiry)*time.Minute)
 			}
-			dbg("config", "identity-source=%s", identitySource)
-			if identityFP != "" {
-				dbg("config", "identity=%s", crypto.ShortFingerprint(identityFP))
+			if outputDir != "" {
+				settings = append(settings, "dir", outputDir)
 			}
+			if outputFile != "" {
+				settings = append(settings, "output", outputFile)
+			}
+			api.Module(logger, "decrypt").Debug("options", settings...)
 
 			// Prompt for key password if identity is encrypted
 			var keyPassword string
@@ -250,7 +241,7 @@ plan and every change to it.`,
 				// Explicit or auto-selected identity: check if it's encrypted
 				resolved := resolveKeystoreFingerprint(identityFP)
 				if isKeyPairEncrypted(resolved) {
-					pw, perr := readPassword("Enter key password: ")
+					pw, perr := readPassword(fmt.Sprintf("Password for key pair %s: ", crypto.ShortFingerprint(resolved)))
 					if perr != nil {
 						return perr
 					}
@@ -260,16 +251,16 @@ plan and every change to it.`,
 				// Primary identity: check if it's encrypted
 				if _, _, err := c.LoadPrimaryIdentity(""); err != nil {
 					if strings.Contains(err.Error(), "password-encrypted") {
-						pw, perr := readPassword("Enter key password: ")
+						pw, perr := readPassword("Password for your primary key: ")
 						if perr != nil {
 							return perr
 						}
 						keyPassword = pw
 						if _, _, err := c.LoadPrimaryIdentity(keyPassword); err != nil {
-							return fmt.Errorf("failed to unlock identity: %w", err)
+							return fmt.Errorf("could not unlock your primary key: %w", err)
 						}
 					} else {
-						return fmt.Errorf("load identity: %w", err)
+						return fmt.Errorf("could not load your primary key: %w", err)
 					}
 				}
 			}
@@ -281,7 +272,7 @@ plan and every change to it.`,
 				Password:             keyPassword,
 				DownloadThreads:      downloadThreads,
 				PresignExpiryMinutes: presignExpiry,
-				OnDebug:              func(step, msg string) { dbg(step, "%s", msg) },
+				Logger:               logger,
 				// The download can be large: check that the files can be
 				// written before fetching them.
 				BeforeDownload: func(p sdk.UpcomingDownload) error {
@@ -318,13 +309,14 @@ plan and every change to it.`,
 				}
 			}()
 
-			openLabel := "Downloading"
+			openLabel, openDone := "Downloading", "Download complete"
 			if local {
-				openLabel = "Checking the sender and reading " + filepath.Base(localPath)
+				openLabel, openDone = "Checking the sender and reading "+filepath.Base(localPath), "File read"
 			}
 			steps := []step{
 				{
 					label: openLabel,
+					done:  openDone,
 					live:  progress,
 					action: func() (string, error) {
 						var err error
@@ -334,28 +326,27 @@ plan and every change to it.`,
 							opened, err = c.OpenSecret(secretID, opts)
 						}
 						if err != nil {
-							dbgErr("decrypt", err)
 							return "", err
 						}
-						detail := fmt.Sprintf("type=%s, size=%s", opened.Result.PayloadType, formatBytes(opened.Result.EncryptedSize))
+						detail := "size=" + formatBytes(opened.Result.EncryptedSize)
 						if kept := opened.Result.ResumedBytes; kept > 0 {
-							detail += fmt.Sprintf(", %s kept from an earlier download", formatBytes(kept))
+							detail += ", resumed=" + formatBytes(kept)
 						}
 						return detail, nil
 					},
 				},
 				{
 					label: "Verifying and decrypting",
+					done:  "Decryption complete",
 					live:  decryptProgress,
 					action: func() (string, error) {
 						if opened.Result.PayloadType != "files" {
 							var err error
 							decrypted, err = opened.Payload()
 							if err != nil {
-								dbgErr("decrypt", err)
 								return "", err
 							}
-							return "verified", nil
+							return "type=" + opened.Result.PayloadType, nil
 						}
 						var err error
 						if outputDir, err = filesDir(outputDir, opened.Result.RevisionID); err != nil {
@@ -363,21 +354,20 @@ plan and every change to it.`,
 						}
 						written, err = opened.WriteFiles(outputDir, sdk.WriteOptions{Overwrite: forceOverwrite})
 						if err != nil {
-							dbgErr("decrypt", err)
 							return "", err
 						}
 						if written.Archived {
-							return fmt.Sprintf("extracted %d file%s", written.Extracted, plural(written.Extracted)), nil
+							return fmt.Sprintf("files=%d", written.Extracted), nil
 						}
-						return fmt.Sprintf("%d file%s written", len(written.Files), plural(len(written.Files))), nil
+						return fmt.Sprintf("files=%d", len(written.Files)), nil
 					},
 				},
 			}
 
-			if err := runPipeline("Decrypt", steps, nil); err != nil {
+			if err := runPipeline("secret", steps); err != nil {
 				var interrupted *sdk.DownloadInterruptedError
 				if errors.As(err, &interrupted) {
-					printDownloadResumeHint(interrupted.Download)
+					return withDetail(err, downloadResumeDetail(interrupted.Download))
 				}
 				return err
 			}
@@ -407,9 +397,6 @@ plan and every change to it.`,
 			} else {
 				printKeyValue("Sender", crypto.ShortFingerprint(result.SenderFingerprint))
 			}
-			if result.SenderFirstUse {
-				printFirstUse([]sdk.Recipient{{Email: result.SenderEmail, Fingerprint: result.SenderFingerprint}})
-			}
 			// The recipient list is the one the sender signed; emails are
 			// the server's labels for those keys (the sender's, in a local
 			// file).
@@ -431,6 +418,9 @@ plan and every change to it.`,
 				printKeyValue("Output", safe(outputDir))
 			}
 			fmt.Fprintln(os.Stderr)
+			if result.SenderFirstUse {
+				printFirstUse([]sdk.Recipient{{Email: result.SenderEmail, Fingerprint: result.SenderFingerprint}})
+			}
 
 			if written != nil {
 				printWrittenFiles(written, outputDir)
@@ -494,17 +484,46 @@ func checkFilesDestination(dirFlag string, p sdk.UpcomingDownload, overwrite boo
 		return err
 	}
 	if err := sdk.CheckDestination(dir, p.Files, overwrite); err != nil {
-		return fmt.Errorf("%w (nothing was downloaded)", err)
+		detail := "Nothing was downloaded."
+		if !overwrite {
+			detail += " Pass --overwrite to replace files that exist, or --dir to write elsewhere."
+		}
+		return withDetail(err, detail)
 	}
+	log := api.Module(logger, "decrypt")
 	if len(p.Files) > 0 {
-		dbg("destination", "%s can take the %d file(s) the server lists", dir, len(p.Files))
+		log.Debug("destination checked", "dir", dir, "files", len(p.Files), "checked", "each listed file can be written")
 		return nil
 	}
 	if dirFlag == "" && !overwrite && dirHasEntries(dir) {
-		return fmt.Errorf("%s already holds an earlier decrypt of this revision: pass --overwrite to replace its files, or --dir to write elsewhere (nothing was downloaded)", dir)
+		return withDetail(fmt.Errorf("%s is not empty", dir),
+			"It holds files, likely from an earlier decrypt of this revision. Nothing was downloaded.\n\n"+
+				"Pass --overwrite to replace them, or --dir to write elsewhere.")
 	}
-	dbg("destination", "%s is writable; the server keeps no file names for this archive, so name conflicts show only once it is extracted", dir)
+	log.Debug("destination checked", "dir", dir, "checked", "the directory can be written",
+		"reason", "the server keeps no file names inside an archive, so a name conflict shows once it is extracted")
 	return nil
+}
+
+// revisionKey is the fingerprint of the key the revision revisionID (the
+// latest when it is "") was sealed with for actorID, or "" when the
+// revision does not list them.
+func revisionKey(detail *sdk.SecretDetail, revisionID, actorID string) string {
+	if revisionID == "" {
+		revisionID = detail.Secret.LatestRevisionID
+	}
+	for _, rev := range detail.Revisions {
+		if rev.ID != revisionID {
+			continue
+		}
+		for _, r := range rev.Integrity.Recipients {
+			if r.ID == actorID {
+				return r.KeyFingerprint
+			}
+		}
+		return ""
+	}
+	return ""
 }
 
 // dirHasEntries reports whether dir is a directory holding anything.
@@ -522,8 +541,7 @@ func dirHasEntries(dir string) bool {
 // and SHA-256, or the archive's entry count.
 func printWrittenFiles(w *sdk.WriteResult, outputDir string) {
 	if w.Archived {
-		fmt.Fprintf(os.Stderr, "  %s✓%s extracted %d file%s into %s\n",
-			ansiGreen, ansiReset, w.Extracted, plural(w.Extracted), outputDir)
+		printSuccess(fmt.Sprintf("Extracted %d file%s into %s.", w.Extracted, plural(w.Extracted), outputDir))
 		return
 	}
 	maxName, maxSize := 0, 0
@@ -534,12 +552,13 @@ func printWrittenFiles(w *sdk.WriteResult, outputDir string) {
 		maxSize = max(maxSize, len(sizes[i]))
 	}
 	for i, f := range w.Files {
-		fmt.Fprintf(os.Stderr, "  %s✓%s %-*s  %s%*s%s  %ssha256:%s%s\n",
-			ansiGreen, ansiReset,
+		fmt.Fprintf(os.Stderr, "  %-*s  %s%*s%s  %ssha256:%s%s\n",
 			maxName, safe(f.Path),
 			ansiDim, maxSize, sizes[i], ansiReset,
 			ansiDim, f.SHA256[:16], ansiReset)
 	}
+	fmt.Fprintln(os.Stderr)
+	printSuccess(fmt.Sprintf("Wrote %d file%s into %s.", len(w.Files), plural(len(w.Files)), outputDir))
 }
 
 // outputDecrypted writes a decrypted message or key-value data to stdout,
@@ -558,7 +577,7 @@ func outputDecrypted(d *sdk.DecryptedPayload, outputFile string) error {
 			if err := safeWriteFile(outputFile, []byte(buf.String()), 0600, forceOverwrite); err != nil {
 				return err
 			}
-			printSuccess(fmt.Sprintf("Decrypted %d data entries to %s", len(d.Entries), outputFile))
+			printSuccess(fmt.Sprintf("Wrote %d key-value pair%s to %s.", len(d.Entries), plural(len(d.Entries)), outputFile))
 		} else {
 			return writeStdout([]byte(buf.String()))
 		}
@@ -568,7 +587,7 @@ func outputDecrypted(d *sdk.DecryptedPayload, outputFile string) error {
 			if err := safeWriteFile(outputFile, []byte(d.Message), 0600, forceOverwrite); err != nil {
 				return err
 			}
-			printSuccess(fmt.Sprintf("Decrypted message to %s (%s)", outputFile, formatBytes(int64(len(d.Message)))))
+			printSuccess(fmt.Sprintf("Wrote the message to %s (%s).", outputFile, formatBytes(int64(len(d.Message)))))
 		} else {
 			return writeStdout([]byte(d.Message))
 		}
@@ -579,7 +598,7 @@ func outputDecrypted(d *sdk.DecryptedPayload, outputFile string) error {
 			if err := safeWriteFile(outputFile, d.Raw, 0600, forceOverwrite); err != nil {
 				return err
 			}
-			printSuccess(fmt.Sprintf("Decrypted to %s (%d bytes)", outputFile, len(d.Raw)))
+			printSuccess(fmt.Sprintf("Wrote the content to %s (%s).", outputFile, formatBytes(int64(len(d.Raw)))))
 		} else {
 			return writeStdout(d.Raw)
 		}
@@ -590,24 +609,24 @@ func outputDecrypted(d *sdk.DecryptedPayload, outputFile string) error {
 // writeStdout prints decrypted content. On a terminal, control characters
 // other than newline and tab are shown escaped, like \x1b, so content from
 // the sender cannot send the terminal commands or rewrite what is on
-// screen; a notice says so. Redirected to a file or a pipe, the bytes are
+// screen; a warning says so. Redirected to a file or a pipe, the bytes are
 // written as they are. A failed write is returned, so a decrypt redirected
 // to a full disk fails instead of reporting success with part of the
 // secret.
 func writeStdout(b []byte) error {
 	if !stdoutIsTerminal {
 		if _, err := os.Stdout.Write(b); err != nil {
-			return fmt.Errorf("write to stdout: %w", err)
+			return fmt.Errorf("could not write to stdout: %w", err)
 		}
 		return nil
 	}
 	out, escaped := escapeControls(b)
 	if _, err := os.Stdout.Write(out); err != nil {
-		return fmt.Errorf("write to stdout: %w", err)
+		return fmt.Errorf("could not write to stdout: %w", err)
 	}
 	if escaped > 0 {
-		fmt.Fprintln(os.Stderr)
-		printDim(fmt.Sprintf("%d control character(s) shown escaped. To get the exact bytes, use -o <file> or a pipe.", escaped))
+		printWarning(fmt.Sprintf("%d control character%s shown escaped", escaped, plural(escaped)),
+			"The content holds characters that would act on the terminal, so they are shown as escapes like \\x1b. To get the exact bytes, write it to a file with -o, or pipe it.")
 	}
 	return nil
 }
