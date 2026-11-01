@@ -329,6 +329,20 @@ func withDetail(err error, detail string) error {
 	return &detailedError{err: err, detail: detail}
 }
 
+// joinDetail is detail followed by the detail err carries (withDetail),
+// such as how to finish an interrupted transfer, for an Error block that
+// replaces err's own message.
+func joinDetail(detail string, err error) string {
+	var d *detailedError
+	if !errors.As(err, &d) || d.detail == "" {
+		return detail
+	}
+	if detail == "" {
+		return d.detail
+	}
+	return detail + "\n\n" + d.detail
+}
+
 // describeError is err as an Error block: the first line of its message,
 // starting with a capital, as the summary; the rest of the message and the
 // detail it carries (withDetail) as the detail.

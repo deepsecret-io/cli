@@ -46,6 +46,81 @@ func TestReportError(t *testing.T) {
 	}
 }
 
+// A request the server refuses with 401 names the credential it refused
+// and what to do about it, never the key itself, instead of the server's
+// "Authentication required". Before a client is made, a 401 is reported
+// as the error it is.
+func TestReportRefusedCredential(t *testing.T) {
+	saved, savedCtx := credentialSource, rootCtx
+	t.Cleanup(func() { credentialSource, rootCtx = saved, savedCtx })
+	rootCtx = context.Background()
+	refused := fmt.Errorf("could not fetch secret 01b5c5d0: %w", &api.APIError{StatusCode: 401, Message: "Authentication required"})
+
+	for source, want := range map[string][]string{
+		"DS_API_KEY":     {"Error: The server refused the API key in DS_API_KEY", "Unset DS_API_KEY", "/account/api-keys"},
+		"--api-key-file": {"Error: The server refused the API key from --api-key-file", "Leave out --api-key-file"},
+		"saved API key":  {"Error: The server refused your saved API key", "secret login", "secret config --save-api-key --api-key-stdin"},
+		"login session":  {"Error: Your login session has ended", "secret login"},
+	} {
+		credentialSource = source
+		var code int
+		out := stderrOf(t, func() { code = reportError(refused) })
+		if code != 1 || strings.Contains(out, "Authentication required") || strings.Contains(out, "status 401") {
+			t.Errorf("%s: exit %d, %q", source, code, out)
+		}
+		for _, w := range want {
+			if !strings.Contains(out, w) {
+				t.Errorf("%s: %q does not contain %q", source, out, w)
+			}
+		}
+	}
+
+	credentialSource = "DS_API_KEY"
+	interrupted := withDetail(&sdk.UploadInterruptedError{Err: &api.APIError{StatusCode: 401}}, resumeDetail("7da383f1-0000-4000-8000-000000000001"))
+	if out := stderrOf(t, func() { reportError(interrupted) }); !strings.Contains(out, "refused the API key") || !strings.Contains(out, "secret resume 7da383f1") {
+		t.Errorf("a refused upload drops how to resume it: %q", out)
+	}
+
+	credentialSource = ""
+	if out := stderrOf(t, func() { reportError(refused) }); !strings.Contains(out, "Authentication required") {
+		t.Errorf("no credential yet: %q", out)
+	}
+}
+
+// A request refused with 402 shows the server's message, which says what
+// to do (renew, ask the owner, choose a plan), as the whole summary: not
+// the API's status, the SDK's steps, or a guess such as "not shared with
+// you".
+func TestReportPaymentRequired(t *testing.T) {
+	saved, savedCtx := credentialSource, rootCtx
+	t.Cleanup(func() { credentialSource, rootCtx = saved, savedCtx })
+	rootCtx, credentialSource = context.Background(), "login session"
+	const renew = "Your free trial or subscription has ended. Renew it in Billing at https://app.deepsecret.io/billing."
+	expired := &api.APIError{StatusCode: 402, Message: renew}
+
+	for name, err := range map[string]error{
+		"decrypt":      secretError(expired, "01b5c5d0-3374-4cf9-9360-b0af2e1e61d9"),
+		"a send":       fmt.Errorf("resolve recipient you@example.com: lookup recipient: %w", expired),
+		"an interrupt": withDetail(&sdk.UploadInterruptedError{Err: expired}, resumeDetail("7da383f1-0000-4000-8000-000000000001")),
+	} {
+		var code int
+		out := stderrOf(t, func() { code = reportError(err) })
+		if code != 1 || !strings.Contains(out, "Error: "+renew) {
+			t.Errorf("%s: exit %d, %q", name, code, out)
+		}
+		for _, leak := range []string{"status 402", "lookup recipient", "not shared with you", "could not fetch"} {
+			if strings.Contains(out, leak) {
+				t.Errorf("%s: %q contains %q", name, out, leak)
+			}
+		}
+	}
+	if out := stderrOf(t, func() {
+		reportError(withDetail(&sdk.UploadInterruptedError{Err: expired}, resumeDetail("7da383f1-0000-4000-8000-000000000001")))
+	}); !strings.Contains(out, "secret resume 7da383f1") {
+		t.Errorf("a refused upload drops how to resume it: %q", out)
+	}
+}
+
 // A send or decrypt refused because someone's key changed says, in its
 // Error block, how to compare the new key and accept it.
 func TestKeyChangedDetail(t *testing.T) {

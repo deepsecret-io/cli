@@ -109,6 +109,11 @@ your account. Recipients open the file with "secret decrypt --local".`,
 				if strings.TrimSpace(f) == "" {
 					return fmt.Errorf("a file argument is empty")
 				}
+				// A missing or unreadable input fails here, before the
+				// account is fetched or any step is printed.
+				if _, err := os.Lstat(f); err != nil {
+					return fmt.Errorf("cannot read %s: %w", f, pathCause(err))
+				}
 			}
 			logInputs(inputFiles)
 

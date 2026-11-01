@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/signal"
 	"runtime"
@@ -74,15 +75,24 @@ func reportError(err error) int {
 		// interrupted transfer), and exit 130, the code of a command
 		// stopped by SIGINT. A timeout is not an interrupt: it is reported
 		// as the error it is.
-		detail := "The command stopped before it finished."
-		var d *detailedError
-		if errors.As(err, &d) && d.detail != "" {
-			detail += "\n\n" + d.detail
-		}
-		printDiagnostic(sevError, "Interrupted", detail)
+		printDiagnostic(sevError, "Interrupted", joinDetail("The command stopped before it finished.", err))
 		return 130
 	case api.IsMaintenanceError(err):
 		printDiagnostic(sevError, "The DeepSecret API is under maintenance", api.MaintenanceMessage(err)+"\n\nTry again shortly.")
+		return 1
+	case credentialSource != "" && errors.Is(err, api.ErrUnauthorized):
+		// The server refused the credential itself, whatever the command
+		// asked for: name it, and keep what the error says to do next.
+		summary, detail := refusedCredential(credentialSource)
+		printDiagnostic(sevError, summary, joinDetail(detail, err))
+		return 1
+	}
+	// 402: paying would let the request in (a plan that ended, or a
+	// feature it lacks), and the server's message says what to do, so it
+	// is the whole summary, whatever the command was doing.
+	var ae *api.APIError
+	if errors.As(err, &ae) && ae.StatusCode == http.StatusPaymentRequired && ae.Message != "" {
+		printDiagnostic(sevError, ae.Message, joinDetail("", err))
 		return 1
 	}
 	summary, detail := describeError(err)

@@ -65,6 +65,8 @@ func TestFlagAndArgumentChecks(t *testing.T) {
 		{[]string{"encrypt", "-d", "K=V", "-t", "a@example.com", "-g", "eng"}, "none of the others can be"},
 		{[]string{"encrypt", "-f", "x", "-d", "K=V"}, "none of the others can be"},
 		{[]string{"encrypt", "x", "-d", "K=V"}, "give files or --data, not both"},
+		{[]string{"encrypt", "-f", dir + "/missing"}, "cannot read " + dir + "/missing: no such file or directory"},
+		{[]string{"encrypt", dir, dir + "/missing", "-t", "a@example.com"}, "cannot read " + dir + "/missing: no such file or directory"},
 		{[]string{"encrypt", "-d", "K=V", "--local", "--ttl", "1h"}, "none of the others can be"},
 		{[]string{"encrypt", "-d", "K=V", "--local", "--threads", "8"}, "none of the others can be"},
 		{[]string{"encrypt", "-d", "K=V", "-o", "x.cbor"}, "--output only applies with --local"},

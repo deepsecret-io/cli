@@ -212,6 +212,31 @@ func resolveAuth() (key, source string, err error) {
 		"Sign in with 'secret login', or save an API key for later commands:\n  secret config --save-api-key --api-key-stdin")
 }
 
+// credentialSource is where the credential of the command's client came
+// from (resolveAuth's source), so a request the server refuses with 401
+// can name it: "" until newAuthenticatedClient runs.
+var credentialSource string
+
+// refusedCredential is the Error block for a request the server refused
+// with 401: the credential from source is not valid, and what to do next
+// depends on where it came from. The key itself is never shown.
+func refusedCredential(source string) (summary, detail string) {
+	const newKey = "create a new key in the DeepSecret app at https://app.deepsecret.io/account/api-keys (this needs an active plan)"
+	switch source {
+	case "login session":
+		return "Your login session has ended", "Sign in again with 'secret login'."
+	case "saved API key":
+		return "The server refused your saved API key",
+			"It is wrong, has expired or was revoked. Sign in with 'secret login' instead, or " + newKey +
+				" and save it:\n  secret config --save-api-key --api-key-stdin"
+	case "DS_API_KEY":
+		return "The server refused the API key in DS_API_KEY",
+			"It is wrong, has expired or was revoked. Unset DS_API_KEY to use your login, or " + newKey + "."
+	}
+	return "The server refused the API key from " + source,
+		"It is wrong, has expired or was revoked. Leave out " + source + " to use your login, or " + newKey + "."
+}
+
 // newAuthenticatedClient creates an SDK client pointed at the compiled-in API
 // URL using whichever credential source resolveAuth picks.
 func newAuthenticatedClient() (*Client, error) {
@@ -219,6 +244,7 @@ func newAuthenticatedClient() (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	credentialSource = source
 	api.Module(logger, "auth").Debug("credentials resolved", "source", source, "api_url", apiBaseURL)
 	if token, ok := strings.CutPrefix(key, "bearer:"); ok && apiKey == "" {
 		return newSessionClient(token)
