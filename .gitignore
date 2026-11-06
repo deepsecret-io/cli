@@ -1,7 +1,7 @@
-# Compiled binaries
-deepsecret
-deepsecret-cli
-secret
+# Compiled binaries, at the root only: cmd/secret is source.
+/deepsecret
+/deepsecret-cli
+/secret
 
 # Build artifacts
 .next/
@@ -10,7 +10,7 @@ dist/
 
 # IDE / tool state
 .claude/
-cli
+/cli
 ./dist/
 
 # Release upload settings (R2 keys) for task release-upload.

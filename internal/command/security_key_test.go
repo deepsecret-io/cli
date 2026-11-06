@@ -1,0 +1,195 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 DeepSecret
+
+package command
+
+import (
+	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/deepsecret-io/sdk"
+	"github.com/deepsecret-io/sdk/crypto"
+
+	"github.com/deepsecret-io/cli/internal/auth"
+	"github.com/deepsecret-io/cli/internal/config"
+	"github.com/deepsecret-io/cli/internal/identity"
+)
+
+// fakeSecurityKey is a FIDO2 key in memory.
+type fakeSecurityKey struct{ secrets map[string][]byte }
+
+func (k *fakeSecurityKey) out(id, input []byte) []byte {
+	salt := crypto.PRFSalt(input)
+	m := hmac.New(sha256.New, k.secrets[hex.EncodeToString(id)])
+	m.Write(salt[:])
+	return m.Sum(nil)
+}
+
+func (k *fakeSecurityKey) Enroll(_ context.Context, req crypto.EnrollRequest) (*crypto.EnrollResult, error) {
+	id, secret := make([]byte, 32), make([]byte, 32)
+	_, _ = rand.Read(id)
+	_, _ = rand.Read(secret)
+	k.secrets[hex.EncodeToString(id)] = secret
+	return &crypto.EnrollResult{CredentialID: id, Device: "Fake key", Output: k.out(id, req.PRFInput)}, nil
+}
+
+func (k *fakeSecurityKey) Derive(_ context.Context, req crypto.DeriveRequest) (*crypto.DeriveResult, error) {
+	for _, c := range req.Credentials {
+		if _, ok := k.secrets[hex.EncodeToString(c.ID)]; ok {
+			return &crypto.DeriveResult{CredentialID: c.ID, Output: k.out(c.ID, c.PRFInput)}, nil
+		}
+	}
+	return nil, crypto.ErrNoSecurityKey
+}
+
+// protectedKeyPair stores a new key pair protected by a fake security key
+// and a recovery code in the CLI keys directory.
+func protectedKeyPair(t *testing.T) (*crypto.KeyPair, string) {
+	t.Helper()
+	kp, err := crypto.GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := crypto.NewSecurityKeyFile(config.KeysDir(), kp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Close()
+	if _, err := e.AddSecurityKey(context.Background(), &fakeSecurityKey{secrets: map[string][]byte{}}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.SetRecoveryCode(); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.Commit(false); err != nil {
+		t.Fatal(err)
+	}
+	return kp, e.Fingerprint()
+}
+
+// A security-key protected key pair reads like any other for its public
+// keys, and is told apart from a password-protected one.
+func TestSecurityKeyProtectedKeyFile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	kp, fp := protectedKeyPair(t)
+	if p := identity.Protection(fp); p != crypto.ProtectionSecurityKey {
+		t.Fatalf("keyProtection = %q", p)
+	}
+	if identity.IsEncrypted(fp) {
+		t.Error("a security-key file was taken for a password-protected one")
+	}
+	pub, got, err := identity.ReadPublicKeys(fp)
+	if err != nil || got != fp || pub.MLDSA65PK != kp.MLDSA65PK || pub.Encrypted {
+		t.Fatalf("readPublicKeys: %+v, %q, %v", pub, got, err)
+	}
+	if c, ok := checkSecurityKeys(); !ok || c.name != "Security keys" {
+		t.Errorf("doctor does not report security key support: %+v", c)
+	}
+}
+
+// Users without a security key see nothing new: doctor says nothing, an
+// unprotected key needs nothing, and --recovery-code is refused.
+func TestNoSecurityKeyNoChange(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	kp, _ := crypto.GenerateKeyPair()
+	fp, _ := crypto.Fingerprint(kp)
+	if err := identity.SaveKeyPair(fp, kp, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := checkSecurityKeys(); ok {
+		t.Error("doctor reports security keys with none in use")
+	}
+	u, err := commandUnlock(context.Background(), nil, fp, false)
+	if err != nil || u.Password != "" || u.SecurityKey != nil || u.RecoveryCode != "" {
+		t.Errorf("commandUnlock on an unprotected key = %+v, %v", u, err)
+	}
+	if _, err := commandUnlock(context.Background(), nil, fp, true); err == nil || !strings.Contains(err.Error(), "not protected by a security key") {
+		t.Errorf("--recovery-code on an unprotected key: %v", err)
+	}
+}
+
+func TestCheckSecondWay(t *testing.T) {
+	if err := checkSecondWay(false, false, false); err == nil {
+		t.Error("no second way in and no waiver was accepted")
+	}
+	for _, c := range [][3]bool{{true, false, false}, {false, true, false}, {false, false, true}} {
+		if err := checkSecondWay(c[0], c[1], c[2]); err != nil {
+			t.Errorf("checkSecondWay%v: %v", c, err)
+		}
+	}
+}
+
+// The security key label: read from the key file on this device, for a
+// full fingerprint only, and from the server's label for a key elsewhere.
+func TestSecurityKeyLabel(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	_, protected := protectedKeyPair(t)
+	kp, _ := crypto.GenerateKeyPair()
+	plain, _ := crypto.Fingerprint(kp)
+	if err := identity.SaveKeyPair(plain, kp, ""); err != nil {
+		t.Fatal(err)
+	}
+	elsewhere := strings.Repeat("ab", 32)
+
+	for fp, want := range map[string]string{protected: " (security key)", plain: "", protected[:16]: "", elsewhere: "", "": ""} {
+		if got := identity.SecurityKeyNote(fp); got != want {
+			t.Errorf("securityKeyNote(%.16s) = %q, want %q", fp, got, want)
+		}
+	}
+	cases := []struct {
+		k    sdk.RemoteKey
+		want string
+	}{
+		{sdk.RemoteKey{Fingerprint: protected}, "security-key"},
+		{sdk.RemoteKey{Fingerprint: plain, SecurityKey: true}, ""}, // the key file here wins
+		{sdk.RemoteKey{Fingerprint: elsewhere, SecurityKey: true}, "security-key (reported)"},
+		{sdk.RemoteKey{Fingerprint: elsewhere}, ""},
+	}
+	for _, c := range cases {
+		if got := identity.RemoteLabel(c.k); got != c.want {
+			t.Errorf("remoteKeyLabel(%.16s, label %v) = %q, want %q", c.k.Fingerprint, c.k.SecurityKey, got, c.want)
+		}
+	}
+}
+
+// identity sync on a registered key sets its label from the key file,
+// and sends nothing when the label is already right.
+func TestRefreshSecurityKeyLabel(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	_, fp := protectedKeyPair(t)
+	var mu sync.Mutex
+	var puts []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		puts = append(puts, r.Method+" "+r.URL.Path+" "+strings.TrimSpace(string(body)))
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"success":true,"data":{"message":"Key pair updated"}}`)
+	}))
+	defer srv.Close()
+	c, err := auth.NewClient(srv.URL, "test-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := refreshSecurityKeyLabel(context.Background(), c, &sdk.RemoteKey{ID: "k1", Fingerprint: fp, IsPrimary: true}, fp); err != nil {
+		t.Fatal(err)
+	}
+	if err := refreshSecurityKeyLabel(context.Background(), c, &sdk.RemoteKey{ID: "k1", Fingerprint: fp, IsPrimary: true, SecurityKey: true}, fp); err != nil {
+		t.Fatal(err)
+	}
+	want := `PUT /api/v1/identities/k1/security-key {"security_key":true}`
+	if len(puts) != 1 || puts[0] != want {
+		t.Errorf("requests = %q, want one: %s", puts, want)
+	}
+}

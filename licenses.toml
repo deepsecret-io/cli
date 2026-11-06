@@ -12,9 +12,10 @@ vulnerability.ignore = true
 reason = "License check only. govulncheck gates vulnerabilities."
 
 # Our own SDK. deps.dev has no license for a version until it indexes the
-# published tag (v0.3.0 is not published yet); the license is sdk/LICENSE.
+# published tag (v0.3.0 is not published yet); the license is the LICENSE
+# file of github.com/deepsecret-io/sdk.
 [[PackageOverrides]]
 name = "github.com/deepsecret-io/sdk"
 ecosystem = "Go"
 license.override = ["Apache-2.0"]
-reason = "First-party DeepSecret SDK, Apache-2.0 (sdk/LICENSE)."
+reason = "First-party DeepSecret SDK, Apache-2.0 (LICENSE in github.com/deepsecret-io/sdk)."

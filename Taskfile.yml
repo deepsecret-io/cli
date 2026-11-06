@@ -5,8 +5,8 @@
 #
 # Releases follow semver.org: vMAJOR.MINOR.PATCH, and while the major
 # version is 0 a breaking change bumps the minor version. To release:
-#   1. Publish the SDK release the CLI needs (in sdk/: task release
-#      VERSION=...), then GOWORK=off go get github.com/deepsecret-io/sdk@...
+#   1. Publish the SDK release the CLI needs (in the SDK repo: task
+#      release VERSION=...), then GOWORK=off go get github.com/deepsecret-io/sdk@...
 #      and GOWORK=off go mod tidy, and commit and push.
 #   2. From a clean main that is pushed: task release-upload VERSION=v0.1.0.
 #      It refuses anything else, and tags the commit only once the upload
@@ -27,8 +27,15 @@ vars:
   # A release version, vMAJOR.MINOR.PATCH (semver.org). Builds outside
   # `task release` say "dev".
   SEMVER: '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
-  # os/arch:archive-label
-  PLATFORMS: darwin/arm64:macos-arm64 darwin/amd64:macos-x86_64 linux/amd64:linux-x86_64 linux/arm64:linux-arm64
+  # os/arch:archive-label:build-tags. Security keys load libfido2 at run
+  # time, which on Linux links the binary against glibc's loader, so the
+  # plain Linux archives stay fully static (nofido2: no security keys, run
+  # anywhere, Alpine included) and the -fido2 ones add security keys for
+  # glibc systems. macOS binaries always link libSystem, so they have both.
+  PLATFORMS: >-
+    darwin/arm64:macos-arm64: darwin/amd64:macos-x86_64:
+    linux/amd64:linux-x86_64:nofido2 linux/arm64:linux-arm64:nofido2
+    linux/amd64:linux-x86_64-fido2: linux/arm64:linux-arm64-fido2:
   # Scanners for `task security`, pinned and checked against the Go
   # checksum database. Dependabot does not see them; bump them by hand.
   GOVULNCHECK: golang.org/x/vuln/cmd/govulncheck@v1.9.0
@@ -49,7 +56,7 @@ tasks:
     env:
       GOWORK:
         sh: if [ -f go.work ]; then echo "$(pwd)/go.work"; else echo off; fi
-    cmd: go build -trimpath -ldflags "-s -w" -o {{.DIST}}/{{.BINARY}} .
+    cmd: go build -trimpath -ldflags "-s -w" -o {{.DIST}}/{{.BINARY}} ./cmd/secret
 
   release:
     desc: 'Check, pass the security gate, then cross-compile VERSION for every platform into dist/*.tar.gz plus SHA256SUMS: task release VERSION=v0.1.0'
@@ -65,10 +72,11 @@ tasks:
       - rm -rf {{.DIST}} && mkdir -p {{.DIST}}
       - |
         for p in {{.PLATFORMS}}; do
-          target="${p%%:*}"; label="${p##*:}"; stage="{{.DIST}}/{{.BINARY}}-$label"
+          target="${p%%:*}"; rest="${p#*:}"; label="${rest%%:*}"; tags="${rest#*:}"
+          stage="{{.DIST}}/{{.BINARY}}-$label"
           mkdir -p "$stage"
           CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" \
-            go build -trimpath -ldflags "-s -w -X main.version=$VERSION" -o "$stage/{{.BINARY}}" .
+            go build -trimpath -tags "$tags" -ldflags "-s -w -X main.version=$VERSION" -o "$stage/{{.BINARY}}" ./cmd/secret
           cp LICENSE "$stage/"
           tar -C {{.DIST}} -czf "$stage.tar.gz" "{{.BINARY}}-$label"
           rm -rf "$stage"

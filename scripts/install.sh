@@ -57,7 +57,15 @@ case "$arch" in
   *) echo "error: unsupported arch: $arch" >&2; exit 1 ;;
 esac
 
-name="${BINARY}-${os}-${arch}"
+# On Linux with glibc, take the build with security key (YubiKey) support:
+# it loads libfido2 only when a security key is used. Elsewhere (musl, as on
+# Alpine) take the fully static build, which has no security key support.
+flavor=""
+if [ "$os" = linux ] && getconf GNU_LIBC_VERSION 2>/dev/null | grep -q "^glibc "; then
+  flavor="-fido2"
+fi
+
+name="${BINARY}-${os}-${arch}${flavor}"
 archive="${name}.tar.gz"
 url="${BASE_URL}/${archive}"
 sha_url="${BASE_URL}/SHA256SUMS"
