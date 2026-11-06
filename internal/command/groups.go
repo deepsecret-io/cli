@@ -12,7 +12,8 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/deepsecret-io/sdk"
+	deepsecret "github.com/deepsecret-io/deepsecret-go"
+	sdkidentity "github.com/deepsecret-io/deepsecret-go/identity"
 	"github.com/spf13/cobra"
 
 	"github.com/deepsecret-io/cli/internal/auth"
@@ -51,7 +52,7 @@ func describeGroup(ctx context.Context, name string) error {
 		return err
 	}
 
-	info, err := c.WhoAmI(ctx)
+	info, err := c.Identity.WhoAmI(ctx)
 	if err != nil {
 		return fmt.Errorf("could not fetch your account: %w", errs.APICause(err))
 	}
@@ -71,7 +72,7 @@ func describeGroup(ctx context.Context, name string) error {
 		return nil
 	}
 
-	members := make([]sdk.GroupMemberInfo, len(matched.Members))
+	members := make([]sdkidentity.GroupMember, len(matched.Members))
 	copy(members, matched.Members)
 	sort.Slice(members, func(i, j int) bool { return members[i].Email < members[j].Email })
 
@@ -109,7 +110,7 @@ func newGroupsListCmd() *cobra.Command {
 				return err
 			}
 
-			info, err := c.WhoAmI(cmd.Context())
+			info, err := c.Identity.WhoAmI(cmd.Context())
 			if err != nil {
 				return fmt.Errorf("could not fetch your account: %w", errs.APICause(err))
 			}
@@ -146,11 +147,11 @@ func newGroupsListCmd() *cobra.Command {
 
 // orgGroups lists the groups of the organization of the account info
 // describes.
-func orgGroups(ctx context.Context, c *sdk.Client, info *sdk.ActorInfo) ([]sdk.GroupInfo, error) {
+func orgGroups(ctx context.Context, c *deepsecret.Client, info *sdkidentity.Actor) ([]sdkidentity.Group, error) {
 	if info.OrgID == "" {
 		return nil, errors.New("your account is not in an organization, so it has no groups")
 	}
-	groups, err := c.ListGroups(ctx, info.OrgID)
+	groups, err := c.Identity.ListGroups(ctx, info.OrgID)
 	if err != nil {
 		return nil, fmt.Errorf("could not list your organization's groups: %w", errs.APICause(err))
 	}
@@ -159,7 +160,7 @@ func orgGroups(ctx context.Context, c *sdk.Client, info *sdk.ActorInfo) ([]sdk.G
 
 // findGroup finds the group named name, in any case, in the organization
 // of the account info describes.
-func findGroup(ctx context.Context, c *sdk.Client, info *sdk.ActorInfo, name string) (*sdk.GroupInfo, error) {
+func findGroup(ctx context.Context, c *deepsecret.Client, info *sdkidentity.Actor, name string) (*sdkidentity.Group, error) {
 	groups, err := orgGroups(ctx, c, info)
 	if err != nil {
 		return nil, err
@@ -174,7 +175,7 @@ func findGroup(ctx context.Context, c *sdk.Client, info *sdk.ActorInfo, name str
 
 // groupNames names an organization's groups, for the error of a group not
 // found among them.
-func groupNames(groups []sdk.GroupInfo) string {
+func groupNames(groups []sdkidentity.Group) string {
 	if len(groups) == 0 {
 		return "Your organization has no groups yet."
 	}

@@ -10,8 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/deepsecret-io/sdk"
-	"github.com/deepsecret-io/sdk/api"
+	"github.com/deepsecret-io/deepsecret-go/transfer"
 
 	"github.com/deepsecret-io/cli/internal/console"
 	"github.com/deepsecret-io/cli/internal/logging"
@@ -23,9 +22,9 @@ func columns(s string) int {
 	return utf8.RuneCountInString(testutil.AnsiEscape.ReplaceAllString(s, ""))
 }
 
-func uploadFrame(conns []sdk.ConnectionStatus) liveFrame {
+func uploadFrame(conns []transfer.ConnectionStatus) liveFrame {
 	return liveFrame{stage: "uploading", done: 40 << 20, total: 96 << 20, rate: 8 << 20, transfer: true,
-		snap: sdk.TransferSnapshot{Started: true, Total: 96 << 20, Done: 40 << 20, Parts: 12, PartsDone: 3,
+		snap: transfer.Snapshot{Started: true, Total: 96 << 20, Done: 40 << 20, Parts: 12, PartsDone: 3,
 			Threads: 4, MaxThreads: 32, Connections: conns}}
 }
 
@@ -35,7 +34,7 @@ func uploadFrame(conns []sdk.ConnectionStatus) liveFrame {
 // others keep their numbers.
 func TestLiveLinesShowEachConnection(t *testing.T) {
 	now := time.Now()
-	lines := liveLines("secret: Uploading...", uploadFrame([]sdk.ConnectionStatus{
+	lines := liveLines("secret: Uploading...", uploadFrame([]transfer.ConnectionStatus{
 		{Part: 4, Size: 8 << 20, Moved: 2 << 20, Attempt: 1, Since: now.Add(-2 * time.Second)},
 		{Part: 5, Size: 8 << 20, Attempt: 2, Waiting: true},
 		{},
@@ -62,9 +61,9 @@ func TestLiveLinesShowEachConnection(t *testing.T) {
 // its height are counted on one line, so the view never scrolls or wraps.
 func TestLiveLinesFitTheTerminal(t *testing.T) {
 	now := time.Now()
-	conns := make([]sdk.ConnectionStatus, 40)
+	conns := make([]transfer.ConnectionStatus, 40)
 	for i := range conns {
-		conns[i] = sdk.ConnectionStatus{Part: i + 1, Size: 8 << 20, Moved: 3 << 20, Attempt: 1, Since: now.Add(-time.Minute)}
+		conns[i] = transfer.ConnectionStatus{Part: i + 1, Size: 8 << 20, Moved: 3 << 20, Attempt: 1, Since: now.Add(-time.Minute)}
 	}
 	for _, width := range []int{1, 20, 50, 300} {
 		lines := liveLines("secret: Uploading...", uploadFrame(conns), now, width, 10, true)
@@ -86,7 +85,7 @@ func TestLiveLinesFitTheTerminal(t *testing.T) {
 // gives way to the numbers; a stage without a transfer has no connections.
 func TestLiveLinesWithoutRows(t *testing.T) {
 	now := time.Now()
-	f := uploadFrame([]sdk.ConnectionStatus{{Part: 1, Size: 10, Attempt: 1}})
+	f := uploadFrame([]transfer.ConnectionStatus{{Part: 1, Size: 10, Attempt: 1}})
 	head := "secret: Encrypting to /a/very/long/path/that/fills/the/line/report-2026.tar.cbor..."
 	lines := liveLines(head, f, now, 100, 40, false)
 	if len(lines) != 1 || columns(lines[0]) > 99 || !strings.HasPrefix(lines[0], "secret: Encrypting") ||
@@ -236,7 +235,7 @@ func TestLogLinesPrintAboveTheLiveView(t *testing.T) {
 	view := []string{"secret: Downloading...", "  downloading 1.0 MiB/4.0 MiB 25%", "  1 part 2 of 4"}
 	out := testutil.StderrOf(t, func() {
 		console.DrawLive(view)
-		api.Module(logging.Log, "range").Debug("piece 3 split")
+		logging.Module(logging.Log, "range").Debug("piece 3 split")
 	})
 	line := strings.Index(out, "piece 3 split")
 	if line < 0 {
@@ -255,7 +254,7 @@ func TestLogLinesPrintAboveTheLiveView(t *testing.T) {
 
 	out = testutil.StderrOf(t, func() {
 		console.WithLiveCleared(func() {})
-		api.Module(logging.Log, "decrypt").Debug("after the step")
+		logging.Module(logging.Log, "decrypt").Debug("after the step")
 	})
 	if strings.Contains(out, view[0]) || console.LiveHeight() != 0 {
 		t.Fatalf("the view came back after the step ended: %q (%d lines)", out, console.LiveHeight())

@@ -17,7 +17,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/deepsecret-io/sdk/api"
+	deepsecret "github.com/deepsecret-io/deepsecret-go"
 
 	"github.com/deepsecret-io/cli/internal/console"
 )
@@ -39,17 +39,17 @@ import (
 // level.
 
 // Log is the CLI's logger, set by Setup before a command runs.
-// Code logs through a module of it: api.Module(logger, "encrypt").
+// Code logs through a module of it: Module(logger, "encrypt").
 var Log = slog.New(slog.DiscardHandler)
 
 // logLevels are the DS_LOG values and the level each turns on.
 var logLevels = map[string]slog.Level{
-	"trace": api.LevelTrace,
+	"trace": deepsecret.LevelTrace,
 	"debug": slog.LevelDebug,
 	"info":  slog.LevelInfo,
 	"warn":  slog.LevelWarn,
 	"error": slog.LevelError,
-	"json":  api.LevelTrace,
+	"json":  deepsecret.LevelTrace,
 }
 
 // logsOff is a level above every record's, so nothing is logged.
@@ -123,7 +123,7 @@ func (l *lockedWriter) Write(p []byte) (int, error) {
 // moduleKey is the field a record's joined module goes in.
 const moduleKey = "@module"
 
-// moduleHandler joins the modules a logger was given (api.Module, nested)
+// moduleHandler joins the modules a logger was given (logging.Module, nested)
 // with a dot into one moduleKey field, as hclog's named loggers do.
 type moduleHandler struct {
 	next   slog.Handler
@@ -145,7 +145,7 @@ func (h *moduleHandler) Handle(ctx context.Context, r slog.Record) error {
 	module := h.module
 	out := slog.NewRecord(r.Time, r.Level, r.Message, r.PC)
 	r.Attrs(func(a slog.Attr) bool {
-		if a.Key == api.ModuleKey {
+		if a.Key == deepsecret.LogModuleKey {
 			module = joinModule(module, a.Value.String())
 		} else {
 			out.AddAttrs(a)
@@ -162,7 +162,7 @@ func (h *moduleHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	module := h.module
 	var rest []slog.Attr
 	for _, a := range attrs {
-		if a.Key == api.ModuleKey {
+		if a.Key == deepsecret.LogModuleKey {
 			module = joinModule(module, a.Value.String())
 		} else {
 			rest = append(rest, a)
@@ -324,6 +324,28 @@ func logValue(v slog.Value) string {
 		return strconv.Quote(s)
 	}
 	return s
+}
+
+// Module returns l with name added as its module.
+func Module(l *slog.Logger, name string) *slog.Logger {
+	return l.With(deepsecret.LogModuleKey, name)
+}
+
+// Bytes is a byte count. It prints in binary units ("11.01MiB") and encodes in
+// JSON as the exact count.
+type Bytes int64
+
+func (b Bytes) String() string {
+	v := float64(b)
+	switch {
+	case v >= 1<<30:
+		return fmt.Sprintf("%.2fGiB", v/(1<<30))
+	case v >= 1<<20:
+		return fmt.Sprintf("%.2fMiB", v/(1<<20))
+	case v >= 1<<10:
+		return fmt.Sprintf("%.2fKiB", v/(1<<10))
+	}
+	return fmt.Sprintf("%dB", int64(b))
 }
 
 // Duration rounds d for a log field: to the millisecond under a

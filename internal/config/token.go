@@ -11,8 +11,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/deepsecret-io/sdk/api"
-
 	"github.com/deepsecret-io/cli/internal/logging"
 	"github.com/deepsecret-io/cli/internal/ui"
 )
@@ -55,7 +53,7 @@ func SaveRefreshedToken(token string, expiresAt time.Time) error {
 			fmt.Sprintf("%v\n\nThis command goes on, but the next one will fail until you sign in again with 'secret login'.", err))
 		return err
 	}
-	api.Module(logging.Log, "auth").Debug("session renewed", "expires_at", expiresAt)
+	logging.Module(logging.Log, "auth").Debug("session renewed", "expires_at", expiresAt)
 	return nil
 }
 

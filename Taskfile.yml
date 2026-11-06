@@ -6,7 +6,7 @@
 # Releases follow semver.org: vMAJOR.MINOR.PATCH, and while the major
 # version is 0 a breaking change bumps the minor version. To release:
 #   1. Publish the SDK release the CLI needs (in the SDK repo: task
-#      release VERSION=...), then GOWORK=off go get github.com/deepsecret-io/sdk@...
+#      release VERSION=...), then GOWORK=off go get github.com/deepsecret-io/deepsecret-go@...
 #      and GOWORK=off go mod tidy, and commit and push.
 #   2. From a clean main that is pushed: task release-upload VERSION=v0.1.0.
 #      It refuses anything else, and tags the commit only once the upload
@@ -23,7 +23,7 @@ env:
 vars:
   BINARY: secret
   DIST: dist
-  SDK: github.com/deepsecret-io/sdk
+  SDK: github.com/deepsecret-io/deepsecret-go
   # A release version, vMAJOR.MINOR.PATCH (semver.org). Builds outside
   # `task release` say "dev".
   SEMVER: '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'

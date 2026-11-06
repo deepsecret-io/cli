@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/deepsecret-io/sdk/crypto"
+	"github.com/deepsecret-io/deepsecret-go/keys"
 
 	"github.com/deepsecret-io/cli/internal/config"
 )
@@ -54,11 +54,11 @@ func TestKeyFileRefusesPaths(t *testing.T) {
 // its password.
 func TestReadPublicKeysNeedsNoPassword(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	kp, err := crypto.GenerateKeyPair()
+	kp, err := keys.Generate()
 	if err != nil {
 		t.Fatal(err)
 	}
-	fp, err := crypto.Fingerprint(kp)
+	fp, err := keys.Fingerprint(kp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestReadPublicKeysNeedsNoPassword(t *testing.T) {
 		t.Fatal(err)
 	}
 	pub, got, err := ReadPublicKeys(fp)
-	if err != nil || got != fp || pub.ED25519Public != kp.ED25519Public || !pub.Encrypted {
+	if err != nil || got != fp || pub.ED25519Public != kp.ED25519Public || !IsEncrypted(fp) {
 		t.Fatalf("readPublicKeys: %q, %v", got, err)
 	}
 	if _, _, err := ReadPublicKeys("../keys"); err == nil {

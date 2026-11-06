@@ -12,7 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/deepsecret-io/sdk/crypto"
+	"github.com/deepsecret-io/deepsecret-go/keys"
+	"github.com/deepsecret-io/deepsecret-go/keystore"
 
 	"github.com/deepsecret-io/cli/internal/config"
 	"github.com/deepsecret-io/cli/internal/console"
@@ -34,29 +35,29 @@ func Exists(fingerprint string) bool {
 // ── CLI key wrappers (thin layer over sdk/crypto for interactive password prompts) ──
 
 // SaveKeyPair saves a key pair to the CLI keys directory.
-func SaveKeyPair(fingerprint string, kp *crypto.KeyPair, password string) error {
-	return crypto.SaveKeyPairTo(config.KeysDir(), fingerprint, kp, password)
+func SaveKeyPair(fingerprint string, kp *keys.Pair, password string) error {
+	return keystore.Save(config.KeysDir(), fingerprint, kp, password)
 }
 
 // LoadKeyPair loads a key pair, prompting for password if encrypted, or
 // asking its security key for the PIN and a touch.
 // If the fingerprint doesn't match a file exactly, it tries prefix matching
 // (handles server-side 32-char fingerprints vs local 64-char filenames).
-func LoadKeyPair(ctx context.Context, fingerprint string) (*crypto.KeyPair, error) {
+func LoadKeyPair(ctx context.Context, fingerprint string) (*keys.Pair, error) {
 	resolved := ResolveFile(fingerprint)
-	if Protection(resolved) == crypto.ProtectionSecurityKey {
+	if Protection(resolved) == keystore.ProtectionSecurityKey {
 		if err := RequireTerminal(resolved); err != nil {
 			return nil, err
 		}
-		return crypto.UnlockKeyPair(ctx, config.KeysDir(), resolved, crypto.Unlock{SecurityKey: SecurityKey()})
+		return keystore.Open(ctx, config.KeysDir(), resolved, keystore.Unlock{SecurityKey: SecurityKey()})
 	}
-	kp, err := crypto.LoadKeyPairFrom(config.KeysDir(), resolved, "")
+	kp, err := keystore.Load(config.KeysDir(), resolved, "")
 	if err != nil && IsEncrypted(resolved) {
-		password, perr := prompt.Password(ctx, fmt.Sprintf("Password for key pair %s: ", crypto.ShortFingerprint(resolved)))
+		password, perr := prompt.Password(ctx, fmt.Sprintf("Password for key pair %s: ", keys.ShortFingerprint(resolved)))
 		if perr != nil {
 			return nil, perr
 		}
-		return crypto.LoadKeyPairFrom(config.KeysDir(), resolved, password)
+		return keystore.Load(config.KeysDir(), resolved, password)
 	}
 	return kp, err
 }
@@ -107,27 +108,26 @@ func IsEncrypted(fingerprint string) bool {
 	if _, ok := keyFile(fingerprint); !ok {
 		return false
 	}
-	return Protection(fingerprint) == crypto.ProtectionPassword
+	return Protection(fingerprint) == keystore.ProtectionPassword
 }
 
 // ReadPublicKeys reads the public keys of the key pair named name in the
 // keys directory, and computes its fingerprint, without the private keys:
 // an encrypted or security-key protected key pair needs nothing to read.
 // The public keys must hash to the file's name.
-func ReadPublicKeys(name string) (*crypto.KeyPair, string, error) {
+func ReadPublicKeys(name string) (*keys.Pair, string, error) {
 	if _, ok := keyFile(name); !ok {
 		return nil, "", fmt.Errorf("%q is not named after a key fingerprint", name)
 	}
-	info, err := crypto.ReadKeyFileInfo(config.KeysDir(), name)
+	info, err := keystore.ReadInfo(config.KeysDir(), name)
 	if err != nil {
 		return nil, "", errs.PathCause(err)
 	}
-	return &crypto.KeyPair{
+	return &keys.Pair{
 		ED25519Public: info.Public.ED25519,
 		X25519Public:  info.Public.X25519,
 		MLKEM768PK:    info.Public.MLKEM768,
 		MLDSA65PK:     info.Public.MLDSA65,
-		Encrypted:     info.Protection == crypto.ProtectionPassword,
 	}, info.Fingerprint, nil
 }
 
@@ -163,7 +163,7 @@ func ResolveName(fpOrPrefix string) (string, error) {
 
 // List returns fingerprints of all locally stored key pairs.
 func List() ([]string, error) {
-	return crypto.ListLocalKeysIn(config.KeysDir())
+	return keystore.List(config.KeysDir())
 }
 
 // FindLocal returns the full local-keystore fingerprint that
@@ -174,11 +174,11 @@ func FindLocal(expectedFP string) string {
 	if expectedFP == "" {
 		return ""
 	}
-	keys, err := List()
+	keyList, err := List()
 	if err != nil {
 		return ""
 	}
-	for _, fp := range keys {
+	for _, fp := range keyList {
 		if strings.EqualFold(fp, expectedFP) {
 			return fp
 		}

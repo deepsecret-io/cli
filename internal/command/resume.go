@@ -11,8 +11,8 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/deepsecret-io/sdk"
-	"github.com/deepsecret-io/sdk/api"
+	"github.com/deepsecret-io/deepsecret-go/secrets"
+	"github.com/deepsecret-io/deepsecret-go/transfer"
 	"github.com/spf13/cobra"
 
 	"github.com/deepsecret-io/cli/internal/auth"
@@ -61,11 +61,11 @@ download unused for a week is removed.`,
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dir := pending.UploadsDir()
-			uploads, err := sdk.ListPendingUploads(dir)
+			uploads, err := secrets.ListPendingUploads(dir)
 			if err != nil {
 				return fmt.Errorf("could not list the interrupted uploads: %w", err)
 			}
-			downloads, err := sdk.ListPendingDownloads(pending.DownloadsDir())
+			downloads, err := secrets.ListPendingDownloads(pending.DownloadsDir())
 			if err != nil {
 				return fmt.Errorf("could not list the interrupted downloads: %w", err)
 			}
@@ -89,10 +89,10 @@ download unused for a week is removed.`,
 
 			if discard {
 				discardStep := ui.Step{Label: "Discarding the upload of " + p.Name, Done: "Upload discarded", Action: func() (string, error) {
-					if err := c.DiscardPendingUpload(cmd.Context(), dir, p.RevisionID); err != nil {
+					if err := c.Secrets.DiscardPendingUpload(cmd.Context(), dir, p.RevisionID); err != nil {
 						return "", err
 					}
-					api.Module(logging.Log, "resume").Info("upload discarded", "revision_id", p.RevisionID, "secret_id", p.SecretID)
+					logging.Module(logging.Log, "resume").Info("upload discarded", "revision_id", p.RevisionID, "secret_id", p.SecretID)
 					return "", nil
 				}}
 				return ui.RunPipeline(cmd.Context(), "upload", []ui.Step{discardStep})
@@ -104,7 +104,7 @@ download unused for a week is removed.`,
 				Done:  "Upload complete",
 				Live:  progress,
 				Action: func() (string, error) {
-					_, err := c.ResumeUpload(cmd.Context(), dir, p.RevisionID, sdk.ResumeOptions{
+					_, err := c.Secrets.ResumeUpload(cmd.Context(), dir, p.RevisionID, secrets.ResumeOptions{
 						UploadThreads: threads,
 						UploadStatus:  &progress.Transfer,
 						Logger:        logging.Log,
@@ -116,7 +116,7 @@ download unused for a week is removed.`,
 				},
 			}
 			if err := ui.RunPipeline(cmd.Context(), "upload", []ui.Step{uploadStep}); err != nil {
-				var interrupted *sdk.UploadInterruptedError
+				var interrupted *secrets.UploadInterruptedError
 				if errors.As(err, &interrupted) {
 					return errs.WithDetail(err, resumeDetail(interrupted.Upload.RevisionID))
 				}
@@ -133,13 +133,13 @@ download unused for a week is removed.`,
 	f := cmd.Flags()
 	f.BoolVar(&discard, "discard", false, "Discard the interrupted upload or download instead of finishing it, deleting what it kept")
 	flags.SetGroup(f, flags.GroupOptions, "discard")
-	f.Var(flags.NewIntRange(&threads, 0, 0, api.MaxUploadThreads, " (0 adapts to the connection, 1 is one at a time)"), "threads", "Parallel part uploads: 0 adapts to the connection, up to 32")
+	f.Var(flags.NewIntRange(&threads, 0, 0, transfer.MaxUploadThreads, " (0 adapts to the connection, 1 is one at a time)"), "threads", "Parallel part uploads: 0 adapts to the connection, up to 32")
 	flags.SetGroup(f, flags.GroupPerformance, "threads")
 	cmd.MarkFlagsMutuallyExclusive("discard", "threads")
 	return cmd
 }
 
-func printPendingTransfers(uploads []sdk.PendingUpload, downloads []sdk.PendingDownload) error {
+func printPendingTransfers(uploads []secrets.PendingUpload, downloads []secrets.PendingDownload) error {
 	if len(uploads) == 0 && len(downloads) == 0 {
 		fmt.Fprintln(os.Stderr)
 		ui.Dimmed("No interrupted uploads or downloads.")
@@ -157,7 +157,7 @@ func printPendingTransfers(uploads []sdk.PendingUpload, downloads []sdk.PendingD
 	return nil
 }
 
-func printPendingDownloads(downloads []sdk.PendingDownload) error {
+func printPendingDownloads(downloads []secrets.PendingDownload) error {
 	ui.Header(fmt.Sprintf("Interrupted downloads (%d)", len(downloads)))
 	fmt.Fprintln(os.Stderr)
 	// Rows wait in the tabwriter until Flush, which returns any write error.
@@ -183,11 +183,11 @@ func printPendingDownloads(downloads []sdk.PendingDownload) error {
 
 // downloadResumeDetail says how to continue an interrupted download, for
 // its Error block.
-func downloadResumeDetail(d sdk.PendingDownload) string {
+func downloadResumeDetail(d secrets.PendingDownload) string {
 	return fmt.Sprintf("Run the same command again to continue the download, keeping the %s downloaded so far.", ui.FormatBytes(d.Downloaded()))
 }
 
-func printPendingUploads(uploads []sdk.PendingUpload) error {
+func printPendingUploads(uploads []secrets.PendingUpload) error {
 	ui.Header(fmt.Sprintf("Interrupted uploads (%d)", len(uploads)))
 	fmt.Fprintln(os.Stderr)
 	// Rows wait in the tabwriter until Flush, which returns any write error.

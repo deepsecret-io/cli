@@ -13,14 +13,14 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/deepsecret-io/sdk/api"
+	"github.com/deepsecret-io/deepsecret-go/apierror"
 )
 
 // APICause is the server's answer that err carries, without the steps the
 // SDK named on the way to it, for an error that names what the command
 // was doing; err itself when the server did not answer.
 func APICause(err error) error {
-	var ae *api.Error
+	var ae *apierror.Error
 	if errors.As(err, &ae) {
 		return ae
 	}

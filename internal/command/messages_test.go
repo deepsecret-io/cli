@@ -14,9 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/deepsecret-io/sdk"
-	"github.com/deepsecret-io/sdk/api"
-	"github.com/deepsecret-io/sdk/crypto"
+	"github.com/deepsecret-io/deepsecret-go/apierror"
+	sdkidentity "github.com/deepsecret-io/deepsecret-go/identity"
+	"github.com/deepsecret-io/deepsecret-go/secrets"
+	"github.com/deepsecret-io/deepsecret-go/trust"
 
 	"github.com/deepsecret-io/cli/internal/auth"
 	"github.com/deepsecret-io/cli/internal/config"
@@ -30,7 +31,7 @@ import (
 func TestReportError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	interrupted := errs.WithDetail(&sdk.UploadInterruptedError{Err: context.Canceled}, resumeDetail("7da383f1-0000-4000-8000-000000000001"))
+	interrupted := errs.WithDetail(&secrets.UploadInterruptedError{Err: context.Canceled}, resumeDetail("7da383f1-0000-4000-8000-000000000001"))
 	var code int
 	out := testutil.StderrOf(t, func() { code = reportError(ctx, interrupted) })
 	if code != 130 || !strings.Contains(out, "Error: Interrupted") || !strings.Contains(out, "secret resume 7da383f1") {
@@ -52,7 +53,7 @@ func TestReportError(t *testing.T) {
 func TestReportRefusedCredential(t *testing.T) {
 	saved := auth.Source
 	t.Cleanup(func() { auth.Source = saved })
-	refused := fmt.Errorf("could not fetch secret 01b5c5d0: %w", &api.Error{StatusCode: 401, Message: "Authentication required"})
+	refused := fmt.Errorf("could not fetch secret 01b5c5d0: %w", &apierror.Error{StatusCode: 401, Message: "Authentication required"})
 
 	for source, want := range map[string][]string{
 		"DS_API_KEY":     {"Error: The server refused the API key in DS_API_KEY", "Unset DS_API_KEY", "/account/api-keys"},
@@ -74,7 +75,7 @@ func TestReportRefusedCredential(t *testing.T) {
 	}
 
 	auth.Source = "DS_API_KEY"
-	interrupted := errs.WithDetail(&sdk.UploadInterruptedError{Err: &api.Error{StatusCode: 401}}, resumeDetail("7da383f1-0000-4000-8000-000000000001"))
+	interrupted := errs.WithDetail(&secrets.UploadInterruptedError{Err: &apierror.Error{StatusCode: 401}}, resumeDetail("7da383f1-0000-4000-8000-000000000001"))
 	if out := testutil.StderrOf(t, func() { reportError(context.Background(), interrupted) }); !strings.Contains(out, "refused the API key") || !strings.Contains(out, "secret resume 7da383f1") {
 		t.Errorf("a refused upload drops how to resume it: %q", out)
 	}
@@ -94,12 +95,12 @@ func TestReportPaymentRequired(t *testing.T) {
 	t.Cleanup(func() { auth.Source = saved })
 	auth.Source = "login session"
 	const renew = "Your free trial or subscription has ended. Renew it in Billing at https://app.deepsecret.io/billing."
-	expired := &api.Error{StatusCode: 402, Message: renew}
+	expired := &apierror.Error{StatusCode: 402, Message: renew}
 
 	for name, err := range map[string]error{
 		"decrypt":      secretError(expired, "01b5c5d0-3374-4cf9-9360-b0af2e1e61d9"),
 		"a send":       fmt.Errorf("resolve recipient you@example.com: lookup recipient: %w", expired),
-		"an interrupt": errs.WithDetail(&sdk.UploadInterruptedError{Err: expired}, resumeDetail("7da383f1-0000-4000-8000-000000000001")),
+		"an interrupt": errs.WithDetail(&secrets.UploadInterruptedError{Err: expired}, resumeDetail("7da383f1-0000-4000-8000-000000000001")),
 	} {
 		var code int
 		out := testutil.StderrOf(t, func() { code = reportError(context.Background(), err) })
@@ -113,7 +114,7 @@ func TestReportPaymentRequired(t *testing.T) {
 		}
 	}
 	if out := testutil.StderrOf(t, func() {
-		reportError(context.Background(), errs.WithDetail(&sdk.UploadInterruptedError{Err: expired}, resumeDetail("7da383f1-0000-4000-8000-000000000001")))
+		reportError(context.Background(), errs.WithDetail(&secrets.UploadInterruptedError{Err: expired}, resumeDetail("7da383f1-0000-4000-8000-000000000001")))
 	}); !strings.Contains(out, "secret resume 7da383f1") {
 		t.Errorf("a refused upload drops how to resume it: %q", out)
 	}
@@ -122,7 +123,7 @@ func TestReportPaymentRequired(t *testing.T) {
 // A secret sealed before its name was signed says it was made by an earlier
 // version and must be sent again, not "parse manifest: malformed manifest".
 func TestReportOutdatedSecret(t *testing.T) {
-	outdated := secretError(fmt.Errorf("parse manifest: %w", crypto.ErrOutdatedManifest), "01b5c5d0-3374-4cf9-9360-b0af2e1e61d9")
+	outdated := secretError(fmt.Errorf("parse manifest: %w", secrets.ErrOutdatedManifest), "01b5c5d0-3374-4cf9-9360-b0af2e1e61d9")
 	var code int
 	out := testutil.StderrOf(t, func() { code = reportError(context.Background(), outdated) })
 	if code != 1 || !strings.Contains(out, "Error: This secret was made by an earlier version of DeepSecret") || !strings.Contains(out, "send it again") {
@@ -143,7 +144,7 @@ func TestKeyChangedDetail(t *testing.T) {
 	saved := ownSafetyKey
 	t.Cleanup(func() { ownSafetyKey = saved })
 	ownSafetyKey = func(context.Context) (string, error) { return "", errors.New("your primary key is not on this device") }
-	err := fmt.Errorf("check recipients: %w", &sdk.KeyChangedError{Email: "bob@example.com", Known: []string{strings.Repeat("f", 64)}, Got: fullFP})
+	err := fmt.Errorf("check recipients: %w", &trust.KeyChangedError{Email: "bob@example.com", Known: []string{strings.Repeat("f", 64)}, Got: fullFP})
 	summary, detail := describeFailure(context.Background(), err)
 	if summary == "" {
 		t.Fatal("no summary")
@@ -165,24 +166,24 @@ func TestKeyChangedDetail(t *testing.T) {
 // whoami fails when the registered keys cannot be listed, instead of
 // reporting none, and names the primary key or says why there is none.
 func TestRegisteredKeysStep(t *testing.T) {
-	var keys []sdk.RemoteKey
-	failing := registeredKeysStep(func() ([]sdk.RemoteKey, error) { return nil, errors.New("server error") }, &keys)
+	var keyList []sdkidentity.Key
+	failing := registeredKeysStep(func() ([]sdkidentity.Key, error) { return nil, errors.New("server error") }, &keyList)
 	if _, err := failing.Action(); err == nil || !strings.Contains(err.Error(), "could not list your registered keys: server error") {
 		t.Fatalf("a failed listing: %v", err)
 	}
-	listed := registeredKeysStep(func() ([]sdk.RemoteKey, error) {
-		return []sdk.RemoteKey{{Fingerprint: fullFP, IsPrimary: true}}, nil
-	}, &keys)
-	if detail, err := listed.Action(); err != nil || detail != "keys=1" || len(keys) != 1 {
-		t.Fatalf("a listing: %q, %v, %d keys", detail, err, len(keys))
+	listed := registeredKeysStep(func() ([]sdkidentity.Key, error) {
+		return []sdkidentity.Key{{Fingerprint: fullFP, IsPrimary: true}}, nil
+	}, &keyList)
+	if detail, err := listed.Action(); err != nil || detail != "keys=1" || len(keyList) != 1 {
+		t.Fatalf("a listing: %q, %v, %d keys", detail, err, len(keyList))
 	}
-	if got := primaryKeyLabel(keys); got != fullFP {
+	if got := primaryKeyLabel(keyList); got != fullFP {
 		t.Errorf("primary: %q", got)
 	}
 	if got := primaryKeyLabel(nil); !strings.HasPrefix(got, "none registered") {
 		t.Errorf("no keys: %q", got)
 	}
-	if got := primaryKeyLabel([]sdk.RemoteKey{{Fingerprint: fullFP}}); !strings.HasPrefix(got, "none set") {
+	if got := primaryKeyLabel([]sdkidentity.Key{{Fingerprint: fullFP}}); !strings.HasPrefix(got, "none set") {
 		t.Errorf("no primary: %q", got)
 	}
 }
@@ -206,7 +207,7 @@ func TestAuthChecks(t *testing.T) {
 	}
 
 	key := []credential{{"API key (DS_API_KEY)", "k", "unset DS_API_KEY, or set it to a valid key"}}
-	refused := func(string) error { return &api.Error{StatusCode: 401, Message: "invalid key"} }
+	refused := func(string) error { return &apierror.Error{StatusCode: 401, Message: "invalid key"} }
 	if got := authChecks(nil, key, refused, now); got[0].ok || got[0].detail != "rejected by the server" || got[0].fix == "" {
 		t.Fatalf("a refused key: %+v", got)
 	}
@@ -230,17 +231,17 @@ func TestKeyTags(t *testing.T) {
 	for _, c := range []struct {
 		securityKey bool
 		encrypted   bool
-		registered  *sdk.RemoteKey
+		registered  *sdkidentity.Key
 		checked     bool
 		want        string
 	}{
 		{false, true, nil, false, "encrypted"},
 		{false, false, nil, false, ""},
 		{false, false, nil, true, "local-only"},
-		{false, true, &sdk.RemoteKey{IsPrimary: true}, true, "encrypted,primary,registered"},
-		{false, false, &sdk.RemoteKey{}, true, "registered"},
+		{false, true, &sdkidentity.Key{IsPrimary: true}, true, "encrypted,primary,registered"},
+		{false, false, &sdkidentity.Key{}, true, "registered"},
 		{true, false, nil, true, "security-key,local-only"},
-		{true, false, &sdk.RemoteKey{IsPrimary: true}, true, "security-key,primary,registered"},
+		{true, false, &sdkidentity.Key{IsPrimary: true}, true, "security-key,primary,registered"},
 	} {
 		if got := strings.Join(keyTags(c.securityKey, c.encrypted, c.registered, c.checked), ","); got != c.want {
 			t.Errorf("keyTags(%v, %v, %v, %v) = %q, want %q", c.securityKey, c.encrypted, c.registered, c.checked, got, c.want)
@@ -284,10 +285,10 @@ func TestKeyToSync(t *testing.T) {
 	if summary, detail := errs.Describe(err); summary != "2 key pairs on this device are not registered" || !strings.Contains(detail, a) || !strings.Contains(detail, b) {
 		t.Fatalf("two unregistered: %q, %q", summary, detail)
 	}
-	if name, err := keyToSync("", []sdk.RemoteKey{{Fingerprint: a[:32]}}); err != nil || name != b {
+	if name, err := keyToSync("", []sdkidentity.Key{{Fingerprint: a[:32]}}); err != nil || name != b {
 		t.Fatalf("one unregistered: %q, %v", name, err)
 	}
-	if _, err := keyToSync("", []sdk.RemoteKey{{Fingerprint: a}, {Fingerprint: b}}); err == nil || !strings.Contains(err.Error(), "already registered") {
+	if _, err := keyToSync("", []sdkidentity.Key{{Fingerprint: a}, {Fingerprint: b}}); err == nil || !strings.Contains(err.Error(), "already registered") {
 		t.Fatalf("all registered: %v", err)
 	}
 	if name, err := keyToSync(b[:16], nil); err != nil || name != b {
@@ -343,10 +344,10 @@ func TestConfigReportsAnUnreadableFile(t *testing.T) {
 // added one to a secret of the same name.
 func TestSendDetail(t *testing.T) {
 	id := "0724ba1f-c173-46ef-88e2-6ea3056d8fb4"
-	if got := sendDetail(sdk.Secret{ID: id, RevisionNumber: 1}); got != "id=0724ba1f" {
+	if got := sendDetail(secrets.Secret{ID: id, RevisionNumber: 1}); got != "id=0724ba1f" {
 		t.Errorf("first revision: %q", got)
 	}
-	if got := sendDetail(sdk.Secret{ID: id, RevisionNumber: 3}); got != "id=0724ba1f revision=3" {
+	if got := sendDetail(secrets.Secret{ID: id, RevisionNumber: 3}); got != "id=0724ba1f revision=3" {
 		t.Errorf("third revision: %q", got)
 	}
 }

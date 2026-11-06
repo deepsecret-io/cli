@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/deepsecret-io/sdk"
+	"github.com/deepsecret-io/deepsecret-go/secrets"
 
 	"github.com/deepsecret-io/cli/internal/errs"
 )
@@ -21,8 +21,8 @@ import (
 // the caller chose may hold other files.
 func TestCheckFilesDestination(t *testing.T) {
 	const rev = "04a0b4f6-4d7b-4d14-b212-f2c0b1f97a2f"
-	archive := sdk.UpcomingDownload{RevisionID: rev, PayloadType: "files"}
-	listed := sdk.UpcomingDownload{RevisionID: rev, PayloadType: "files", Files: []sdk.FileMeta{{Name: "notes.txt", Size: 5}}}
+	archive := secrets.UpcomingDownload{RevisionID: rev, PayloadType: "files"}
+	listed := secrets.UpcomingDownload{RevisionID: rev, PayloadType: "files", Files: []secrets.FileMeta{{Name: "notes.txt", Size: 5}}}
 
 	t.Chdir(t.TempDir())
 	if err := checkFilesDestination("", archive, false); err != nil {

@@ -13,9 +13,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/deepsecret-io/sdk"
-	"github.com/deepsecret-io/sdk/api"
-	"github.com/deepsecret-io/sdk/crypto"
+	deepsecret "github.com/deepsecret-io/deepsecret-go"
+	sdkidentity "github.com/deepsecret-io/deepsecret-go/identity"
+	"github.com/deepsecret-io/deepsecret-go/keys"
+	"github.com/deepsecret-io/deepsecret-go/keystore"
 	"github.com/spf13/cobra"
 
 	"github.com/deepsecret-io/cli/internal/auth"
@@ -32,14 +33,14 @@ import (
 // refreshSecurityKeyLabel brings the security key label of the registered
 // key k up to date with the key pair name on this device, for identity
 // sync on a key that is registered already.
-func refreshSecurityKeyLabel(ctx context.Context, c *sdk.Client, k *sdk.RemoteKey, name string) error {
-	want := identity.Protection(name) == crypto.ProtectionSecurityKey
-	short := crypto.ShortFingerprint(name)
+func refreshSecurityKeyLabel(ctx context.Context, c *deepsecret.Client, k *sdkidentity.Key, name string) error {
+	want := identity.Protection(name) == keystore.ProtectionSecurityKey
+	short := keys.ShortFingerprint(name)
 	if k.SecurityKey != want {
-		if err := c.SetKeySecurityKey(ctx, k.ID, want); err != nil {
+		if err := c.Identity.SetKeySecurityKey(ctx, k.ID, want); err != nil {
 			return fmt.Errorf("could not update the label of key %s: %w", short, errs.APICause(err))
 		}
-		api.Module(logging.Log, "identity").Info("security key label updated", "fingerprint", name, "security_key", want)
+		logging.Module(logging.Log, "identity").Info("security key label updated", "fingerprint", name, "security_key", want)
 	}
 	if want {
 		ui.Success("Key " + short + " is registered, labelled as protected by a security key")
@@ -61,27 +62,27 @@ func reportProtection(ctx context.Context, name string) {
 	if err != nil {
 		return // not signed in: nothing registered can be updated from here
 	}
-	want := identity.Protection(name) == crypto.ProtectionSecurityKey
-	keys, err := c.ListRemoteKeys(ctx)
-	var k *sdk.RemoteKey
+	want := identity.Protection(name) == keystore.ProtectionSecurityKey
+	keyList, err := c.Identity.ListKeys(ctx)
+	var k *sdkidentity.Key
 	if err == nil {
-		if k = identity.Registered(keys, name); k == nil || k.SecurityKey == want {
+		if k = identity.Registered(keyList, name); k == nil || k.SecurityKey == want {
 			return
 		}
-		err = c.SetKeySecurityKey(ctx, k.ID, want)
+		err = c.Identity.SetKeySecurityKey(ctx, k.ID, want)
 	}
 	if err != nil {
 		ui.Dimmed("Your key lists could not be told about the change (" + console.Safe(errs.APICause(err).Error()) + "). Later: secret identity sync -i " + name)
 		return
 	}
-	api.Module(logging.Log, "identity").Info("security key label updated", "fingerprint", name, "security_key", want)
+	logging.Module(logging.Log, "identity").Info("security key label updated", "fingerprint", name, "security_key", want)
 }
 
 // saveWithSecurityKey writes a new key pair straight to a security-key
 // file, after enrolling its security key and the second way in: it is
 // never on disk unprotected.
-func saveWithSecurityKey(ctx context.Context, kp *crypto.KeyPair, label string, backup, recovery, single bool) error {
-	e, err := crypto.NewSecurityKeyFile(config.KeysDir(), kp)
+func saveWithSecurityKey(ctx context.Context, kp *keys.Pair, label string, backup, recovery, single bool) error {
+	e, err := keystore.NewSecurityKeyFile(config.KeysDir(), kp)
 	if err != nil {
 		return fmt.Errorf("could not save the key pair: %w", err)
 	}
@@ -104,53 +105,53 @@ func saveWithSecurityKey(ctx context.Context, kp *crypto.KeyPair, label string, 
 // password, or its recovery code when useRecovery is set. A security key is
 // asked for its PIN and a touch by the SDK, once, when the key is used.
 // identityFP empty means the primary key.
-func commandUnlock(ctx context.Context, c *sdk.Client, identityFP string, useRecovery bool) (crypto.Unlock, error) {
+func commandUnlock(ctx context.Context, c *deepsecret.Client, identityFP string, useRecovery bool) (keystore.Unlock, error) {
 	primary := identityFP == ""
 	name := ""
 	if primary {
-		fp, err := c.PrimaryFingerprint(ctx)
+		fp, err := c.Identity.PrimaryFingerprint(ctx)
 		if err != nil {
-			return crypto.Unlock{}, fmt.Errorf("could not load your primary key: %w", err)
+			return keystore.Unlock{}, fmt.Errorf("could not load your primary key: %w", err)
 		}
 		name = identity.ResolveFile(fp)
 	} else {
 		name = identity.ResolveFile(identityFP)
 	}
-	info, err := crypto.ReadKeyFileInfo(config.KeysDir(), name)
+	info, err := keystore.ReadInfo(config.KeysDir(), name)
 	if err != nil {
 		if primary {
-			return crypto.Unlock{}, fmt.Errorf("could not load your primary key: %w", err)
+			return keystore.Unlock{}, fmt.Errorf("could not load your primary key: %w", err)
 		}
-		return crypto.Unlock{}, nil // loading the key reports it
+		return keystore.Unlock{}, nil // loading the key reports it
 	}
-	if useRecovery && info.Protection != crypto.ProtectionSecurityKey {
-		return crypto.Unlock{}, fmt.Errorf("--recovery-code: key pair %s is not protected by a security key", crypto.ShortFingerprint(info.Fingerprint))
+	if useRecovery && info.Protection != keystore.ProtectionSecurityKey {
+		return keystore.Unlock{}, fmt.Errorf("--recovery-code: key pair %s is not protected by a security key", keys.ShortFingerprint(info.Fingerprint))
 	}
 	switch info.Protection {
-	case crypto.ProtectionPassword:
+	case keystore.ProtectionPassword:
 		if !primary {
-			pw, err := prompt.Password(ctx, fmt.Sprintf("Password for key pair %s: ", crypto.ShortFingerprint(name)))
-			return crypto.Unlock{Password: pw}, err
+			pw, err := prompt.Password(ctx, fmt.Sprintf("Password for key pair %s: ", keys.ShortFingerprint(name)))
+			return keystore.Unlock{Password: pw}, err
 		}
 		pw, err := prompt.Password(ctx, "Password for your primary key: ")
 		if err != nil {
-			return crypto.Unlock{}, err
+			return keystore.Unlock{}, err
 		}
-		if _, _, err := c.LoadPrimaryIdentity(ctx, pw); err != nil {
-			return crypto.Unlock{}, fmt.Errorf("could not unlock your primary key: %w", err)
+		if _, _, err := c.Identity.LoadPrimary(ctx, keystore.Unlock{Password: pw}); err != nil {
+			return keystore.Unlock{}, fmt.Errorf("could not unlock your primary key: %w", err)
 		}
-		return crypto.Unlock{Password: pw}, nil
-	case crypto.ProtectionSecurityKey:
+		return keystore.Unlock{Password: pw}, nil
+	case keystore.ProtectionSecurityKey:
 		if err := identity.RequireTerminal(info.Fingerprint); err != nil {
-			return crypto.Unlock{}, err
+			return keystore.Unlock{}, err
 		}
 		if useRecovery {
-			code, err := prompt.Password(ctx, fmt.Sprintf("Recovery code for key pair %s: ", crypto.ShortFingerprint(info.Fingerprint)))
-			return crypto.Unlock{RecoveryCode: code}, err
+			code, err := prompt.Password(ctx, fmt.Sprintf("Recovery code for key pair %s: ", keys.ShortFingerprint(info.Fingerprint)))
+			return keystore.Unlock{RecoveryCode: code}, err
 		}
-		return crypto.Unlock{SecurityKey: identity.SecurityKey()}, nil
+		return keystore.Unlock{SecurityKey: identity.SecurityKey()}, nil
 	}
-	return crypto.Unlock{}, nil
+	return keystore.Unlock{}, nil
 }
 
 // showRecoveryCode shows a new recovery code once, on the terminal only,
@@ -178,7 +179,7 @@ func showRecoveryCode(ctx context.Context, code string) error {
 			if err != nil {
 				return errs.WithDetail(err, recoveryCodeNotSaved)
 			}
-			if crypto.NormalizeRecoveryCode(typed) != groups[i] {
+			if keystore.NormalizeRecoveryCode(typed) != groups[i] {
 				ok = false
 			}
 		}
@@ -223,33 +224,33 @@ func keyToProtect(ctx context.Context, identityFP string) (string, error) {
 
 // unlockForEdit unlocks a security-key protected key pair to change its
 // slots: with the security key, or with the recovery code.
-func unlockForEdit(ctx context.Context, name string, useRecovery bool) (*crypto.SlotEditor, error) {
-	info, err := crypto.ReadKeyFileInfo(config.KeysDir(), name)
+func unlockForEdit(ctx context.Context, name string, useRecovery bool) (*keystore.SlotEditor, error) {
+	info, err := keystore.ReadInfo(config.KeysDir(), name)
 	if err != nil {
-		return nil, fmt.Errorf("could not read key pair %s: %w", crypto.ShortFingerprint(name), err)
+		return nil, fmt.Errorf("could not read key pair %s: %w", keys.ShortFingerprint(name), err)
 	}
-	if info.Protection != crypto.ProtectionSecurityKey {
-		return nil, errs.WithDetail(fmt.Errorf("key pair %s is not protected by a security key", crypto.ShortFingerprint(name)),
-			"Protect it with: secret identity security-key protect -i "+crypto.ShortFingerprint(name))
+	if info.Protection != keystore.ProtectionSecurityKey {
+		return nil, errs.WithDetail(fmt.Errorf("key pair %s is not protected by a security key", keys.ShortFingerprint(name)),
+			"Protect it with: secret identity security-key protect -i "+keys.ShortFingerprint(name))
 	}
 	if err := identity.RequireTerminal(name); err != nil {
 		return nil, err
 	}
-	u := crypto.Unlock{SecurityKey: identity.SecurityKey()}
+	u := keystore.Unlock{SecurityKey: identity.SecurityKey()}
 	if useRecovery {
-		code, err := prompt.Password(ctx, fmt.Sprintf("Recovery code for key pair %s: ", crypto.ShortFingerprint(name)))
+		code, err := prompt.Password(ctx, fmt.Sprintf("Recovery code for key pair %s: ", keys.ShortFingerprint(name)))
 		if err != nil {
 			return nil, err
 		}
-		u = crypto.Unlock{RecoveryCode: code}
+		u = keystore.Unlock{RecoveryCode: code}
 	}
-	return crypto.EditKeyFile(ctx, config.KeysDir(), name, u)
+	return keystore.Edit(ctx, config.KeysDir(), name, u)
 }
 
 // enrollWays adds the security key connected to e, then the second way in
 // the flags ask for: a backup security key, a recovery code, or none
 // (single). It writes nothing.
-func enrollWays(ctx context.Context, e *crypto.SlotEditor, label string, backup, recovery bool) error {
+func enrollWays(ctx context.Context, e *keystore.SlotEditor, label string, backup, recovery bool) error {
 	fmt.Fprintln(os.Stderr, "Leave only the security key to enroll plugged in.")
 	slot, err := e.AddSecurityKey(ctx, identity.SecurityKey(), label)
 	if err != nil {
@@ -328,26 +329,26 @@ func newSecurityKeyProtectCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			info, err := crypto.ReadKeyFileInfo(config.KeysDir(), name)
+			info, err := keystore.ReadInfo(config.KeysDir(), name)
 			if err != nil {
-				return fmt.Errorf("could not read key pair %s: %w", crypto.ShortFingerprint(name), err)
+				return fmt.Errorf("could not read key pair %s: %w", keys.ShortFingerprint(name), err)
 			}
-			if info.Protection == crypto.ProtectionSecurityKey {
-				return errs.WithDetail(fmt.Errorf("key pair %s is already protected by a security key", crypto.ShortFingerprint(name)),
-					"Add another with: secret identity security-key add -i "+crypto.ShortFingerprint(name))
+			if info.Protection == keystore.ProtectionSecurityKey {
+				return errs.WithDetail(fmt.Errorf("key pair %s is already protected by a security key", keys.ShortFingerprint(name)),
+					"Add another with: secret identity security-key add -i "+keys.ShortFingerprint(name))
 			}
 			if err := identity.RequireTerminal(""); err != nil {
 				return err
 			}
 			var pw string
-			if info.Protection == crypto.ProtectionPassword {
-				if pw, err = prompt.Password(cmd.Context(), fmt.Sprintf("Password for key pair %s: ", crypto.ShortFingerprint(name))); err != nil {
+			if info.Protection == keystore.ProtectionPassword {
+				if pw, err = prompt.Password(cmd.Context(), fmt.Sprintf("Password for key pair %s: ", keys.ShortFingerprint(name))); err != nil {
 					return err
 				}
 			}
-			e, err := crypto.EditKeyFile(cmd.Context(), config.KeysDir(), name, crypto.Unlock{Password: pw})
+			e, err := keystore.Edit(cmd.Context(), config.KeysDir(), name, keystore.Unlock{Password: pw})
 			if err != nil {
-				return fmt.Errorf("could not unlock key pair %s: %w", crypto.ShortFingerprint(name), err)
+				return fmt.Errorf("could not unlock key pair %s: %w", keys.ShortFingerprint(name), err)
 			}
 			defer e.Close()
 			if err := enrollWays(cmd.Context(), e, label, backup, recovery); err != nil {
@@ -360,9 +361,9 @@ func newSecurityKeyProtectCmd() *cobra.Command {
 				return fmt.Errorf("could not save the key pair: %w", err)
 			}
 			logProtected(e, "protected")
-			ui.Success("Key pair " + crypto.ShortFingerprint(name) + " is protected by a security key")
+			ui.Success("Key pair " + keys.ShortFingerprint(name) + " is protected by a security key")
 			reportProtection(cmd.Context(), name)
-			if info.Protection == crypto.ProtectionPassword {
+			if info.Protection == keystore.ProtectionPassword {
 				ui.Dimmed("Its password no longer opens it. Copies of the key file made before now (backups) still open with the password alone.")
 			} else {
 				ui.Dimmed("Copies of the key file made before now (backups) are still unprotected.")
@@ -409,7 +410,7 @@ func newSecurityKeyAddCmd() *cobra.Command {
 				return fmt.Errorf("could not save the key pair: %w", err)
 			}
 			logProtected(e, "security key added")
-			ui.Success("Enrolled " + console.Safe(slot.Label) + " for key pair " + crypto.ShortFingerprint(name))
+			ui.Success("Enrolled " + console.Safe(slot.Label) + " for key pair " + keys.ShortFingerprint(name))
 			return nil
 		},
 	}
@@ -431,22 +432,22 @@ func newSecurityKeyListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			info, err := crypto.ReadKeyFileInfo(config.KeysDir(), name)
+			info, err := keystore.ReadInfo(config.KeysDir(), name)
 			if err != nil {
-				return fmt.Errorf("could not read key pair %s: %w", crypto.ShortFingerprint(name), err)
+				return fmt.Errorf("could not read key pair %s: %w", keys.ShortFingerprint(name), err)
 			}
-			ui.Header("Key pair " + crypto.ShortFingerprint(info.Fingerprint))
+			ui.Header("Key pair " + keys.ShortFingerprint(info.Fingerprint))
 			fmt.Fprintln(os.Stderr)
 			switch info.Protection {
-			case crypto.ProtectionNone:
+			case keystore.ProtectionNone:
 				ui.KeyValue("Protection", "none: the private keys are stored in clear")
-			case crypto.ProtectionPassword:
+			case keystore.ProtectionPassword:
 				ui.KeyValue("Protection", "password")
 			default:
 				ui.KeyValue("Protection", "security key")
 				for _, s := range info.Slots {
 					kind := "security key"
-					if s.Type == crypto.SlotRecoveryCode {
+					if s.Type == keystore.SlotRecoveryCode {
 						kind = "recovery code"
 					}
 					fmt.Printf("  %s  %-13s  %s  (added %s)\n", s.ID, kind, console.Safe(s.Label), s.CreatedAt.Local().Format(time.DateOnly))
@@ -473,19 +474,19 @@ func newSecurityKeyRemoveCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			info, err := crypto.ReadKeyFileInfo(config.KeysDir(), name)
+			info, err := keystore.ReadInfo(config.KeysDir(), name)
 			if err != nil {
-				return fmt.Errorf("could not read key pair %s: %w", crypto.ShortFingerprint(name), err)
+				return fmt.Errorf("could not read key pair %s: %w", keys.ShortFingerprint(name), err)
 			}
-			var target *crypto.SlotInfo
+			var target *keystore.SlotInfo
 			for i := range info.Slots {
 				if info.Slots[i].ID == args[0] {
 					target = &info.Slots[i]
 				}
 			}
 			if target == nil {
-				return errs.WithDetail(fmt.Errorf("key pair %s has no slot %s", crypto.ShortFingerprint(name), console.Safe(args[0])),
-					"List them with: secret identity security-key list -i "+crypto.ShortFingerprint(name))
+				return errs.WithDetail(fmt.Errorf("key pair %s has no slot %s", keys.ShortFingerprint(name), console.Safe(args[0])),
+					"List them with: secret identity security-key list -i "+keys.ShortFingerprint(name))
 			}
 			e, err := unlockForEdit(cmd.Context(), name, useRecovery)
 			if err != nil {
@@ -499,7 +500,7 @@ func newSecurityKeyRemoveCmd() *cobra.Command {
 				return fmt.Errorf("could not save the key pair: %w", err)
 			}
 			logProtected(e, "slot removed")
-			ui.Success("Removed " + console.Safe(target.Label) + " from key pair " + crypto.ShortFingerprint(name))
+			ui.Success("Removed " + console.Safe(target.Label) + " from key pair " + keys.ShortFingerprint(name))
 			ui.Dimmed("Copies of the key file made before now still open with it. If it was lost or seen by someone else,")
 			ui.Dimmed("generate a new key pair and make it your primary key: secret identity generate --security-key --recovery-code")
 			return nil
@@ -540,7 +541,7 @@ func newSecurityKeyRecoveryCodeCmd() *cobra.Command {
 				return notSaved(err)
 			}
 			logProtected(e, "recovery code set")
-			ui.Success("New recovery code saved for key pair " + crypto.ShortFingerprint(name) + "; the old one no longer opens it")
+			ui.Success("New recovery code saved for key pair " + keys.ShortFingerprint(name) + "; the old one no longer opens it")
 			return nil
 		},
 	}
@@ -579,8 +580,8 @@ func newSecurityKeyUnprotectCmd() *cobra.Command {
 			if err := e.CommitPassword(pw); err != nil {
 				return fmt.Errorf("could not save the key pair: %w", err)
 			}
-			api.Module(logging.Log, "identity").Info("security key protection removed", "fingerprint", e.Fingerprint(), "password", !noPassword)
-			ui.Success("Key pair " + crypto.ShortFingerprint(name) + " no longer needs a security key")
+			logging.Module(logging.Log, "identity").Info("security key protection removed", "fingerprint", e.Fingerprint(), "password", !noPassword)
+			ui.Success("Key pair " + keys.ShortFingerprint(name) + " no longer needs a security key")
 			ui.Warning("A copy of the key file can be guessed at offline again", "Its security keys and recovery code no longer open it; its password does.")
 			reportProtection(cmd.Context(), name)
 			return nil
@@ -595,14 +596,14 @@ func newSecurityKeyUnprotectCmd() *cobra.Command {
 
 // logProtected records a change to a key pair's slots: the slots by type,
 // never anything secret.
-func logProtected(e *crypto.SlotEditor, what string) {
-	keys, codes := 0, 0
+func logProtected(e *keystore.SlotEditor, what string) {
+	keyList, codes := 0, 0
 	for _, s := range e.Slots() {
-		if s.Type == crypto.SlotSecurityKey {
-			keys++
+		if s.Type == keystore.SlotSecurityKey {
+			keyList++
 		} else {
 			codes++
 		}
 	}
-	api.Module(logging.Log, "identity").Info("key pair "+what, "fingerprint", e.Fingerprint(), "security_keys", keys, "recovery_codes", codes)
+	logging.Module(logging.Log, "identity").Info("key pair "+what, "fingerprint", e.Fingerprint(), "security_keys", keyList, "recovery_codes", codes)
 }

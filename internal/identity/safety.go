@@ -9,8 +9,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/deepsecret-io/sdk"
-	"github.com/deepsecret-io/sdk/crypto"
+	sdkidentity "github.com/deepsecret-io/deepsecret-go/identity"
+	"github.com/deepsecret-io/deepsecret-go/keys"
 )
 
 // LocalPrimaryKey is the fingerprint of your primary key, computed from
@@ -40,7 +40,7 @@ func LocalPrimaryKey(ctx context.Context) (string, error) {
 
 // PrimaryOnDevice is the primary key among registered when it is one of
 // local, the fingerprints computed from the key pairs on this device.
-func PrimaryOnDevice(registered []sdk.RemoteKey, local []string) (string, error) {
+func PrimaryOnDevice(registered []sdkidentity.Key, local []string) (string, error) {
 	for _, k := range registered {
 		if !k.IsPrimary {
 			continue
@@ -58,21 +58,21 @@ func PrimaryOnDevice(registered []sdk.RemoteKey, local []string) (string, error)
 // SafetyNumber is the safety number of one key of yours: six groups
 // of five digits on one line.
 func SafetyNumber(fp string) (string, error) {
-	n, err := crypto.SafetyNumber(strings.ToLower(fp))
+	n, err := keys.SafetyNumber(strings.ToLower(fp))
 	if err != nil {
 		return "", err
 	}
-	return crypto.GroupDigits(n), nil
+	return keys.GroupDigits(n), nil
 }
 
 // PairSafetyRows is the safety number of your key own and their key
 // theirs in three rows of four groups of five digits, to read aloud.
 func PairSafetyRows(own, theirs string) ([]string, error) {
-	n, err := crypto.PairSafetyNumber(strings.ToLower(own), strings.ToLower(theirs))
+	n, err := keys.PairSafetyNumber(strings.ToLower(own), strings.ToLower(theirs))
 	if err != nil {
 		return nil, err
 	}
-	groups := strings.Fields(crypto.GroupDigits(n))
+	groups := strings.Fields(keys.GroupDigits(n))
 	var rows []string
 	for i := 0; i < len(groups); i += 4 {
 		rows = append(rows, strings.Join(groups[i:min(i+4, len(groups))], " "))

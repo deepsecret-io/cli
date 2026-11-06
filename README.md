@@ -2,7 +2,7 @@
 
 `secret` sends and receives end-to-end encrypted secrets from the command line: files, folders, key-value pairs and text.
 
-Everything is encrypted on your machine, with hybrid post-quantum encryption, before it is uploaded. The server stores only ciphertext and never sees a content key. The encryption lives in the [DeepSecret Go SDK](https://github.com/deepsecret-io/sdk), and [PROTOCOL_V4.md](https://github.com/deepsecret-io/sdk/blob/main/PROTOCOL_V4.md) specifies it.
+Everything is encrypted on your machine, with hybrid post-quantum encryption, before it is uploaded. The server stores only ciphertext and never sees a content key. The encryption lives in the [DeepSecret Go SDK](https://github.com/deepsecret-io/deepsecret-go), and [PROTOCOL_V4.md](https://github.com/deepsecret-io/deepsecret-go/blob/main/PROTOCOL_V4.md) specifies it.
 
 You need a [DeepSecret](https://deepsecret.io) account, with a free trial or a plan, to send and receive.
 
@@ -176,7 +176,7 @@ To work on the CLI and the SDK together, put a `go.work` that points the SDK at 
 
 ### Layout
 
-Encryption, the protocol and the API live in the [SDK](https://github.com/deepsecret-io/sdk), which is what other programs should build on. The packages here are internal to the CLI, and imports only go down this list:
+Encryption, the protocol and the API live in the [SDK](https://github.com/deepsecret-io/deepsecret-go), which is what other programs should build on. The packages here are internal to the CLI, and imports only go down this list:
 
 | Package | What it holds |
 |---|---|

@@ -10,7 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/deepsecret-io/sdk"
+	deepsecret "github.com/deepsecret-io/deepsecret-go"
+	sdkidentity "github.com/deepsecret-io/deepsecret-go/identity"
 	"github.com/spf13/cobra"
 
 	"github.com/deepsecret-io/cli/internal/auth"
@@ -31,14 +32,14 @@ func newWhoamiCmd() *cobra.Command {
 				return err
 			}
 
-			var actor sdk.ActorInfo
-			var keys []sdk.RemoteKey
+			var actor sdkidentity.Actor
+			var keys []sdkidentity.Key
 			steps := []ui.Step{
 				{
 					Label: "Fetching your account",
 					Done:  "Account fetched",
 					Action: func() (string, error) {
-						info, err := c.WhoAmI(cmd.Context())
+						info, err := c.Identity.WhoAmI(cmd.Context())
 						if err != nil {
 							return "", fmt.Errorf("could not fetch your account: %w", errs.APICause(err))
 						}
@@ -66,14 +67,14 @@ func newWhoamiCmd() *cobra.Command {
 }
 
 // listRemoteKeysOf is c's registered keys, as registeredKeysStep lists them.
-func listRemoteKeysOf(ctx context.Context, c *sdk.Client) func() ([]sdk.RemoteKey, error) {
-	return func() ([]sdk.RemoteKey, error) { return c.ListRemoteKeys(ctx) }
+func listRemoteKeysOf(ctx context.Context, c *deepsecret.Client) func() ([]sdkidentity.Key, error) {
+	return func() ([]sdkidentity.Key, error) { return c.Identity.ListKeys(ctx) }
 }
 
 // registeredKeysStep is the step that fetches, with list, the keys
 // registered for the account into keys. A failure fails the step: no keys
 // fetched is not the same as no keys registered.
-func registeredKeysStep(list func() ([]sdk.RemoteKey, error), keys *[]sdk.RemoteKey) ui.Step {
+func registeredKeysStep(list func() ([]sdkidentity.Key, error), keys *[]sdkidentity.Key) ui.Step {
 	return ui.Step{
 		Label: "Fetching your registered keys",
 		Done:  "Registered keys fetched",
@@ -90,7 +91,7 @@ func registeredKeysStep(list func() ([]sdk.RemoteKey, error), keys *[]sdk.Remote
 
 // primaryKeyLabel is the Primary key line of whoami: the fingerprint of the
 // primary among keys, or why there is none.
-func primaryKeyLabel(keys []sdk.RemoteKey) string {
+func primaryKeyLabel(keys []sdkidentity.Key) string {
 	for _, k := range keys {
 		if k.IsPrimary {
 			if l := identity.RemoteLabel(k); l != "" {

@@ -21,8 +21,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/deepsecret-io/sdk/api"
-	"github.com/deepsecret-io/sdk/crypto"
+	"github.com/deepsecret-io/deepsecret-go/apierror"
+	"github.com/deepsecret-io/deepsecret-go/secrets"
 	"github.com/spf13/cobra"
 
 	"github.com/deepsecret-io/cli/internal/auth"
@@ -74,10 +74,10 @@ func reportError(ctx context.Context, err error) int {
 		// as the error it is.
 		ui.Diagnostic(ui.SevError, "Interrupted", errs.JoinDetail("The command stopped before it finished.", err))
 		return 130
-	case api.IsMaintenanceError(err):
-		ui.Diagnostic(ui.SevError, "The DeepSecret API is under maintenance", api.MaintenanceMessage(err)+"\n\nTry again shortly.")
+	case apierror.IsMaintenanceError(err):
+		ui.Diagnostic(ui.SevError, "The DeepSecret API is under maintenance", apierror.MaintenanceMessage(err)+"\n\nTry again shortly.")
 		return 1
-	case auth.Source != "" && errors.Is(err, api.ErrUnauthorized):
+	case auth.Source != "" && errors.Is(err, apierror.ErrUnauthorized):
 		// The server refused the credential itself, whatever the command
 		// asked for: name it, and keep what the error says to do next.
 		summary, detail := auth.Refused(auth.Source)
@@ -87,7 +87,7 @@ func reportError(ctx context.Context, err error) int {
 	// 402: paying would let the request in (a plan that ended, or a
 	// feature it lacks), and the server's message says what to do, so it
 	// is the whole summary, whatever the command was doing.
-	var ae *api.Error
+	var ae *apierror.Error
 	if errors.As(err, &ae) && ae.StatusCode == http.StatusPaymentRequired && ae.Message != "" {
 		ui.Diagnostic(ui.SevError, ae.Message, errs.JoinDetail("", err))
 		return 1
@@ -95,7 +95,7 @@ func reportError(ctx context.Context, err error) int {
 	// A secret sealed before its name was signed cannot be opened by this
 	// version: say so, and what to do, instead of the manifest check that
 	// refused it.
-	if errors.Is(err, crypto.ErrOutdatedManifest) {
+	if errors.Is(err, secrets.ErrOutdatedManifest) {
 		ui.Diagnostic(ui.SevError, "This secret was made by an earlier version of DeepSecret", "This version cannot open it. Ask the sender to send it again.")
 		return 1
 	}
@@ -120,19 +120,31 @@ func versionString(version string) string {
 			notes = append(notes, "uncommitted changes")
 		}
 	}
-	for _, d := range info.Deps {
-		if d.Path == "github.com/deepsecret-io/sdk" {
-			sdk := "sdk " + d.Version
-			if d.Replace != nil {
-				sdk += " from " + d.Replace.Path
-			}
-			notes = append(notes, sdk)
-		}
+	if note := sdkNote(info.Deps); note != "" {
+		notes = append(notes, note)
 	}
 	if len(notes) == 0 {
 		return version
 	}
 	return version + " (" + strings.Join(notes, ", ") + ")"
+}
+
+// sdkModule is the SDK's module path, which --version looks for in the build.
+const sdkModule = "github.com/deepsecret-io/deepsecret-go"
+
+// sdkNote says which SDK version the build uses, and where it came from when a
+// go.work replaced it; "" when it is not among deps.
+func sdkNote(deps []*rtdebug.Module) string {
+	for _, d := range deps {
+		if d.Path == sdkModule {
+			note := "sdk " + d.Version
+			if d.Replace != nil {
+				note += " from " + d.Replace.Path
+			}
+			return note
+		}
+	}
+	return ""
 }
 
 // newRootCmd builds the command tree: every command, its flags and help.

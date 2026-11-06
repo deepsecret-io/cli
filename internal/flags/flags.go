@@ -18,7 +18,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/deepsecret-io/sdk"
+	"github.com/deepsecret-io/deepsecret-go/secrets"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -293,7 +293,7 @@ func (v *EmailList) Set(s string) error {
 		}
 		*v.p = append(*v.p, e)
 	}
-	return sdk.ValidateRecipients(*v.p)
+	return secrets.ValidateRecipients(*v.p)
 }
 
 // Email is one email address.
@@ -310,7 +310,7 @@ func (v *Email) Type() string { return "email" }
 // Set checks and stores a value given on the command line.
 func (v *Email) Set(s string) error {
 	s = strings.TrimSpace(s)
-	if err := sdk.ValidateRecipients([]string{s}); err != nil {
+	if err := secrets.ValidateRecipients([]string{s}); err != nil {
 		return err
 	}
 	*v.p = s

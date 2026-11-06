@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/deepsecret-io/sdk"
+	sdkidentity "github.com/deepsecret-io/deepsecret-go/identity"
 )
 
 // The fingerprints of the SDK's safety number vectors, and their numbers.
@@ -21,18 +21,18 @@ var (
 // Your half of a safety number is the primary key only when a key pair
 // on this device is that key: the server's listing alone is not enough.
 func TestPrimaryOnDevice(t *testing.T) {
-	primary := []sdk.RemoteKey{{Fingerprint: ffFP}, {Fingerprint: strings.ToUpper(zeroFP), IsPrimary: true}}
+	primary := []sdkidentity.Key{{Fingerprint: ffFP}, {Fingerprint: strings.ToUpper(zeroFP), IsPrimary: true}}
 	if got, err := PrimaryOnDevice(primary, []string{ffFP, zeroFP}); err != nil || got != zeroFP {
 		t.Errorf("primary on this device: %q, %v", got, err)
 	}
 	if _, err := PrimaryOnDevice(primary, []string{ffFP}); err == nil || !strings.Contains(err.Error(), "not on this device") {
 		t.Errorf("primary elsewhere: %v", err)
 	}
-	if _, err := PrimaryOnDevice([]sdk.RemoteKey{{Fingerprint: zeroFP}}, []string{zeroFP}); err == nil || !strings.Contains(err.Error(), "no primary key") {
+	if _, err := PrimaryOnDevice([]sdkidentity.Key{{Fingerprint: zeroFP}}, []string{zeroFP}); err == nil || !strings.Contains(err.Error(), "no primary key") {
 		t.Errorf("no primary key: %v", err)
 	}
 	// A prefix the server lists does not pass for the key.
-	if _, err := PrimaryOnDevice([]sdk.RemoteKey{{Fingerprint: zeroFP[:32], IsPrimary: true}}, []string{zeroFP}); err == nil {
+	if _, err := PrimaryOnDevice([]sdkidentity.Key{{Fingerprint: zeroFP[:32], IsPrimary: true}}, []string{zeroFP}); err == nil {
 		t.Error("a prefix passed for the primary key")
 	}
 }

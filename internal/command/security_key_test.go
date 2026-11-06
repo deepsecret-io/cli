@@ -16,8 +16,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/deepsecret-io/sdk"
-	"github.com/deepsecret-io/sdk/crypto"
+	sdkidentity "github.com/deepsecret-io/deepsecret-go/identity"
+	"github.com/deepsecret-io/deepsecret-go/keys"
+	"github.com/deepsecret-io/deepsecret-go/keystore"
 
 	"github.com/deepsecret-io/cli/internal/auth"
 	"github.com/deepsecret-io/cli/internal/config"
@@ -28,38 +29,38 @@ import (
 type fakeSecurityKey struct{ secrets map[string][]byte }
 
 func (k *fakeSecurityKey) out(id, input []byte) []byte {
-	salt := crypto.PRFSalt(input)
+	salt := keystore.PRFSalt(input)
 	m := hmac.New(sha256.New, k.secrets[hex.EncodeToString(id)])
 	m.Write(salt[:])
 	return m.Sum(nil)
 }
 
-func (k *fakeSecurityKey) Enroll(_ context.Context, req crypto.EnrollRequest) (*crypto.EnrollResult, error) {
+func (k *fakeSecurityKey) Enroll(_ context.Context, req keystore.EnrollRequest) (*keystore.EnrollResult, error) {
 	id, secret := make([]byte, 32), make([]byte, 32)
 	_, _ = rand.Read(id)
 	_, _ = rand.Read(secret)
 	k.secrets[hex.EncodeToString(id)] = secret
-	return &crypto.EnrollResult{CredentialID: id, Device: "Fake key", Output: k.out(id, req.PRFInput)}, nil
+	return &keystore.EnrollResult{CredentialID: id, Device: "Fake key", Output: k.out(id, req.PRFInput)}, nil
 }
 
-func (k *fakeSecurityKey) Derive(_ context.Context, req crypto.DeriveRequest) (*crypto.DeriveResult, error) {
+func (k *fakeSecurityKey) Derive(_ context.Context, req keystore.DeriveRequest) (*keystore.DeriveResult, error) {
 	for _, c := range req.Credentials {
 		if _, ok := k.secrets[hex.EncodeToString(c.ID)]; ok {
-			return &crypto.DeriveResult{CredentialID: c.ID, Output: k.out(c.ID, c.PRFInput)}, nil
+			return &keystore.DeriveResult{CredentialID: c.ID, Output: k.out(c.ID, c.PRFInput)}, nil
 		}
 	}
-	return nil, crypto.ErrNoSecurityKey
+	return nil, keystore.ErrNoSecurityKey
 }
 
 // protectedKeyPair stores a new key pair protected by a fake security key
 // and a recovery code in the CLI keys directory.
-func protectedKeyPair(t *testing.T) (*crypto.KeyPair, string) {
+func protectedKeyPair(t *testing.T) (*keys.Pair, string) {
 	t.Helper()
-	kp, err := crypto.GenerateKeyPair()
+	kp, err := keys.Generate()
 	if err != nil {
 		t.Fatal(err)
 	}
-	e, err := crypto.NewSecurityKeyFile(config.KeysDir(), kp)
+	e, err := keystore.NewSecurityKeyFile(config.KeysDir(), kp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,14 +82,14 @@ func protectedKeyPair(t *testing.T) (*crypto.KeyPair, string) {
 func TestSecurityKeyProtectedKeyFile(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	kp, fp := protectedKeyPair(t)
-	if p := identity.Protection(fp); p != crypto.ProtectionSecurityKey {
+	if p := identity.Protection(fp); p != keystore.ProtectionSecurityKey {
 		t.Fatalf("keyProtection = %q", p)
 	}
 	if identity.IsEncrypted(fp) {
 		t.Error("a security-key file was taken for a password-protected one")
 	}
 	pub, got, err := identity.ReadPublicKeys(fp)
-	if err != nil || got != fp || pub.MLDSA65PK != kp.MLDSA65PK || pub.Encrypted {
+	if err != nil || got != fp || pub.MLDSA65PK != kp.MLDSA65PK {
 		t.Fatalf("readPublicKeys: %+v, %q, %v", pub, got, err)
 	}
 	if c, ok := checkSecurityKeys(); !ok || c.name != "Security keys" {
@@ -100,8 +101,8 @@ func TestSecurityKeyProtectedKeyFile(t *testing.T) {
 // unprotected key needs nothing, and --recovery-code is refused.
 func TestNoSecurityKeyNoChange(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	kp, _ := crypto.GenerateKeyPair()
-	fp, _ := crypto.Fingerprint(kp)
+	kp, _ := keys.Generate()
+	fp, _ := keys.Fingerprint(kp)
 	if err := identity.SaveKeyPair(fp, kp, ""); err != nil {
 		t.Fatal(err)
 	}
@@ -133,8 +134,8 @@ func TestCheckSecondWay(t *testing.T) {
 func TestSecurityKeyLabel(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	_, protected := protectedKeyPair(t)
-	kp, _ := crypto.GenerateKeyPair()
-	plain, _ := crypto.Fingerprint(kp)
+	kp, _ := keys.Generate()
+	plain, _ := keys.Fingerprint(kp)
 	if err := identity.SaveKeyPair(plain, kp, ""); err != nil {
 		t.Fatal(err)
 	}
@@ -146,13 +147,13 @@ func TestSecurityKeyLabel(t *testing.T) {
 		}
 	}
 	cases := []struct {
-		k    sdk.RemoteKey
+		k    sdkidentity.Key
 		want string
 	}{
-		{sdk.RemoteKey{Fingerprint: protected}, "security-key"},
-		{sdk.RemoteKey{Fingerprint: plain, SecurityKey: true}, ""}, // the key file here wins
-		{sdk.RemoteKey{Fingerprint: elsewhere, SecurityKey: true}, "security-key (reported)"},
-		{sdk.RemoteKey{Fingerprint: elsewhere}, ""},
+		{sdkidentity.Key{Fingerprint: protected}, "security-key"},
+		{sdkidentity.Key{Fingerprint: plain, SecurityKey: true}, ""}, // the key file here wins
+		{sdkidentity.Key{Fingerprint: elsewhere, SecurityKey: true}, "security-key (reported)"},
+		{sdkidentity.Key{Fingerprint: elsewhere}, ""},
 	}
 	for _, c := range cases {
 		if got := identity.RemoteLabel(c.k); got != c.want {
@@ -182,10 +183,10 @@ func TestRefreshSecurityKeyLabel(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := refreshSecurityKeyLabel(context.Background(), c, &sdk.RemoteKey{ID: "k1", Fingerprint: fp, IsPrimary: true}, fp); err != nil {
+	if err := refreshSecurityKeyLabel(context.Background(), c, &sdkidentity.Key{ID: "k1", Fingerprint: fp, IsPrimary: true}, fp); err != nil {
 		t.Fatal(err)
 	}
-	if err := refreshSecurityKeyLabel(context.Background(), c, &sdk.RemoteKey{ID: "k1", Fingerprint: fp, IsPrimary: true, SecurityKey: true}, fp); err != nil {
+	if err := refreshSecurityKeyLabel(context.Background(), c, &sdkidentity.Key{ID: "k1", Fingerprint: fp, IsPrimary: true, SecurityKey: true}, fp); err != nil {
 		t.Fatal(err)
 	}
 	want := `PUT /api/v1/identities/k1/security-key {"security_key":true}`

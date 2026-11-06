@@ -8,25 +8,25 @@ import (
 	"testing"
 	"time"
 
-	"github.com/deepsecret-io/sdk"
+	"github.com/deepsecret-io/deepsecret-go/secrets"
 )
 
 // listed builds a secret sent by sender to recipients, updated at the
 // given hour.
-func listed(id, sender string, hour int, recipients ...string) sdk.SecretInfo {
-	s := sdk.SecretInfo{
+func listed(id, sender string, hour int, recipients ...string) secrets.Info {
+	s := secrets.Info{
 		ID:          id,
 		SenderID:    sender,
 		SenderEmail: sender + "@example.com",
 		UpdatedAt:   time.Date(2026, 10, 30, hour, 0, 0, 0, time.UTC),
 	}
 	for _, r := range recipients {
-		s.Recipients = append(s.Recipients, sdk.SecretRecipient{ID: r, Email: r + "@example.com"})
+		s.Recipients = append(s.Recipients, secrets.SecretRecipient{ID: r, Email: r + "@example.com"})
 	}
 	return s
 }
 
-func ids(list []sdk.SecretInfo) []string {
+func ids(list []secrets.Info) []string {
 	out := make([]string, len(list))
 	for i, s := range list {
 		out[i] = s.ID
@@ -45,17 +45,17 @@ func TestInboxAndSentSecrets(t *testing.T) {
 
 	// The received list holds the caller's own sends while they are a
 	// recipient who has not dismissed them.
-	received := []sdk.SecretInfo{toMeAndBob, selfOnly, fromBob}
-	sent := []sdk.SecretInfo{toMeAndBob, selfOnly, toBob, dismissedSelfOnly}
+	received := []secrets.Info{toMeAndBob, selfOnly, fromBob}
+	sent := []secrets.Info{toMeAndBob, selfOnly, toBob, dismissedSelfOnly}
 
 	cases := []struct {
 		name string
-		got  []sdk.SecretInfo
+		got  []secrets.Info
 		want []string
 	}{
 		{"inbox", inboxSecrets(received, sent, ""), []string{"to-me-and-bob", "self-only", "from-bob", "dismissed-self-only"}},
-		{"inbox from bob", inboxSecrets([]sdk.SecretInfo{fromBob}, sent, "bob@example.com"), []string{"from-bob"}},
-		{"inbox from me", inboxSecrets([]sdk.SecretInfo{toMeAndBob, selfOnly}, sent, "ME@example.com"), []string{"to-me-and-bob", "self-only", "dismissed-self-only"}},
+		{"inbox from bob", inboxSecrets([]secrets.Info{fromBob}, sent, "bob@example.com"), []string{"from-bob"}},
+		{"inbox from me", inboxSecrets([]secrets.Info{toMeAndBob, selfOnly}, sent, "ME@example.com"), []string{"to-me-and-bob", "self-only", "dismissed-self-only"}},
 		{"inbox empty", inboxSecrets(nil, nil, ""), []string{}},
 		{"sent", sentSecrets(sent), []string{"to-me-and-bob", "to-bob"}},
 	}

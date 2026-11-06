@@ -11,9 +11,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/deepsecret-io/sdk"
-	"github.com/deepsecret-io/sdk/api"
-	"github.com/deepsecret-io/sdk/crypto"
+	deepsecret "github.com/deepsecret-io/deepsecret-go"
+	sdkidentity "github.com/deepsecret-io/deepsecret-go/identity"
+	"github.com/deepsecret-io/deepsecret-go/keys"
+	"github.com/deepsecret-io/deepsecret-go/keystore"
 	"github.com/spf13/cobra"
 
 	"github.com/deepsecret-io/cli/internal/auth"
@@ -81,14 +82,14 @@ func newIdentityGenerateCmd() *cobra.Command {
 			// first, with a request, so a missing or revoked login fails
 			// before any PIN or touch and does not leave a key pair saved but
 			// not registered.
-			var c *sdk.Client
+			var c *deepsecret.Client
 			if !local {
 				const localHint = "To keep the key pair on this device only, without registering it:\n  secret identity generate --local"
 				var err error
 				if c, err = auth.NewAuthenticatedClient(); err != nil {
 					return errs.WithDetail(err, strings.TrimSpace(errs.JoinDetail("", err)+"\n\n"+localHint))
 				}
-				if _, err := c.ListRemoteKeys(cmd.Context()); err != nil {
+				if _, err := c.Identity.ListKeys(cmd.Context()); err != nil {
 					err = fmt.Errorf("could not reach your account to register the key pair: %w", errs.APICause(err))
 					return errs.WithDetail(err, strings.TrimSpace(errs.JoinDetail("", err)+"\n\n"+localHint))
 				}
@@ -105,7 +106,7 @@ func newIdentityGenerateCmd() *cobra.Command {
 				}
 			}
 
-			var kp *crypto.KeyPair
+			var kp *keys.Pair
 			var fp string
 			steps := []ui.Step{
 				{
@@ -113,16 +114,16 @@ func newIdentityGenerateCmd() *cobra.Command {
 					Done:  "Key pair generated",
 					Action: func() (string, error) {
 						var err error
-						if kp, err = crypto.GenerateKeyPair(); err != nil {
+						if kp, err = keys.Generate(); err != nil {
 							return "", fmt.Errorf("could not generate a key pair: %w", err)
 						}
-						if fp, err = crypto.Fingerprint(kp); err != nil {
+						if fp, err = keys.Fingerprint(kp); err != nil {
 							return "", fmt.Errorf("could not compute the key pair's fingerprint: %w", err)
 						}
 						if identity.Exists(fp) {
 							return "", fmt.Errorf("a key pair with fingerprint %s already exists", fp)
 						}
-						return "fingerprint=" + crypto.ShortFingerprint(fp), nil
+						return "fingerprint=" + keys.ShortFingerprint(fp), nil
 					},
 				},
 				{
@@ -132,7 +133,7 @@ func newIdentityGenerateCmd() *cobra.Command {
 						if err := identity.SaveKeyPair(fp, kp, password); err != nil {
 							return "", fmt.Errorf("could not save the key pair: %w", err)
 						}
-						api.Module(logging.Log, "identity").Info("key pair generated", "fingerprint", fp, "encrypted", usePassword)
+						logging.Module(logging.Log, "identity").Info("key pair generated", "fingerprint", fp, "encrypted", usePassword)
 						if usePassword {
 							return "encrypted=true", nil
 						}
@@ -218,35 +219,35 @@ func newIdentityGenerateCmd() *cobra.Command {
 // registerKeyPair signs the public keys of kp, whose fingerprint is fp,
 // and registers them on the server, as a step does, labelled as protected
 // by a security key when its key file on this device is.
-func registerKeyPair(ctx context.Context, c *sdk.Client, kp *crypto.KeyPair, fp string) (string, error) {
-	if err := c.SyncIdentity(ctx, kp, identity.Protection(fp) == crypto.ProtectionSecurityKey); err != nil {
+func registerKeyPair(ctx context.Context, c *deepsecret.Client, kp *keys.Pair, fp string) (string, error) {
+	if err := c.Identity.Sync(ctx, kp, identity.Protection(fp) == keystore.ProtectionSecurityKey); err != nil {
 		return "", fmt.Errorf("could not upload the public keys: %w", errs.APICause(err))
 	}
-	api.Module(logging.Log, "identity").Info("key registered", "fingerprint", fp)
-	return "fingerprint=" + crypto.ShortFingerprint(fp), nil
+	logging.Module(logging.Log, "identity").Info("key registered", "fingerprint", fp)
+	return "fingerprint=" + keys.ShortFingerprint(fp), nil
 }
 
 // setPrimaryStep makes the registered key whose fingerprint is *fp the
 // primary key. fp is read when the step runs, once the steps before it
 // set it.
-func setPrimaryStep(ctx context.Context, c *sdk.Client, fp *string) ui.Step {
+func setPrimaryStep(ctx context.Context, c *deepsecret.Client, fp *string) ui.Step {
 	return ui.Step{
 		Label: "Setting it as your primary key",
 		Done:  "Primary key set",
 		Action: func() (string, error) {
-			keys, err := c.ListRemoteKeys(ctx)
+			keyList, err := c.Identity.ListKeys(ctx)
 			if err != nil {
 				return "", fmt.Errorf("could not list your registered keys: %w", errs.APICause(err))
 			}
-			k := identity.Registered(keys, *fp)
+			k := identity.Registered(keyList, *fp)
 			if k == nil {
-				return "", fmt.Errorf("the server does not list key %s, uploaded just before", crypto.ShortFingerprint(*fp))
+				return "", fmt.Errorf("the server does not list key %s, uploaded just before", keys.ShortFingerprint(*fp))
 			}
-			if err := c.SetPrimaryKey(ctx, k.ID); err != nil {
+			if err := c.Identity.SetPrimaryKey(ctx, k.ID); err != nil {
 				return "", fmt.Errorf("could not set the primary key: %w", errs.APICause(err))
 			}
-			api.Module(logging.Log, "identity").Info("primary key set", "fingerprint", *fp, "key_id", k.ID)
-			return "fingerprint=" + crypto.ShortFingerprint(*fp), nil
+			logging.Module(logging.Log, "identity").Info("primary key set", "fingerprint", *fp, "key_id", k.ID)
+			return "fingerprint=" + keys.ShortFingerprint(*fp), nil
 		},
 	}
 }
@@ -297,10 +298,10 @@ func listLocalKeys(ctx context.Context) error {
 			unreadable = append(unreadable, fmt.Sprintf("%s.json: %v", console.Safe(n), err))
 			continue
 		}
-		tags := keyTags(identity.Protection(n) == crypto.ProtectionSecurityKey, identity.IsEncrypted(n), identity.Registered(remote, fp), remoteErr == nil)
+		tags := keyTags(identity.Protection(n) == keystore.ProtectionSecurityKey, identity.IsEncrypted(n), identity.Registered(remote, fp), remoteErr == nil)
 		rows = append(rows, row{fp, tags})
 	}
-	api.Module(logging.Log, "identity").Debug("key pairs listed", "local", len(rows), "unreadable", len(unreadable), "registered", len(remote))
+	logging.Module(logging.Log, "identity").Debug("key pairs listed", "local", len(rows), "unreadable", len(unreadable), "registered", len(remote))
 
 	ui.Header(fmt.Sprintf("Key pairs (%d)", len(rows)))
 	fmt.Fprintln(os.Stderr)
@@ -328,7 +329,7 @@ func listLocalKeys(ctx context.Context) error {
 // encrypted, and whether it is registered, as registered (nil when it is
 // not), and the primary key. checked says the server was asked; without it,
 // whether the key pair is registered is not known.
-func keyTags(securityKey, encrypted bool, registered *sdk.RemoteKey, checked bool) []string {
+func keyTags(securityKey, encrypted bool, registered *sdkidentity.Key, checked bool) []string {
 	var tags []string
 	if securityKey {
 		tags = append(tags, "security-key")
@@ -349,20 +350,20 @@ func keyTags(securityKey, encrypted bool, registered *sdk.RemoteKey, checked boo
 }
 
 func listRemoteKeys(ctx context.Context) error {
-	keys, err := identity.FetchRegistered(ctx)
+	keyList, err := identity.FetchRegistered(ctx)
 	if err != nil {
 		return err
 	}
-	api.Module(logging.Log, "identity").Debug("registered keys listed", "count", len(keys))
+	logging.Module(logging.Log, "identity").Debug("registered keys listed", "count", len(keyList))
 
-	if len(keys) == 0 {
+	if len(keyList) == 0 {
 		ui.Dimmed("No keys are registered. Register one with: secret identity sync")
 		return nil
 	}
 
-	ui.Header(fmt.Sprintf("Registered keys (%d)", len(keys)))
+	ui.Header(fmt.Sprintf("Registered keys (%d)", len(keyList)))
 	fmt.Fprintln(os.Stderr)
-	for _, k := range keys {
+	for _, k := range keyList {
 		var tags []string
 		if k.IsPrimary {
 			tags = append(tags, "primary")
@@ -394,7 +395,7 @@ func newIdentitySyncCmd() *cobra.Command {
 				return err
 			}
 
-			var remote []sdk.RemoteKey
+			var remote []sdkidentity.Key
 			if err := ui.RunPipeline(cmd.Context(), "identity", []ui.Step{registeredKeysStep(listRemoteKeysOf(cmd.Context(), c), &remote)}); err != nil {
 				return err
 			}
@@ -412,14 +413,14 @@ func newIdentitySyncCmd() *cobra.Command {
 			}
 			kp, err := identity.LoadKeyPair(cmd.Context(), name)
 			if err != nil {
-				return fmt.Errorf("could not load key pair %s: %w", crypto.ShortFingerprint(name), err)
+				return fmt.Errorf("could not load key pair %s: %w", keys.ShortFingerprint(name), err)
 			}
-			fp, err := crypto.Fingerprint(kp)
+			fp, err := keys.Fingerprint(kp)
 			if err != nil {
-				return fmt.Errorf("could not compute the fingerprint of key pair %s: %w", crypto.ShortFingerprint(name), err)
+				return fmt.Errorf("could not compute the fingerprint of key pair %s: %w", keys.ShortFingerprint(name), err)
 			}
 			if identity.Registered(remote, fp) != nil {
-				return errs.WithDetail(fmt.Errorf("key pair %s is already registered", crypto.ShortFingerprint(fp)),
+				return errs.WithDetail(fmt.Errorf("key pair %s is already registered", keys.ShortFingerprint(fp)),
 					"To make it your primary key: secret identity set-primary "+fp)
 			}
 
@@ -450,7 +451,7 @@ func newIdentitySyncCmd() *cobra.Command {
 // keyToSync picks the key pair identity sync registers: the one
 // --identity names, else the only one on this device that remote, the
 // registered keys, does not list.
-func keyToSync(identityFP string, remote []sdk.RemoteKey) (string, error) {
+func keyToSync(identityFP string, remote []sdkidentity.Key) (string, error) {
 	if identityFP != "" {
 		return identity.ResolveName(identityFP)
 	}
@@ -496,20 +497,20 @@ func newIdentityShowCmd() *cobra.Command {
 			}
 			kp, fp, err := identity.ReadPublicKeys(name)
 			if err != nil {
-				return fmt.Errorf("could not read key pair %s: %w", crypto.ShortFingerprint(name), err)
+				return fmt.Errorf("could not read key pair %s: %w", keys.ShortFingerprint(name), err)
 			}
 
 			var notes []string
 			if identity.IsEncrypted(name) {
 				notes = append(notes, "encrypted")
 			}
-			if identity.Protection(name) == crypto.ProtectionSecurityKey {
+			if identity.Protection(name) == keystore.ProtectionSecurityKey {
 				notes = append(notes, "security-key")
 			}
 			if primary {
 				notes = append(notes, "primary")
 			}
-			title := "Key pair " + crypto.ShortFingerprint(fp)
+			title := "Key pair " + keys.ShortFingerprint(fp)
 			if len(notes) > 0 {
 				title += " (" + strings.Join(notes, ", ") + ")"
 			}
@@ -556,7 +557,7 @@ func keyToShow(ctx context.Context, identityFP string) (name string, primary boo
 	if name := identity.PrimaryLocal(ctx, names); name != "" {
 		return name, true, nil
 	}
-	ui.Warning(fmt.Sprintf("Showing key pair %s, the first of %d", console.Safe(crypto.ShortFingerprint(names[0])), len(names)),
+	ui.Warning(fmt.Sprintf("Showing key pair %s, the first of %d", console.Safe(keys.ShortFingerprint(names[0])), len(names)),
 		"None of the key pairs on this device is known to be your primary key. Choose one with -i; list them with: secret identity list")
 	return names[0], false, nil
 }
@@ -584,24 +585,24 @@ func newIdentitySetPrimaryCmd() *cobra.Command {
 				return err
 			}
 
-			var target sdk.RemoteKey
+			var target sdkidentity.Key
 			steps := []ui.Step{
 				{
 					Label: "Fetching your registered keys",
 					Done:  "Registered keys fetched",
 					Action: func() (string, error) {
-						keys, err := c.ListRemoteKeys(cmd.Context())
+						keyList, err := c.Identity.ListKeys(cmd.Context())
 						if err != nil {
 							return "", fmt.Errorf("could not list your registered keys: %w", errs.APICause(err))
 						}
-						var matches []sdk.RemoteKey
-						for _, k := range keys {
+						var matches []sdkidentity.Key
+						for _, k := range keyList {
 							if fingerprint.Match(k.Fingerprint, prefix) {
 								matches = append(matches, k)
 							}
 						}
 						switch {
-						case len(keys) == 0:
+						case len(keyList) == 0:
 							return "", errs.WithDetail(errors.New("no keys are registered"), "Register one with: secret identity sync")
 						case len(matches) == 0:
 							return "", errs.WithDetail(fmt.Errorf("no registered key matches %s", prefix), "List them with: secret identity list --remote")
@@ -609,18 +610,18 @@ func newIdentitySetPrimaryCmd() *cobra.Command {
 							return "", errs.WithDetail(fmt.Errorf("%s matches %d registered keys", prefix, len(matches)), "Give more of the fingerprint.")
 						}
 						target = matches[0]
-						return fmt.Sprintf("keys=%d", len(keys)), nil
+						return fmt.Sprintf("keys=%d", len(keyList)), nil
 					},
 				},
 				{
 					Label: "Setting your primary key",
 					Done:  "Primary key set",
 					Action: func() (string, error) {
-						if err := c.SetPrimaryKey(cmd.Context(), target.ID); err != nil {
+						if err := c.Identity.SetPrimaryKey(cmd.Context(), target.ID); err != nil {
 							return "", fmt.Errorf("could not set the primary key: %w", errs.APICause(err))
 						}
-						api.Module(logging.Log, "identity").Info("primary key set", "fingerprint", target.Fingerprint, "key_id", target.ID)
-						return "fingerprint=" + crypto.ShortFingerprint(target.Fingerprint), nil
+						logging.Module(logging.Log, "identity").Info("primary key set", "fingerprint", target.Fingerprint, "key_id", target.ID)
+						return "fingerprint=" + keys.ShortFingerprint(target.Fingerprint), nil
 					},
 				},
 			}

@@ -8,15 +8,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/deepsecret-io/sdk"
+	"github.com/deepsecret-io/deepsecret-go/secrets"
+	"github.com/deepsecret-io/deepsecret-go/trust"
 
 	"github.com/deepsecret-io/cli/internal/fingerprint"
 )
 
 func TestRecipientsSummary(t *testing.T) {
-	rs := []sdk.SecretRecipient{{Email: "alice@example.com"}, {Email: "bob@example.com"}, {Email: "carol@example.com"}}
+	rs := []secrets.SecretRecipient{{Email: "alice@example.com"}, {Email: "bob@example.com"}, {Email: "carol@example.com"}}
 	cases := map[string]struct {
-		in   []sdk.SecretRecipient
+		in   []secrets.SecretRecipient
 		want string
 	}{
 		"none":  {nil, "-"},
@@ -93,20 +94,20 @@ func TestKnownKeyStatus(t *testing.T) {
 	if got := knownKeyStatus(fullFP, nil); !strings.HasPrefix(got, "not known yet") {
 		t.Errorf("unknown: %q", got)
 	}
-	if got := knownKeyStatus(fullFP, []sdk.KnownKey{{Fingerprint: fullFP, State: sdk.KeyVerified, FirstSeen: seen}}); !strings.HasPrefix(got, "verified, since ") {
+	if got := knownKeyStatus(fullFP, []trust.KnownKey{{Fingerprint: fullFP, State: trust.Verified, FirstSeen: seen}}); !strings.HasPrefix(got, "verified, since ") {
 		t.Errorf("known: %q", got)
 	}
-	if got := knownKeyStatus(fullFP, []sdk.KnownKey{{Fingerprint: other, State: sdk.KeyFirstUse, FirstSeen: seen}}); !strings.Contains(got, "changed") || !strings.HasSuffix(got, " from "+other[:16]) {
+	if got := knownKeyStatus(fullFP, []trust.KnownKey{{Fingerprint: other, State: trust.FirstUse, FirstSeen: seen}}); !strings.Contains(got, "changed") || !strings.HasSuffix(got, " from "+other[:16]) {
 		t.Errorf("changed: %q", got)
 	}
-	replaced := []sdk.KnownKey{
-		{Fingerprint: fullFP, State: sdk.KeyVerified, FirstSeen: seen, Replaced: true},
-		{Fingerprint: other, State: sdk.KeyAccepted, FirstSeen: seen},
+	replaced := []trust.KnownKey{
+		{Fingerprint: fullFP, State: trust.Verified, FirstSeen: seen, Replaced: true},
+		{Fingerprint: other, State: trust.Accepted, FirstSeen: seen},
 	}
 	if got := knownKeyStatus(fullFP, replaced); !strings.Contains(got, "replaced") || !strings.HasSuffix(got, " by "+other[:16]) {
 		t.Errorf("replaced: %q", got)
 	}
-	if got := knownKeyStatus(fullFP, []sdk.KnownKey{{Fingerprint: fullFP, State: sdk.KeyOwn, FirstSeen: seen}}); !strings.HasPrefix(got, "yours, since ") {
+	if got := knownKeyStatus(fullFP, []trust.KnownKey{{Fingerprint: fullFP, State: trust.Own, FirstSeen: seen}}); !strings.HasPrefix(got, "yours, since ") {
 		t.Errorf("own: %q", got)
 	}
 }

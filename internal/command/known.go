@@ -10,9 +10,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/deepsecret-io/sdk"
-	"github.com/deepsecret-io/sdk/api"
-	"github.com/deepsecret-io/sdk/crypto"
+	"github.com/deepsecret-io/deepsecret-go/keys"
+	"github.com/deepsecret-io/deepsecret-go/secrets"
+	"github.com/deepsecret-io/deepsecret-go/trust"
 	"github.com/spf13/cobra"
 
 	"github.com/deepsecret-io/cli/internal/auth"
@@ -58,27 +58,27 @@ an email, also show the safety number with them for each key sends go to.`,
 			if len(args) == 1 {
 				email = args[0]
 			}
-			keys, err := c.KnownKeys(email)
+			keyList, err := c.Trust.List(email)
 			if err != nil {
 				return err
 			}
-			if len(keys) == 0 {
+			if len(keyList) == 0 {
 				ui.Dimmed("No known keys yet. The first secret to or from someone accepts their key.")
 				return nil
 			}
-			ui.Header(fmt.Sprintf("Known keys (%d)", len(keys)))
+			ui.Header(fmt.Sprintf("Known keys (%d)", len(keyList)))
 			fmt.Fprintln(os.Stderr)
-			for _, k := range keys {
+			for _, k := range keyList {
 				state := keyStateLabel(k.State)
 				if k.Replaced {
 					state += ", replaced"
 				}
-				fmt.Printf("  %-32s  %s  %-20s  %s\n", console.Safe(k.Email), console.Safe(crypto.ShortFingerprint(k.Fingerprint)),
+				fmt.Printf("  %-32s  %s  %-20s  %s\n", console.Safe(k.Email), console.Safe(keys.ShortFingerprint(k.Fingerprint)),
 					state, k.FirstSeen.Local().Format("2006-01-02"))
 			}
 			fmt.Fprintln(os.Stderr)
 			if email != "" {
-				printKnownSafetyNumbers(cmd.Context(), email, keys)
+				printKnownSafetyNumbers(cmd.Context(), email, keyList)
 			}
 			return nil
 		},
@@ -116,19 +116,19 @@ if this device did not know it.`,
 			}
 			email := args[0]
 			if len(args) == 2 {
-				if err := c.VerifyKey(cmd.Context(), email, args[1]); err != nil {
+				if err := c.Trust.Verify(cmd.Context(), email, args[1]); err != nil {
 					return err
 				}
-				api.Module(logging.Log, "identity").Info("key verified", "email", email, "fingerprint", args[1])
-				ui.Success(fmt.Sprintf("Marked key %s of %s as verified.", crypto.ShortFingerprint(args[1]), email))
+				logging.Module(logging.Log, "identity").Info("key verified", "email", email, "fingerprint", args[1])
+				ui.Success(fmt.Sprintf("Marked key %s of %s as verified.", keys.ShortFingerprint(args[1]), email))
 				return nil
 			}
 
-			current, err := c.ServerListedKeys(cmd.Context(), email)
+			current, err := c.Trust.ServerListedKeys(cmd.Context(), email)
 			if err != nil {
 				return err
 			}
-			known, err := c.KnownKeys(email)
+			known, err := c.Trust.List(email)
 			if err != nil {
 				return err
 			}
@@ -164,11 +164,11 @@ check secrets they signed.`,
 			if err != nil {
 				return err
 			}
-			if err := c.AcceptKey(cmd.Context(), args[0], args[1]); err != nil {
+			if err := c.Trust.Accept(cmd.Context(), args[0], args[1]); err != nil {
 				return err
 			}
-			api.Module(logging.Log, "identity").Info("key accepted", "email", args[0], "fingerprint", args[1])
-			ui.Success(fmt.Sprintf("Accepted key %s for %s.", crypto.ShortFingerprint(args[1]), args[0]))
+			logging.Module(logging.Log, "identity").Info("key accepted", "email", args[0], "fingerprint", args[1])
+			ui.Success(fmt.Sprintf("Accepted key %s for %s.", keys.ShortFingerprint(args[1]), args[0]))
 			return nil
 		},
 	}
@@ -202,7 +202,7 @@ use again. For one of your own accounts, it forgets that it is yours.`,
 			if len(args) == 2 {
 				fp = args[1]
 			}
-			n, err := c.ForgetKey(args[0], fp)
+			n, err := c.Trust.Forget(args[0], fp)
 			if err != nil {
 				return err
 			}
@@ -210,7 +210,7 @@ use again. For one of your own accounts, it forgets that it is yours.`,
 				ui.Dimmed(fmt.Sprintf("This device knows no key to forget for %s.", args[0]))
 				return nil
 			}
-			api.Module(logging.Log, "identity").Info("keys forgotten", "email", args[0], "fingerprint", fp, "count", n)
+			logging.Module(logging.Log, "identity").Info("keys forgotten", "email", args[0], "fingerprint", fp, "count", n)
 			ui.Success(fmt.Sprintf("Forgot %d key%s of %s.", n, ui.PluralS(n), args[0]))
 			return nil
 		},
@@ -221,7 +221,7 @@ use again. For one of your own accounts, it forgets that it is yours.`,
 // your primary key, and fp, the key the server lists for email, then that
 // key's fingerprint and what this device knows of it. Without own (ownErr
 // says why), the fingerprint alone is there to compare.
-func printKeyCheck(email, fp string, known []sdk.KnownKey, own string, ownErr error) {
+func printKeyCheck(email, fp string, known []trust.KnownKey, own string, ownErr error) {
 	email = console.Safe(email)
 	rows, err := []string(nil), ownErr
 	if err == nil {
@@ -252,7 +252,7 @@ func printKeyCheck(email, fp string, known []sdk.KnownKey, own string, ownErr er
 
 // checkEmailArg checks an email given as an argument.
 func checkEmailArg(email string) error {
-	return sdk.ValidateRecipients([]string{email})
+	return secrets.ValidateRecipients([]string{email})
 }
 
 // checkFullFingerprintArg checks args[i], a full fingerprint, and leaves it
@@ -260,22 +260,22 @@ func checkEmailArg(email string) error {
 // exactly one.
 func checkFullFingerprintArg(args []string, i int) error {
 	fp, err := fingerprint.Check(args[i])
-	if err != nil || len(fp) != crypto.FingerprintLen {
+	if err != nil || len(fp) != keys.FingerprintLen {
 		return fmt.Errorf("invalid fingerprint %q: give the full 64-character fingerprint", args[i])
 	}
 	args[i] = fp
 	return nil
 }
 
-func keyStateLabel(s sdk.KeyState) string {
+func keyStateLabel(s trust.State) string {
 	switch s {
-	case sdk.KeyFirstUse:
+	case trust.FirstUse:
 		return "first use"
-	case sdk.KeyAccepted:
+	case trust.Accepted:
 		return "accepted"
-	case sdk.KeyVerified:
+	case trust.Verified:
 		return "verified"
-	case sdk.KeyOwn:
+	case trust.Own:
 		return "yours"
 	}
 	return console.Safe(string(s))
@@ -283,15 +283,15 @@ func keyStateLabel(s sdk.KeyState) string {
 
 // knownKeyStatus says what this device knows of fp, the key the server
 // lists for someone whose accepted keys are known.
-func knownKeyStatus(fp string, known []sdk.KnownKey) string {
+func knownKeyStatus(fp string, known []trust.KnownKey) string {
 	if len(known) == 0 {
 		return "not known yet: the first secret to or from them accepts it"
 	}
 	var current, all []string
 	for _, k := range known {
-		all = append(all, crypto.ShortFingerprint(k.Fingerprint))
+		all = append(all, keys.ShortFingerprint(k.Fingerprint))
 		if !k.Replaced {
-			current = append(current, crypto.ShortFingerprint(k.Fingerprint))
+			current = append(current, keys.ShortFingerprint(k.Fingerprint))
 		}
 	}
 	if len(current) == 0 {
@@ -311,11 +311,11 @@ func knownKeyStatus(fp string, known []sdk.KnownKey) string {
 
 // printFirstUse notes, under a result block, keys accepted on first use:
 // nothing yet shows they are their owners', so they are worth comparing.
-func printFirstUse(people []sdk.Recipient) {
+func printFirstUse(people []secrets.Recipient) {
 	for _, p := range people {
 		email := console.Safe(p.Email)
 		ui.Dimmed(fmt.Sprintf("First secret with %s on this device: their key %s is now the one expected. Compare the safety number with them: secret identity verify %s",
-			email, console.Safe(crypto.ShortFingerprint(p.Fingerprint)), email))
+			email, console.Safe(keys.ShortFingerprint(p.Fingerprint)), email))
 	}
 	if len(people) > 0 {
 		fmt.Fprintln(os.Stderr)
@@ -343,7 +343,7 @@ func describeFailure(ctx context.Context, err error) (summary, detail string) {
 // number of it and the new key, with the new key's fingerprint under it;
 // without, the fingerprint alone. It is "" for any other error.
 func keyChangedDetail(ctx context.Context, err error) string {
-	var changed *sdk.KeyChangedError
+	var changed *trust.KeyChangedError
 	if !errors.As(err, &changed) {
 		return ""
 	}

@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/deepsecret-io/sdk"
+	"github.com/deepsecret-io/deepsecret-go/trust"
 
 	"github.com/deepsecret-io/cli/internal/testutil"
 )
@@ -37,7 +37,7 @@ func stubOwnKey(t *testing.T, fp string, err error) {
 // under it.
 func TestKeyChangedDetailSafetyNumber(t *testing.T) {
 	stubOwnKey(t, zeroFP, nil)
-	err := fmt.Errorf("check recipients: %w", &sdk.KeyChangedError{Email: "bob@example.com", Known: []string{fullFP}, Got: ffFP})
+	err := fmt.Errorf("check recipients: %w", &trust.KeyChangedError{Email: "bob@example.com", Known: []string{fullFP}, Got: ffFP})
 	_, detail := describeFailure(context.Background(), err)
 	for _, want := range []string{
 		"Compare the safety number with bob@example.com",
@@ -57,7 +57,7 @@ func TestKeyChangedDetailSafetyNumber(t *testing.T) {
 // shows the fingerprint alone.
 func TestPrintKeyCheck(t *testing.T) {
 	seen := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
-	known := []sdk.KnownKey{{Email: "bob@example.com", Fingerprint: ffFP, State: sdk.KeyFirstUse, FirstSeen: seen}}
+	known := []trust.KnownKey{{Email: "bob@example.com", Fingerprint: ffFP, State: trust.FirstUse, FirstSeen: seen}}
 
 	out := testutil.StderrOf(t, func() { printKeyCheck("bob@example.com", ffFP, known, zeroFP, nil) })
 	for _, want := range append([]string{
@@ -94,9 +94,9 @@ func TestPrintKeyCheck(t *testing.T) {
 // to, not for a replaced key or one of your own.
 func TestPrintKnownSafetyNumbers(t *testing.T) {
 	stubOwnKey(t, zeroFP, nil)
-	keys := []sdk.KnownKey{
-		{Email: "bob@example.com", Fingerprint: fullFP, State: sdk.KeyVerified, Replaced: true},
-		{Email: "bob@example.com", Fingerprint: ffFP, State: sdk.KeyAccepted},
+	keys := []trust.KnownKey{
+		{Email: "bob@example.com", Fingerprint: fullFP, State: trust.Verified, Replaced: true},
+		{Email: "bob@example.com", Fingerprint: ffFP, State: trust.Accepted},
 	}
 	out := testutil.StderrOf(t, func() { printKnownSafetyNumbers(context.Background(), "bob@example.com", keys) })
 	if !strings.Contains(out, "Safety number with bob@example.com, key ffffffffffffffff:") || !strings.Contains(out, zeroFFRows[2]) {
@@ -106,7 +106,7 @@ func TestPrintKnownSafetyNumbers(t *testing.T) {
 		t.Errorf("a replaced key got a number: %q", out)
 	}
 
-	own := []sdk.KnownKey{{Email: "me@example.com", Fingerprint: zeroFP, State: sdk.KeyOwn}}
+	own := []trust.KnownKey{{Email: "me@example.com", Fingerprint: zeroFP, State: trust.Own}}
 	if out := testutil.StderrOf(t, func() { printKnownSafetyNumbers(context.Background(), "me@example.com", own) }); out != "" {
 		t.Errorf("your own account: %q", out)
 	}

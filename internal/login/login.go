@@ -23,8 +23,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/deepsecret-io/sdk/api"
-
 	"github.com/deepsecret-io/cli/internal/auth"
 	"github.com/deepsecret-io/cli/internal/config"
 	"github.com/deepsecret-io/cli/internal/errs"
@@ -83,7 +81,7 @@ func Revoke(ctx context.Context, apiBase, token string) error {
 // Browser signs the user in through their browser and saves the login token.
 func Browser(ctx context.Context) error {
 	apiBase := config.APIBaseURL
-	log := api.Module(logging.Log, "auth")
+	log := logging.Module(logging.Log, "auth")
 
 	// Generate state for CSRF protection
 	stateBytes := make([]byte, 32)
@@ -351,7 +349,7 @@ func fetchEmailForToken(ctx context.Context, apiBase, token string) (string, err
 	if err != nil {
 		return "", err
 	}
-	info, err := c.WhoAmI(ctx)
+	info, err := c.Identity.WhoAmI(ctx)
 	if err != nil {
 		return "", err
 	}

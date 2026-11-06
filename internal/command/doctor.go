@@ -12,10 +12,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/deepsecret-io/sdk"
-	"github.com/deepsecret-io/sdk/api"
-	"github.com/deepsecret-io/sdk/crypto"
-	"github.com/deepsecret-io/sdk/fido2"
+	deepsecret "github.com/deepsecret-io/deepsecret-go"
+	"github.com/deepsecret-io/deepsecret-go/apierror"
+	"github.com/deepsecret-io/deepsecret-go/fido2"
+	"github.com/deepsecret-io/deepsecret-go/keys"
+	"github.com/deepsecret-io/deepsecret-go/keystore"
 	"github.com/spf13/cobra"
 
 	"github.com/deepsecret-io/cli/internal/auth"
@@ -122,25 +123,25 @@ func checkAuth(ctx context.Context) []checkResult {
 	if tf, err := config.LoadTokenFile(); err == nil && tf.Token != "" {
 		session = tf
 	}
-	var keys []credential
+	var keyList []credential
 	if auth.FlagKey != "" {
 		fix := "give a valid key with " + auth.FlagKeyOrigin
 		if auth.FlagKeyOrigin == "DS_API_KEY" {
 			fix = "unset DS_API_KEY, or set it to a valid key"
 		}
-		keys = append(keys, credential{"API key (" + auth.FlagKeyOrigin + ")", auth.FlagKey, fix})
+		keyList = append(keyList, credential{"API key (" + auth.FlagKeyOrigin + ")", auth.FlagKey, fix})
 	}
 	if cfg, err := config.Load(); err == nil && cfg.APIKey != "" && cfg.APIKey != auth.FlagKey {
-		keys = append(keys, credential{"API key (saved)", cfg.APIKey, "secret config --save-api-key --api-key-stdin"})
+		keyList = append(keyList, credential{"API key (saved)", cfg.APIKey, "secret config --save-api-key --api-key-stdin"})
 	}
 	verify := func(key string) error { return verifyCredential(ctx, key) }
-	return authChecks(session, keys, verify, time.Now())
+	return authChecks(session, keyList, verify, time.Now())
 }
 
 // verifyCredential asks the server whose key is. A login token gets a
 // client that saves the token it renews: a renewal revokes the stored one.
 func verifyCredential(ctx context.Context, key string) error {
-	var c *sdk.Client
+	var c *deepsecret.Client
 	var err error
 	if token, ok := strings.CutPrefix(key, "bearer:"); ok {
 		c, err = auth.NewSessionClient(token)
@@ -150,19 +151,19 @@ func verifyCredential(ctx context.Context, key string) error {
 	if err != nil {
 		return err
 	}
-	_, err = c.WhoAmI(ctx)
+	_, err = c.Identity.WhoAmI(ctx)
 	return err
 }
 
 // authChecks checks the login session (nil when there is none) and the
 // API keys, verify asking the server about each. One working credential
 // is enough, so none is missing unless all are.
-func authChecks(session *config.TokenFile, keys []credential, verify func(key string) error, now time.Time) []checkResult {
+func authChecks(session *config.TokenFile, keyList []credential, verify func(key string) error, now time.Time) []checkResult {
 	var results []checkResult
 	if session != nil {
 		results = append(results, checkLogin(session, verify, now))
 	}
-	for _, k := range keys {
+	for _, k := range keyList {
 		r := checkResult{name: k.name, ok: true, detail: "verified"}
 		if err := verify(k.key); err != nil {
 			var rejected bool
@@ -206,7 +207,7 @@ func checkLogin(tf *config.TokenFile, verify func(key string) error, now time.Ti
 // verifyFailure says why a credential did not verify, and whether the
 // server refused it, rather than not being reached.
 func verifyFailure(err error) (detail string, rejected bool) {
-	if errors.Is(err, api.ErrUnauthorized) || errors.Is(err, api.ErrForbidden) {
+	if errors.Is(err, apierror.ErrUnauthorized) || errors.Is(err, apierror.ErrForbidden) {
 		return "rejected by the server", true
 	}
 	return "could not be checked: " + errs.APICause(err).Error(), false
@@ -223,16 +224,16 @@ func checkLocalKeys() []checkResult {
 
 	var results []checkResult
 	for _, n := range names {
-		kp, fp, err := identity.ReadPublicKeys(n)
+		_, fp, err := identity.ReadPublicKeys(n)
 		if err != nil {
 			results = append(results, checkResult{name: "Key pair", detail: n + ".json: " + err.Error()})
 			continue
 		}
-		detail := crypto.ShortFingerprint(fp)
-		if kp.Encrypted {
+		detail := keys.ShortFingerprint(fp)
+		if identity.Protection(n) == keystore.ProtectionPassword {
 			detail += " (encrypted)"
 		}
-		if identity.Protection(n) == crypto.ProtectionSecurityKey {
+		if identity.Protection(n) == keystore.ProtectionSecurityKey {
 			detail += " (security key)"
 		}
 		results = append(results, checkResult{name: "Key pair", ok: true, detail: detail})
@@ -248,7 +249,7 @@ func checkSecurityKeys() (checkResult, bool) {
 	names, _ := identity.List()
 	protected := 0
 	for _, n := range names {
-		if identity.Protection(n) == crypto.ProtectionSecurityKey {
+		if identity.Protection(n) == keystore.ProtectionSecurityKey {
 			protected++
 		}
 	}
@@ -261,7 +262,7 @@ func checkSecurityKeys() (checkResult, bool) {
 		if runtime.GOOS == "linux" {
 			fix = "apt install libfido2-1 (Debian, Ubuntu) or dnf install libfido2 (Fedora)"
 		}
-		if errors.Is(err, crypto.ErrNoSecurityKeySupport) && !strings.Contains(err.Error(), "libfido2") {
+		if errors.Is(err, keystore.ErrNoSecurityKeySupport) && !strings.Contains(err.Error(), "libfido2") {
 			fix = "use a release of the CLI built with security key support"
 		}
 		return checkResult{name: "Security keys", detail: err.Error(), fix: fix}, true
@@ -307,7 +308,7 @@ func checkRemoteSync(ctx context.Context) []checkResult {
 	}
 	var results []checkResult
 	for _, k := range remote {
-		short := crypto.ShortFingerprint(k.Fingerprint)
+		short := keys.ShortFingerprint(k.Fingerprint)
 		switch {
 		case k.IsPrimary && here(k.Fingerprint):
 			results = append(results, checkResult{name: "Primary key", ok: true, detail: short + " is on this device"})
@@ -325,7 +326,7 @@ func checkRemoteSync(ctx context.Context) []checkResult {
 		if err != nil || identity.Registered(remote, fp) != nil {
 			continue
 		}
-		results = append(results, checkResult{name: "Key pair", detail: crypto.ShortFingerprint(fp) + " is not registered", fix: "secret identity sync -i " + fp})
+		results = append(results, checkResult{name: "Key pair", detail: keys.ShortFingerprint(fp) + " is not registered", fix: "secret identity sync -i " + fp})
 	}
 	return results
 }
@@ -337,7 +338,7 @@ func checkPlan(ctx context.Context) checkResult {
 		r.detail = "not checked: " + err.Error()
 		return r
 	}
-	actor, err := c.WhoAmI(ctx)
+	actor, err := c.Identity.WhoAmI(ctx)
 	if err != nil {
 		r.detail = "could not fetch your account: " + errs.APICause(err).Error()
 		return r

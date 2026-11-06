@@ -15,8 +15,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/deepsecret-io/sdk"
-	"github.com/deepsecret-io/sdk/api"
+	"github.com/deepsecret-io/deepsecret-go/secrets"
 	"github.com/google/uuid"
 
 	"github.com/deepsecret-io/cli/internal/config"
@@ -31,7 +30,7 @@ import (
 // folder there is named for the user, since that directory may be shared,
 // and the SDK refuses it unless it is private to this user.
 func UploadsDir() string {
-	if dir := os.Getenv(sdk.TempDirEnv); dir != "" {
+	if dir := os.Getenv(secrets.TempDirEnv); dir != "" {
 		return filepath.Join(dir, "deepsecret-uploads-"+userTag())
 	}
 	return filepath.Join(config.Dir(), "uploads")
@@ -42,7 +41,7 @@ func UploadsDir() string {
 // stopped when run again. DEEPSECRET_TMPDIR moves it, as it moves
 // UploadsDir.
 func DownloadsDir() string {
-	if dir := os.Getenv(sdk.TempDirEnv); dir != "" {
+	if dir := os.Getenv(secrets.TempDirEnv); dir != "" {
 		return filepath.Join(dir, "deepsecret-downloads-"+userTag())
 	}
 	return filepath.Join(config.Dir(), "downloads")
@@ -75,10 +74,10 @@ var UploadIDPattern = regexp.MustCompile(`^[0-9a-f][0-9a-f-]{3,35}$`)
 
 // Find picks the interrupted upload or download whose ID is, or
 // starts with, id; one of the two results is set.
-func Find(uploads []sdk.PendingUpload, downloads []sdk.PendingDownload, id string) (*sdk.PendingUpload, *sdk.PendingDownload, error) {
+func Find(uploads []secrets.PendingUpload, downloads []secrets.PendingDownload, id string) (*secrets.PendingUpload, *secrets.PendingDownload, error) {
 	id = strings.ToLower(strings.TrimSpace(id))
-	var up []*sdk.PendingUpload
-	var down []*sdk.PendingDownload
+	var up []*secrets.PendingUpload
+	var down []*secrets.PendingDownload
 	for i := range uploads {
 		switch p := &uploads[i]; {
 		case p.RevisionID == id:
@@ -110,7 +109,7 @@ func Find(uploads []sdk.PendingUpload, downloads []sdk.PendingDownload, id strin
 // DiscardDownload removes a kept download with --discard. Without it, it
 // says how to continue the download: by decrypting again, which keeps the
 // decrypt's own output choices.
-func DiscardDownload(d *sdk.PendingDownload, discard bool) error {
+func DiscardDownload(d *secrets.PendingDownload, discard bool) error {
 	if !discard {
 		detail := "A download continues when you decrypt it again."
 		// The secret ID comes from a local file: it goes into a command
@@ -120,10 +119,10 @@ func DiscardDownload(d *sdk.PendingDownload, discard bool) error {
 		}
 		return errs.WithDetail(fmt.Errorf("%s is an interrupted download, which resume does not finish", ui.ShortID(d.RevisionID)), detail)
 	}
-	if err := sdk.DiscardPendingDownload(DownloadsDir(), d.RevisionID); err != nil {
+	if err := secrets.DiscardPendingDownload(DownloadsDir(), d.RevisionID); err != nil {
 		return fmt.Errorf("could not discard the download of %q: %w", d.Name, err)
 	}
-	api.Module(logging.Log, "resume").Info("download discarded", "revision_id", d.RevisionID, "secret_id", d.SecretID)
+	logging.Module(logging.Log, "resume").Info("download discarded", "revision_id", d.RevisionID, "secret_id", d.SecretID)
 	ui.Success(fmt.Sprintf("Discarded the download of %q.", d.Name))
 	return nil
 }

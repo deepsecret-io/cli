@@ -9,7 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/deepsecret-io/sdk"
+	"github.com/deepsecret-io/deepsecret-go/secrets"
+	"github.com/deepsecret-io/deepsecret-go/transfer"
 
 	"github.com/deepsecret-io/cli/internal/console"
 )
@@ -28,7 +29,7 @@ type LiveProgress struct {
 	// without one.
 	verb string
 	// transfer is passed to the SDK, which fills it in.
-	Transfer sdk.TransferStatus
+	Transfer secrets.TransferStatus
 	// pre is the step's stage when it has no transfer: encrypting a
 	// send, reading a local file.
 	Pre StageCounter
@@ -81,7 +82,7 @@ type liveFrame struct {
 	stage       string
 	done, total int64
 	rate        float64 // bytes per second, 0 while unknown
-	snap        sdk.TransferSnapshot
+	snap        transfer.Snapshot
 	transfer    bool // snap is a transfer in progress
 }
 
@@ -185,7 +186,7 @@ func liveLines(head string, f liveFrame, now time.Time, width, height int, multi
 
 // connDone reports whether a connection has nothing in flight: it is free,
 // or its part is all moved. A connection waiting to retry is not done.
-func connDone(c sdk.ConnectionStatus) bool {
+func connDone(c transfer.ConnectionStatus) bool {
 	if c.Waiting {
 		return false
 	}
@@ -220,7 +221,7 @@ func liveStats(f liveFrame) string {
 
 // connLine is one connection's line: its part, a bar of the part's
 // progress, the bytes and the connection's rate.
-func connLine(n, numWidth, partWidth, parts int, c sdk.ConnectionStatus, now time.Time) string {
+func connLine(n, numWidth, partWidth, parts int, c transfer.ConnectionStatus, now time.Time) string {
 	num := fmt.Sprintf("  %s%*d%s ", console.Dim, numWidth, n, console.Reset)
 	if c.Part == 0 {
 		return num + console.Dim + "free" + console.Reset
@@ -228,14 +229,14 @@ func connLine(n, numWidth, partWidth, parts int, c sdk.ConnectionStatus, now tim
 	part := fmt.Sprintf("part %*d of %d", partWidth, c.Part, parts)
 	if c.Waiting {
 		return fmt.Sprintf("%s%s  %s  %sretrying, attempt %d of %d%s", num, part, bar(0, c.Size),
-			console.Yellow, c.Attempt, sdk.TransferAttempts, console.Reset)
+			console.Yellow, c.Attempt, transfer.Attempts, console.Reset)
 	}
 	line := fmt.Sprintf("%s%s  %s  %s/%s", num, part, bar(c.Moved, c.Size), FormatBytes(c.Moved), FormatBytes(c.Size))
 	if elapsed := now.Sub(c.Since); !c.Since.IsZero() && elapsed >= time.Second && c.Moved > 0 {
 		line += fmt.Sprintf("  %s%s/s%s", console.Dim, FormatBytes(int64(float64(c.Moved)/elapsed.Seconds())), console.Reset)
 	}
 	if c.Attempt > 1 {
-		line += fmt.Sprintf("  %sattempt %d of %d%s", console.Yellow, c.Attempt, sdk.TransferAttempts, console.Reset)
+		line += fmt.Sprintf("  %sattempt %d of %d%s", console.Yellow, c.Attempt, transfer.Attempts, console.Reset)
 	}
 	return line
 }

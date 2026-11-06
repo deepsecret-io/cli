@@ -7,8 +7,7 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/deepsecret-io/sdk"
-	"github.com/deepsecret-io/sdk/api"
+	deepsecret "github.com/deepsecret-io/deepsecret-go"
 
 	"github.com/deepsecret-io/cli/internal/config"
 	"github.com/deepsecret-io/cli/internal/errs"
@@ -73,13 +72,13 @@ func Refused(source string) (summary, detail string) {
 
 // NewAuthenticatedClient creates an SDK client pointed at the compiled-in API
 // URL using whichever credential source Resolve picks.
-func NewAuthenticatedClient() (*sdk.Client, error) {
+func NewAuthenticatedClient() (*deepsecret.Client, error) {
 	key, source, err := Resolve()
 	if err != nil {
 		return nil, err
 	}
 	Source = source
-	api.Module(logging.Log, "auth").Debug("credentials resolved", "source", source, "api_url", config.APIBaseURL)
+	logging.Module(logging.Log, "auth").Debug("credentials resolved", "source", source, "api_url", config.APIBaseURL)
 	if token, ok := strings.CutPrefix(key, "bearer:"); ok && FlagKey == "" {
 		return NewSessionClient(token)
 	}
@@ -89,7 +88,7 @@ func NewAuthenticatedClient() (*sdk.Client, error) {
 // NewSessionClient creates a client for a login session's token. The
 // session renews its token while in use, and each renewal revokes the
 // token it replaces, so every new token is saved for the next command.
-func NewSessionClient(token string) (*sdk.Client, error) {
+func NewSessionClient(token string) (*deepsecret.Client, error) {
 	return NewClient(config.APIBaseURL, "bearer:"+token,
-		sdk.WithSessionStore(sdk.SessionStore{Load: config.LoadToken, Save: config.SaveRefreshedToken}))
+		deepsecret.WithSessionStore(deepsecret.SessionStore{Load: config.LoadToken, Save: config.SaveRefreshedToken}))
 }

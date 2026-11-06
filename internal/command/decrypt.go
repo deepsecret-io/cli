@@ -11,9 +11,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/deepsecret-io/sdk"
-	"github.com/deepsecret-io/sdk/api"
-	"github.com/deepsecret-io/sdk/crypto"
+	"github.com/deepsecret-io/deepsecret-go/keys"
+	"github.com/deepsecret-io/deepsecret-go/secrets"
+	"github.com/deepsecret-io/deepsecret-go/transfer"
+	"github.com/deepsecret-io/deepsecret-go/trust"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
@@ -124,16 +125,16 @@ plan and every change to it.`,
 			// changed their primary key, and still hold the older keys that
 			// older revisions were sealed for. Otherwise the primary key
 			// opens it.
-			idLog := api.Module(logging.Log, "identity")
+			idLog := logging.Module(logging.Log, "identity")
 			identitySource := "primary"
 			// The secret and its revisions, once fetched here, go to the
 			// SDK, which does not fetch them again.
-			var fetched *sdk.SecretDetail
+			var fetched *secrets.Detail
 			switch {
 			case identityFP != "":
 				identitySource = "--identity"
 			case local:
-				rs, err := sdk.LocalFileRecipients(localPath)
+				rs, err := secrets.LocalFileRecipients(localPath)
 				if err != nil {
 					// Opening the file reports what is wrong with it.
 					idLog.Debug("key selection skipped", "reason", "the file's recipients could not be read", "error", err)
@@ -145,12 +146,12 @@ plan and every change to it.`,
 					}
 				}
 			default:
-				detail, err := c.DescribeSecretFull(cmd.Context(), secretID)
+				detail, err := c.Secrets.DescribeFull(cmd.Context(), secretID)
 				if err != nil {
 					return secretError(err, secretID)
 				}
 				fetched = detail
-				actorID, err := c.ResolveActorID(cmd.Context())
+				actorID, err := c.Identity.ResolveActorID(cmd.Context())
 				if err != nil {
 					idLog.Warn("key selection skipped", "reason", "your account ID could not be fetched", "error", err)
 					break
@@ -183,7 +184,7 @@ plan and every change to it.`,
 			if outputFile != "" {
 				settings = append(settings, "output", outputFile)
 			}
-			api.Module(logging.Log, "decrypt").Debug("options", settings...)
+			logging.Module(logging.Log, "decrypt").Debug("options", settings...)
 
 			// Ask for what the key pair needs: its password, or its recovery
 			// code; a security key is asked for its PIN and a touch when used.
@@ -193,7 +194,7 @@ plan and every change to it.`,
 			}
 
 			// Build SDK options
-			opts := sdk.DecryptOptions{
+			opts := secrets.DecryptOptions{
 				Revision:             revisionID,
 				Secret:               fetched,
 				Identity:             identityFP,
@@ -205,7 +206,7 @@ plan and every change to it.`,
 				Logger:               logging.Log,
 				// The download can be large: check that the files can be
 				// written before fetching them.
-				BeforeDownload: func(p sdk.UpcomingDownload) error {
+				BeforeDownload: func(p secrets.UpcomingDownload) error {
 					if p.PayloadType != "files" {
 						return nil
 					}
@@ -226,13 +227,13 @@ plan and every change to it.`,
 			}
 			// Then each pass that verifies and decrypts it.
 			decryptProgress := ui.NewStageProgress("decrypting")
-			opts.OnDecryptProgress = func(stage sdk.DecryptStage, done, total int64) {
+			opts.OnDecryptProgress = func(stage secrets.DecryptStage, done, total int64) {
 				decryptProgress.Pre.SetStage(string(stage), done, total)
 			}
 
-			var opened *sdk.OpenedSecret
-			var written *sdk.WriteResult
-			var decrypted *sdk.DecryptedPayload
+			var opened *secrets.OpenedSecret
+			var written *secrets.WriteResult
+			var decrypted *secrets.DecryptedPayload
 			defer func() {
 				if opened != nil {
 					_ = opened.Close() // removes the private temporary ciphertext once the command is done; the plaintext was already written or failed.
@@ -244,8 +245,8 @@ plan and every change to it.`,
 			// so a security key's prompt for a PIN or a touch is not part
 			// of it.
 			arriving := ui.NewPhaseStart()
-			opts.OnPhase = func(p sdk.Phase) {
-				if p == sdk.PhaseDownloading || p == sdk.PhaseReading {
+			opts.OnPhase = func(p transfer.Phase) {
+				if p == transfer.PhaseDownloading || p == transfer.PhaseReading {
 					arriving.Mark()
 				}
 			}
@@ -262,9 +263,9 @@ plan and every change to it.`,
 					Action: func() (string, error) {
 						var err error
 						if local {
-							opened, err = c.OpenLocalFile(cmd.Context(), localPath, opts)
+							opened, err = c.Secrets.OpenLocalFile(cmd.Context(), localPath, opts)
 						} else {
-							opened, err = c.OpenSecret(cmd.Context(), secretID, opts)
+							opened, err = c.Secrets.Open(cmd.Context(), secretID, opts)
 						}
 						if err != nil {
 							return "", err
@@ -283,7 +284,7 @@ plan and every change to it.`,
 					Action: func() (string, error) {
 						if opened.Result.PayloadType != "files" {
 							var err error
-							decrypted, err = opened.Payload()
+							decrypted, err = opened.Payload(cmd.Context())
 							if err != nil {
 								return "", err
 							}
@@ -293,7 +294,7 @@ plan and every change to it.`,
 						if outputDir, err = filesDir(outputDir, opened.Result.RevisionID); err != nil {
 							return "", err
 						}
-						written, err = opened.WriteFiles(outputDir, sdk.WriteOptions{Overwrite: forceOverwrite})
+						written, err = opened.WriteFiles(cmd.Context(), outputDir, secrets.WriteOptions{Overwrite: forceOverwrite})
 						if err != nil {
 							return "", err
 						}
@@ -306,11 +307,11 @@ plan and every change to it.`,
 			}
 
 			if err := ui.RunPipeline(cmd.Context(), "secret", steps); err != nil {
-				var interrupted *sdk.DownloadInterruptedError
+				var interrupted *secrets.DownloadInterruptedError
 				if errors.As(err, &interrupted) {
 					return errs.WithDetail(err, downloadResumeDetail(interrupted.Download))
 				}
-				var stale *sdk.StaleRevisionError
+				var stale *trust.StaleRevisionError
 				if errors.As(err, &stale) {
 					return errs.WithDetail(err, staleRevisionDetail(secretID, stale))
 				}
@@ -367,16 +368,16 @@ plan and every change to it.`,
 					notes = append(notes, "security key")
 				}
 				ui.KeyValue("Sender", fmt.Sprintf("%s  %s%s%s (%s)", console.Safe(result.SenderEmail),
-					console.Dim, crypto.ShortFingerprint(result.SenderFingerprint), console.Reset, strings.Join(notes, ", ")))
+					console.Dim, keys.ShortFingerprint(result.SenderFingerprint), console.Reset, strings.Join(notes, ", ")))
 			} else {
-				ui.KeyValue("Sender", crypto.ShortFingerprint(result.SenderFingerprint)+identity.SecurityKeyNote(result.SenderFingerprint))
+				ui.KeyValue("Sender", keys.ShortFingerprint(result.SenderFingerprint)+identity.SecurityKeyNote(result.SenderFingerprint))
 			}
 			// The recipient list is the one the sender signed; emails are
 			// the server's labels for those keys (the sender's, in a local
 			// file).
 			signedFor := make([]string, len(result.Recipients))
 			for i, r := range result.Recipients {
-				line := console.Dim + crypto.ShortFingerprint(r.Fingerprint) + console.Reset
+				line := console.Dim + keys.ShortFingerprint(r.Fingerprint) + console.Reset
 				if r.Email != "" {
 					line = console.Safe(r.Email) + "  " + line
 				}
@@ -400,7 +401,7 @@ plan and every change to it.`,
 			}
 			fmt.Fprintln(os.Stderr)
 			if result.SenderFirstUse {
-				printFirstUse([]sdk.Recipient{{Email: result.SenderEmail, Fingerprint: result.SenderFingerprint}})
+				printFirstUse([]secrets.Recipient{{Email: result.SenderEmail, Fingerprint: result.SenderFingerprint}})
 			}
 
 			if written != nil {
@@ -425,7 +426,7 @@ plan and every change to it.`,
 	f.BoolVar(&useRecoveryCode, "recovery-code", false, "Unlock a security-key protected key pair with its recovery code instead of the security key")
 	flags.SetGroup(f, flags.GroupIdentity, "identity", "recovery-code")
 
-	f.Var(flags.NewIntRange(&downloadThreads, 0, 0, api.MaxDownloadConcurrency, " (0 adapts to the connection, 1 is one at a time)"), "threads", "Parallel range downloads for large secrets: 0 adapts to the connection, up to 64")
+	f.Var(flags.NewIntRange(&downloadThreads, 0, 0, transfer.MaxDownloadConcurrency, " (0 adapts to the connection, 1 is one at a time)"), "threads", "Parallel range downloads for large secrets: 0 adapts to the connection, up to 64")
 	f.Var(flags.NewMinutes(&presignExpiry, 15, 1, 30), "presign-expiry", "Lifetime of the download's presigned URL before it is renewed: 1m to 30m")
 	flags.SetGroup(f, flags.GroupPerformance, "threads", "presign-expiry")
 
@@ -437,7 +438,7 @@ plan and every change to it.`,
 
 // staleRevisionDetail says, for the Error block of a decrypt refused as a
 // possible rollback, how to open that older revision on purpose.
-func staleRevisionDetail(secretID string, e *sdk.StaleRevisionError) string {
+func staleRevisionDetail(secretID string, e *trust.StaleRevisionError) string {
 	return fmt.Sprintf("The server may be serving an old version of this secret. If %s confirms this older revision is the one you want, open it by id:\n\n"+
 		"  secret decrypt %s --revision %s", console.Safe(e.SenderEmail), secretID, console.Safe(e.RevisionID))
 }
@@ -467,19 +468,19 @@ func filesDir(dir, revisionID string) (string, error) {
 // already holding files, which only an earlier decrypt of this revision
 // writes there. A --dir the caller chose may well hold other files, so an
 // archive's conflicts there show only once it is extracted.
-func checkFilesDestination(dirFlag string, p sdk.UpcomingDownload, overwrite bool) error {
+func checkFilesDestination(dirFlag string, p secrets.UpcomingDownload, overwrite bool) error {
 	dir, err := filesDir(dirFlag, p.RevisionID)
 	if err != nil {
 		return err
 	}
-	if err := sdk.CheckDestination(dir, p.Files, overwrite); err != nil {
+	if err := secrets.CheckDestination(dir, p.Files, overwrite); err != nil {
 		detail := "Nothing was downloaded."
 		if !overwrite {
 			detail += " Pass --overwrite to replace files that exist, or --dir to write elsewhere."
 		}
 		return errs.WithDetail(err, detail)
 	}
-	log := api.Module(logging.Log, "decrypt")
+	log := logging.Module(logging.Log, "decrypt")
 	if len(p.Files) > 0 {
 		log.Debug("destination checked", "dir", dir, "files", len(p.Files), "checked", "each listed file can be written")
 		return nil
@@ -497,7 +498,7 @@ func checkFilesDestination(dirFlag string, p sdk.UpcomingDownload, overwrite boo
 // revisionKey is the fingerprint of the key the revision revisionID (the
 // latest when it is "") was sealed with for actorID, or "" when the
 // revision does not list them.
-func revisionKey(detail *sdk.SecretDetail, revisionID, actorID string) string {
+func revisionKey(detail *secrets.Detail, revisionID, actorID string) string {
 	if revisionID == "" {
 		revisionID = detail.Secret.LatestRevisionID
 	}
@@ -528,7 +529,7 @@ func dirHasEntries(dir string) bool {
 
 // printWrittenFiles lists what WriteFiles wrote: each file with its size
 // and SHA-256, or the archive's entry count.
-func printWrittenFiles(w *sdk.WriteResult, outputDir string) {
+func printWrittenFiles(w *secrets.WriteResult, outputDir string) {
 	if w.Archived {
 		ui.Success(fmt.Sprintf("Extracted %d file%s into %s.", w.Extracted, ui.Plural(w.Extracted), outputDir))
 		return
@@ -552,7 +553,7 @@ func printWrittenFiles(w *sdk.WriteResult, outputDir string) {
 
 // outputDecrypted writes a decrypted message or key-value data to stdout,
 // or to outputFile.
-func outputDecrypted(d *sdk.DecryptedPayload, outputFile string) error {
+func outputDecrypted(d *secrets.DecryptedPayload, outputFile string) error {
 	switch d.Type {
 	case "data":
 		var buf strings.Builder

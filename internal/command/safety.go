@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/deepsecret-io/sdk"
-	"github.com/deepsecret-io/sdk/crypto"
+	"github.com/deepsecret-io/deepsecret-go/keys"
+	"github.com/deepsecret-io/deepsecret-go/trust"
 
 	"github.com/deepsecret-io/cli/internal/console"
 	"github.com/deepsecret-io/cli/internal/identity"
@@ -44,10 +44,10 @@ func sameNumberHint(email string) string {
 // printKnownSafetyNumbers prints, under identity known <email>, the
 // safety number with email for each of their keys sends go to, or why
 // there is none.
-func printKnownSafetyNumbers(ctx context.Context, email string, keys []sdk.KnownKey) {
-	var current []sdk.KnownKey
-	for _, k := range keys {
-		if !k.Replaced && k.State != sdk.KeyOwn {
+func printKnownSafetyNumbers(ctx context.Context, email string, keyList []trust.KnownKey) {
+	var current []trust.KnownKey
+	for _, k := range keyList {
+		if !k.Replaced && k.State != trust.Own {
 			current = append(current, k)
 		}
 	}
@@ -66,7 +66,7 @@ func printKnownSafetyNumbers(ctx context.Context, email string, keys []sdk.Known
 		if err != nil {
 			continue
 		}
-		ui.Dimmed(fmt.Sprintf("Safety number with %s, key %s:", email, console.Safe(crypto.ShortFingerprint(k.Fingerprint))))
+		ui.Dimmed(fmt.Sprintf("Safety number with %s, key %s:", email, console.Safe(keys.ShortFingerprint(k.Fingerprint))))
 		printSafetyRows(rows)
 		fmt.Fprintln(os.Stderr)
 	}

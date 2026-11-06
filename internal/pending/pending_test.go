@@ -10,16 +10,16 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/deepsecret-io/sdk"
+	"github.com/deepsecret-io/deepsecret-go/secrets"
 )
 
 func TestFindPending(t *testing.T) {
-	uploads := []sdk.PendingUpload{
+	uploads := []secrets.PendingUpload{
 		{RevisionID: "3f2a9c1e-0000-4000-8000-000000000001"},
 		{RevisionID: "3f2a9c1e-0000-4000-8000-000000000002"},
 		{RevisionID: "7b11d0aa-0000-4000-8000-000000000003"},
 	}
-	downloads := []sdk.PendingDownload{
+	downloads := []secrets.PendingDownload{
 		{RevisionID: "c0ffee00-0000-4000-8000-000000000004"},
 		{RevisionID: "7b11d0ab-0000-4000-8000-000000000005"},
 	}
@@ -49,18 +49,18 @@ func TestFindPending(t *testing.T) {
 func TestTransferDirs(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv(sdk.TempDirEnv, "")
+	t.Setenv(secrets.TempDirEnv, "")
 	if got := UploadsDir(); got != filepath.Join(home, ".deepsecret", "uploads") {
 		t.Fatalf("default: %s", got)
 	}
 	if got := DownloadsDir(); got != filepath.Join(home, ".deepsecret", "downloads") {
 		t.Fatalf("default: %s", got)
 	}
-	t.Setenv(sdk.TempDirEnv, "/big/disk")
+	t.Setenv(secrets.TempDirEnv, "/big/disk")
 	if got := UploadsDir(); got != fmt.Sprintf("/big/disk/deepsecret-uploads-%d", os.Getuid()) {
-		t.Fatalf("with %s: %s", sdk.TempDirEnv, got)
+		t.Fatalf("with %s: %s", secrets.TempDirEnv, got)
 	}
 	if got := DownloadsDir(); got != fmt.Sprintf("/big/disk/deepsecret-downloads-%d", os.Getuid()) {
-		t.Fatalf("with %s: %s", sdk.TempDirEnv, got)
+		t.Fatalf("with %s: %s", secrets.TempDirEnv, got)
 	}
 }

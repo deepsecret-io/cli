@@ -15,8 +15,8 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/deepsecret-io/sdk"
-	"github.com/deepsecret-io/sdk/api"
+	"github.com/deepsecret-io/deepsecret-go/apierror"
+	"github.com/deepsecret-io/deepsecret-go/secrets"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
@@ -113,19 +113,19 @@ Examples:
 			// sent only to oneself, so server-side pagination would over-
 			// or under-count: fetch large and slice locally.
 			const fetchLimit = 10000
-			var secretsList []sdk.SecretInfo
+			var secretsList []secrets.Info
 			if sent {
-				all, _, err := c.ListSentSecrets(cmd.Context(), sdk.ListOptions{Limit: fetchLimit, Email: toEmail})
+				all, _, err := c.Secrets.ListSent(cmd.Context(), secrets.ListOptions{Limit: fetchLimit, Email: toEmail})
 				if err != nil {
 					return fmt.Errorf("could not list your sent secrets: %w", errs.APICause(err))
 				}
 				secretsList = sentSecrets(all)
 			} else {
-				received, _, err := c.ListReceivedSecrets(cmd.Context(), sdk.ListOptions{Limit: fetchLimit, Email: fromEmail})
+				received, _, err := c.Secrets.ListReceived(cmd.Context(), secrets.ListOptions{Limit: fetchLimit, Email: fromEmail})
 				if err != nil {
 					return fmt.Errorf("could not list your inbox: %w", errs.APICause(err))
 				}
-				own, _, err := c.ListSentSecrets(cmd.Context(), sdk.ListOptions{Limit: fetchLimit})
+				own, _, err := c.Secrets.ListSent(cmd.Context(), secrets.ListOptions{Limit: fetchLimit})
 				if err != nil {
 					return fmt.Errorf("could not list your inbox: %w", errs.APICause(err))
 				}
@@ -138,7 +138,7 @@ Examples:
 				offset, end = pageBounds(total, page, limit)
 			}
 			secretsList = secretsList[offset:end]
-			api.Module(logging.Log, "secret").Debug("secrets listed", "view", view, "filter", filterEmail, "total", total, "shown", len(secretsList))
+			logging.Module(logging.Log, "secret").Debug("secrets listed", "view", view, "filter", filterEmail, "total", total, "shown", len(secretsList))
 
 			if handled, err := outputFormatted(outputFmt, map[string]any{"secrets": secretsList, "total": total}); handled || err != nil {
 				return err
@@ -237,8 +237,8 @@ Examples:
 // sent list, which keeps one the caller dismissed as its recipient, so
 // the received list's copies are left out to list each secret once. A
 // sender filter keeps them only when it names the caller.
-func inboxSecrets(received, sent []sdk.SecretInfo, fromEmail string) []sdk.SecretInfo {
-	inbox := make([]sdk.SecretInfo, 0, len(received))
+func inboxSecrets(received, sent []secrets.Info, fromEmail string) []secrets.Info {
+	inbox := make([]secrets.Info, 0, len(received))
 	for _, s := range received {
 		if !s.IsVault() {
 			inbox = append(inbox, s)
@@ -255,8 +255,8 @@ func inboxSecrets(received, sent []sdk.SecretInfo, fromEmail string) []sdk.Secre
 
 // sentSecrets leaves out the secrets the caller sent only to themself,
 // which the inbox lists.
-func sentSecrets(sent []sdk.SecretInfo) []sdk.SecretInfo {
-	out := make([]sdk.SecretInfo, 0, len(sent))
+func sentSecrets(sent []secrets.Info) []secrets.Info {
+	out := make([]secrets.Info, 0, len(sent))
 	for _, s := range sent {
 		if !s.IsVault() {
 			out = append(out, s)
@@ -318,7 +318,7 @@ Examples:
 			}
 
 			secretID := args[0]
-			detail, err := c.DescribeSecretFull(cmd.Context(), secretID)
+			detail, err := c.Secrets.DescribeFull(cmd.Context(), secretID)
 			if err != nil {
 				return secretError(err, secretID)
 			}
@@ -381,7 +381,7 @@ Examples:
 
 			// Revisions: same fields as JSON revisions[]
 			if len(detail.Revisions) > 0 {
-				var visible []sdk.RevisionInfo
+				var visible []secrets.RevisionInfo
 
 				if revisionID != "" {
 					for _, r := range detail.Revisions {
@@ -527,12 +527,12 @@ Examples:
 			// skips any other without saying so. Check each first, so the
 			// command deletes all of them or none, and says which.
 			ids := slices.Compact(slices.Sorted(slices.Values(args)))
-			me, err := c.ResolveActorID(cmd.Context())
+			me, err := c.Identity.ResolveActorID(cmd.Context())
 			if err != nil {
 				return fmt.Errorf("could not fetch your account: %w", errs.APICause(err))
 			}
 			for _, id := range ids {
-				info, err := c.DescribeSecret(cmd.Context(), id)
+				info, err := c.Secrets.Describe(cmd.Context(), id)
 				if err != nil {
 					return secretError(err, id)
 				}
@@ -542,10 +542,10 @@ Examples:
 				}
 			}
 
-			if err := c.DeleteSecrets(cmd.Context(), ids); err != nil {
+			if err := c.Secrets.Delete(cmd.Context(), ids...); err != nil {
 				return fmt.Errorf("could not delete the secret%s: %w", ui.PluralS(len(ids)), errs.APICause(err))
 			}
-			api.Module(logging.Log, "secret").Info("secrets deleted", "ids", ids)
+			logging.Module(logging.Log, "secret").Info("secrets deleted", "ids", ids)
 
 			ui.Success(fmt.Sprintf("Deleted %d secret%s.", len(ids), ui.PluralS(len(ids))))
 			return nil
@@ -583,14 +583,14 @@ Examples:
 			for _, email := range recipientEmails {
 				// A 404 here is the secret's or the recipient's access, so
 				// the server's message says which.
-				res, err := c.RevokeRecipient(cmd.Context(), secretID, email)
+				res, err := c.Secrets.RevokeRecipient(cmd.Context(), secretID, email)
 				switch {
-				case errors.Is(err, api.ErrForbidden):
+				case errors.Is(err, apierror.ErrForbidden):
 					return fmt.Errorf("only the sender of secret %s can revoke its recipients", ui.ShortID(secretID))
 				case err != nil:
 					return fmt.Errorf("could not revoke %s: %w", email, errs.APICause(err))
 				}
-				api.Module(logging.Log, "secret").Info("recipient revoked", "secret_id", secretID, "email", res.Email, "secret_deleted", res.SecretDeleted)
+				logging.Module(logging.Log, "secret").Info("recipient revoked", "secret_id", secretID, "email", res.Email, "secret_deleted", res.SecretDeleted)
 				ui.Success(fmt.Sprintf("Revoked %s.", console.Safe(res.Email)))
 				if res.SecretDeleted {
 					ui.Dimmed("That was the last recipient, so the secret was deleted.")
@@ -638,7 +638,7 @@ Examples:
 				return err
 			}
 
-			update := sdk.PolicyUpdate{}
+			update := secrets.PolicyUpdate{}
 			hasChanges := false
 
 			if cmd.Flags().Changed("ttl") {
@@ -666,16 +666,16 @@ Examples:
 				return fmt.Errorf("nothing to change: give --ttl, --ip, --clear-ttl or --clear-ips")
 			}
 
-			updated, err := c.UpdatePolicy(cmd.Context(), secretID, update)
+			updated, err := c.Secrets.UpdatePolicy(cmd.Context(), secretID, update)
 			switch {
-			case errors.Is(err, api.ErrNotFound):
+			case errors.Is(err, apierror.ErrNotFound):
 				return secretError(err, secretID)
-			case errors.Is(err, api.ErrForbidden):
+			case errors.Is(err, apierror.ErrForbidden):
 				return fmt.Errorf("only the sender of secret %s can change its policies", ui.ShortID(secretID))
 			case err != nil:
 				return fmt.Errorf("could not update the policies of secret %s: %w", ui.ShortID(secretID), errs.APICause(err))
 			}
-			api.Module(logging.Log, "policy").Info("policies updated", "secret_id", updated.ID, "ttl_changed", update.TTLSeconds != nil, "ips_changed", update.AllowedIPs != nil)
+			logging.Module(logging.Log, "policy").Info("policies updated", "secret_id", updated.ID, "ttl_changed", update.TTLSeconds != nil, "ips_changed", update.AllowedIPs != nil)
 
 			ui.Success(fmt.Sprintf("Updated the policies of secret %s (%s).", ui.ShortID(updated.ID), console.Safe(updated.Name)))
 			fmt.Fprintln(os.Stderr)
@@ -714,10 +714,10 @@ Examples:
 // secret not found, or not shared with them, says so plainly.
 func secretError(err error, id string) error {
 	switch {
-	case errors.Is(err, api.ErrNotFound):
+	case errors.Is(err, apierror.ErrNotFound):
 		return errs.WithDetail(fmt.Errorf("secret %s not found", ui.ShortID(id)),
 			"No secret with this ID is shared with you: it may have been deleted, or have expired. Check the ID with 'secret list'.")
-	case errors.Is(err, api.ErrForbidden):
+	case errors.Is(err, apierror.ErrForbidden):
 		return errs.WithDetail(fmt.Errorf("secret %s is not shared with you", ui.ShortID(id)),
 			"Only its sender and recipients can see it. Check the ID with 'secret list'.")
 	}
@@ -726,7 +726,7 @@ func secretError(err error, id string) error {
 
 // recipientsSummary renders a recipient list for a table cell: the first
 // email, and how many more there are.
-func recipientsSummary(rs []sdk.SecretRecipient) string {
+func recipientsSummary(rs []secrets.SecretRecipient) string {
 	switch len(rs) {
 	case 0:
 		return "-"
@@ -740,14 +740,14 @@ func recipientsSummary(rs []sdk.SecretRecipient) string {
 // isArchivedRevision reports whether the revision was sent as a single
 // tar.zst archive bundling multiple files. The compression label is the
 // canonical signal: it's set to "tar+zstd" only by the archive code path.
-func isArchivedRevision(r sdk.RevisionInfo) bool {
+func isArchivedRevision(r secrets.RevisionInfo) bool {
 	return r.Integrity.Compression == "tar+zstd"
 }
 
 // secretLatestArchived reports whether the secret's latest revision was
 // sent archived. Returns false if the latest revision isn't loaded in the
 // detail (older API responses, partial loads).
-func secretLatestArchived(detail *sdk.SecretDetail, latestRevisionID string) bool {
+func secretLatestArchived(detail *secrets.Detail, latestRevisionID string) bool {
 	if detail == nil {
 		return false
 	}

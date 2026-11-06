@@ -15,9 +15,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/deepsecret-io/sdk"
-	"github.com/deepsecret-io/sdk/api"
-	"github.com/deepsecret-io/sdk/crypto"
+	"github.com/deepsecret-io/deepsecret-go/apierror"
+	sdkidentity "github.com/deepsecret-io/deepsecret-go/identity"
+	"github.com/deepsecret-io/deepsecret-go/keys"
+	"github.com/deepsecret-io/deepsecret-go/secrets"
+	"github.com/deepsecret-io/deepsecret-go/transfer"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
@@ -161,10 +163,10 @@ your account. Recipients open the file with "secret decrypt --local".`,
 			recipientsFrom := "--to"
 			// The account, once fetched here, goes to the SDK, which does
 			// not fetch it again.
-			var account *sdk.ActorInfo
+			var account *sdkidentity.Actor
 			switch {
 			case groupName != "":
-				info, err := c.WhoAmI(cmd.Context())
+				info, err := c.Identity.WhoAmI(cmd.Context())
 				if err != nil {
 					return fmt.Errorf("could not fetch your account: %w", errs.APICause(err))
 				}
@@ -191,7 +193,7 @@ your account. Recipients open the file with "secret decrypt --local".`,
 			case len(recipientEmails) > 0:
 				recipients = recipientEmails
 			default:
-				info, err := c.WhoAmI(cmd.Context())
+				info, err := c.Identity.WhoAmI(cmd.Context())
 				if err != nil {
 					return fmt.Errorf("could not fetch your account: %w", errs.APICause(err))
 				}
@@ -212,9 +214,9 @@ your account. Recipients open the file with "secret decrypt --local".`,
 			}
 
 			// Build SDK options
-			opts := sdk.EncryptOptions{
+			opts := secrets.EncryptOptions{
 				Name:                 name,
-				Compress:             sdk.CompressZstd,
+				Compress:             secrets.CompressZstd,
 				Archive:              forceArchive,
 				AutoArchive:          true,
 				SkipHidden:           skipHidden,
@@ -238,11 +240,11 @@ your account. Recipients open the file with "secret decrypt --local".`,
 			// or a touch is not part of either. Each step has its live
 			// progress.
 			encrypting, uploading := ui.NewPhaseStart(), ui.NewPhaseStart()
-			opts.OnPhase = func(p sdk.Phase) {
+			opts.OnPhase = func(p transfer.Phase) {
 				switch p {
-				case sdk.PhaseEncrypting:
+				case transfer.PhaseEncrypting:
 					encrypting.Mark()
-				case sdk.PhaseUploading:
+				case transfer.PhaseUploading:
 					uploading.Mark()
 				}
 			}
@@ -286,7 +288,7 @@ your account. Recipients open the file with "secret decrypt --local".`,
 			} else {
 				settings = append(settings, "threads", ui.ThreadCountLabel(uploadThreads), "presign_expiry", time.Duration(presignExpiry)*time.Minute)
 			}
-			api.Module(logging.Log, "encrypt").Debug("options", settings...)
+			logging.Module(logging.Log, "encrypt").Debug("options", settings...)
 
 			// One send: the SDK encrypts the payload once on this machine,
 			// wraps its key for every recipient, and uploads it once.
@@ -297,21 +299,21 @@ your account. Recipients open the file with "secret decrypt --local".`,
 			if local {
 				label = "Encrypting to " + opts.LocalFile
 			}
-			var result *sdk.EncryptResult
+			var result *secrets.EncryptResult
 			send := ui.StartCall(func() (string, error) {
 				var err error
 				switch {
 				case len(inputFiles) > 0:
-					result, err = c.EncryptPaths(cmd.Context(), recipients, inputFiles, opts)
+					result, err = c.Secrets.EncryptPaths(cmd.Context(), recipients, inputFiles, opts)
 				case len(dataPairs) > 0:
 					kvMap := make(map[string]string, len(dataPairs))
 					for _, kv := range dataPairs {
 						parts := strings.SplitN(kv, "=", 2)
 						kvMap[parts[0]] = parts[1]
 					}
-					result, err = c.EncryptData(cmd.Context(), recipients, kvMap, opts)
+					result, err = c.Secrets.EncryptData(cmd.Context(), recipients, kvMap, opts)
 				default:
-					result, err = c.EncryptText(cmd.Context(), recipients, string(stdinData), opts)
+					result, err = c.Secrets.EncryptText(cmd.Context(), recipients, string(stdinData), opts)
 				}
 				if err != nil {
 					return "", err
@@ -327,14 +329,14 @@ your account. Recipients open the file with "secret decrypt --local".`,
 				steps = append(steps, ui.Step{Label: "Uploading", Done: "Upload complete", Live: uploadProgress, Begins: uploading, Action: send.Wait})
 			}
 			if err := ui.RunPipeline(cmd.Context(), "secret", steps); err != nil {
-				var interrupted *sdk.UploadInterruptedError
+				var interrupted *secrets.UploadInterruptedError
 				if errors.As(err, &interrupted) {
 					return errs.WithDetail(err, resumeDetail(interrupted.Upload.RevisionID))
 				}
 				// A send under the name of an existing secret adds a revision
 				// to it. The name may have come from the input's file name,
 				// so say so, and how to send a new secret instead.
-				if errors.Is(err, api.ErrConflict) && !revokeMissing && strings.Contains(err.Error(), "leaves out") {
+				if errors.Is(err, apierror.ErrConflict) && !revokeMissing && strings.Contains(err.Error(), "leaves out") {
 					return errs.WithDetail(err, fmt.Sprintf("You already have a secret named %q, and this send would add a revision to it.\n"+
 						"To send a new secret instead, give it another name with -n.\n"+
 						"To update %q, list everyone who should keep access with --to, or add --revoke-missing.", console.Safe(opts.Name), console.Safe(opts.Name)))
@@ -379,10 +381,10 @@ your account. Recipients open the file with "secret decrypt --local".`,
 			if result.Compressed && result.OriginalSize > 0 {
 				ui.KeyValue("Compression", fmt.Sprintf("%s (%s)", strings.ToUpper(result.Compression), compressionChange(result.CompressionRatio)))
 			}
-			ui.KeyValue("Sender", crypto.ShortFingerprint(result.SenderFingerprint)+identity.SecurityKeyNote(result.SenderFingerprint))
+			ui.KeyValue("Sender", keys.ShortFingerprint(result.SenderFingerprint)+identity.SecurityKeyNote(result.SenderFingerprint))
 			sentTo := make([]string, len(result.Recipients))
 			for i, r := range result.Recipients {
-				sentTo[i] = fmt.Sprintf("%s  %s%s%s%s", console.Safe(r.Email), console.Dim, console.Safe(crypto.ShortFingerprint(r.Fingerprint)), console.Reset, identity.SecurityKeyNote(r.Fingerprint))
+				sentTo[i] = fmt.Sprintf("%s  %s%s%s%s", console.Safe(r.Email), console.Dim, console.Safe(keys.ShortFingerprint(r.Fingerprint)), console.Reset, identity.SecurityKeyNote(r.Fingerprint))
 			}
 			ui.KeyValues("Recipient"+ui.PluralS(len(sentTo)), sentTo)
 			if len(result.Revoked) > 0 {
@@ -442,7 +444,7 @@ your account. Recipients open the file with "secret decrypt --local".`,
 	f.BoolVar(&useRecoveryCode, "recovery-code", false, "Unlock a security-key protected key pair with its recovery code instead of the security key")
 	flags.SetGroup(f, flags.GroupIdentity, "identity", "recovery-code")
 
-	f.Var(flags.NewIntRange(&uploadThreads, 0, 0, api.MaxUploadThreads, " (0 adapts to the connection, 1 is one at a time)"), "threads", "Parallel part uploads for large files: 0 adapts to the connection, up to 32")
+	f.Var(flags.NewIntRange(&uploadThreads, 0, 0, transfer.MaxUploadThreads, " (0 adapts to the connection, 1 is one at a time)"), "threads", "Parallel part uploads for large files: 0 adapts to the connection, up to 32")
 	f.Var(flags.NewMinutes(&presignExpiry, 15, 1, 30), "presign-expiry", "Lifetime of the presigned URL of a small, single-request upload: 1m to 30m (large uploads renew theirs)")
 	flags.SetGroup(f, flags.GroupPerformance, "threads", "presign-expiry")
 
@@ -472,12 +474,12 @@ func localFileName(name string, inputs []string, fallback string) string {
 	if base == "." || base == string(filepath.Separator) || base == "" {
 		base = "secret"
 	}
-	return base + sdk.LocalFileExt
+	return base + secrets.LocalFileExt
 }
 
 // logInputs logs what each input path is, before the SDK reads them.
 func logInputs(paths []string) {
-	log := api.Module(logging.Log, "input")
+	log := logging.Module(logging.Log, "input")
 	if len(paths) == 0 || !log.Enabled(context.Background(), slog.LevelDebug) {
 		return
 	}
@@ -489,7 +491,7 @@ func logInputs(paths []string) {
 		case info.IsDir():
 			log.Debug("path found", "path", p, "type", "directory")
 		default:
-			log.Debug("path found", "path", p, "type", "file", "size", api.Bytes(info.Size()))
+			log.Debug("path found", "path", p, "type", "file", "size", logging.Bytes(info.Size()))
 		}
 	}
 }
@@ -527,7 +529,7 @@ func compressionChange(ratio float64) string {
 
 // sendDetail is the detail of a send's done line: the secret's ID, and its
 // revision when the send added one to a secret of the same name.
-func sendDetail(s sdk.Secret) string {
+func sendDetail(s secrets.Secret) string {
 	if s.RevisionNumber > 1 {
 		return fmt.Sprintf("id=%s revision=%d", ui.ShortID(s.ID), s.RevisionNumber)
 	}

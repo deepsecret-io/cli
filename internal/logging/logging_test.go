@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/deepsecret-io/sdk/api"
+	deepsecret "github.com/deepsecret-io/deepsecret-go"
 )
 
 // textLogger is a logger writing text lines to a buffer at level.
@@ -29,10 +29,10 @@ func textLogger(level slog.Level) (*slog.Logger, *bytes.Buffer) {
 // modules joined with a dot, the message, then the fields, quoted where
 // they need it and without control characters.
 func TestTextLogLine(t *testing.T) {
-	log, out := textLogger(api.LevelTrace)
-	upload := api.Module(api.Module(log, "upload"), "threads")
-	upload.Debug("holding", "threads", 1, "reason", "nothing sent yet", "rate", api.Rate(589567))
-	api.Trace(api.Module(log, "upload"), "part sent", "part", "1/2", "size", api.Bytes(8<<20), "elapsed", 29595*time.Millisecond)
+	log, out := textLogger(deepsecret.LevelTrace)
+	upload := Module(Module(log, "upload"), "threads")
+	upload.Debug("holding", "threads", 1, "reason", "nothing sent yet", "rate", "575.75KiB/s")
+	trace(Module(log, "upload"), "part sent", "part", "1/2", "size", Bytes(8<<20), "elapsed", 29595*time.Millisecond)
 	log.Info("started", "name", "evil\033[2J", "empty", "")
 	log.Warn("retrying", "error", errors.New("connection reset"))
 
@@ -54,8 +54,8 @@ func TestTextLogLine(t *testing.T) {
 // numbers for sizes.
 func TestJSONLogLine(t *testing.T) {
 	var b bytes.Buffer
-	log := slog.New(&moduleHandler{next: slog.NewJSONHandler(&b, &slog.HandlerOptions{Level: api.LevelTrace, ReplaceAttr: hclogJSONKeys})})
-	api.Trace(api.Module(api.Module(log, "upload"), "threads"), "holding", "size", api.Bytes(8<<20))
+	log := slog.New(&moduleHandler{next: slog.NewJSONHandler(&b, &slog.HandlerOptions{Level: deepsecret.LevelTrace, ReplaceAttr: hclogJSONKeys})})
+	trace(Module(Module(log, "upload"), "threads"), "holding", "size", Bytes(8<<20))
 	var got map[string]any
 	if err := json.Unmarshal(b.Bytes(), &got); err != nil {
 		t.Fatalf("%v: %s", err, b.String())
@@ -88,8 +88,8 @@ func TestSetupLogging(t *testing.T) {
 		{"", true, slog.LevelDebug},
 		{"warn", false, slog.LevelWarn},
 		{"WARN", true, slog.LevelDebug},
-		{"trace", true, api.LevelTrace},
-		{"json", false, api.LevelTrace},
+		{"trace", true, deepsecret.LevelTrace},
+		{"json", false, deepsecret.LevelTrace},
 	} {
 		t.Setenv("DS_LOG", c.env)
 		err := Setup(c.debug)
@@ -120,7 +120,7 @@ func TestSetupLogging(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	api.Module(Log, "auth").Debug("key read")
+	Module(Log, "auth").Debug("key read")
 	Close()
 	b, err := os.ReadFile(path)
 	if err != nil || !strings.Contains(string(b), `"@module":"auth"`) {
@@ -129,4 +129,9 @@ func TestSetupLogging(t *testing.T) {
 	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
 		t.Fatalf("log file mode %v, want 0600", fi.Mode().Perm())
 	}
+}
+
+// trace logs at the trace level, as the SDK does for each request and part.
+func trace(l *slog.Logger, msg string, args ...any) {
+	l.Log(context.Background(), deepsecret.LevelTrace, msg, args...)
 }

@@ -21,7 +21,7 @@ Anything that lets someone get at a secret, a key or a login through the CLI. Fo
 - **Traffic:** the CLI can be made to send credentials to another host or over plaintext.
 - **The installer and release process:** `scripts/install.sh` or a release archive can be tampered with unnoticed.
 
-Flaws in the encryption, the protocol or key storage belong in [the SDK's repository](https://github.com/deepsecret-io/sdk). If you are not sure which of the two a problem belongs to, report it in either.
+Flaws in the encryption, the protocol or key storage belong in [the SDK's repository](https://github.com/deepsecret-io/deepsecret-go). If you are not sure which of the two a problem belongs to, report it in either.
 
 ## What to include
 

@@ -9,9 +9,10 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/deepsecret-io/sdk"
-	"github.com/deepsecret-io/sdk/crypto"
-	"github.com/deepsecret-io/sdk/fido2"
+	"github.com/deepsecret-io/deepsecret-go/fido2"
+	sdkidentity "github.com/deepsecret-io/deepsecret-go/identity"
+	"github.com/deepsecret-io/deepsecret-go/keys"
+	"github.com/deepsecret-io/deepsecret-go/keystore"
 
 	"github.com/deepsecret-io/cli/internal/config"
 	"github.com/deepsecret-io/cli/internal/console"
@@ -38,7 +39,7 @@ func (terminalPrompter) PIN(ctx context.Context, device string, retries int, wro
 		return nil, err
 	}
 	if pin == "" {
-		return nil, crypto.ErrCancelled
+		return nil, keystore.ErrCancelled
 	}
 	return []byte(pin), nil
 }
@@ -54,12 +55,12 @@ func (terminalPrompter) Insert(want string) {
 }
 
 // SecurityKey is the security key support of this build.
-func SecurityKey() crypto.Authenticator { return fido2.New(terminalPrompter{}) }
+func SecurityKey() keystore.Authenticator { return fido2.New(terminalPrompter{}) }
 
 // Protection reads how the key pair name is protected, or "" when its
 // file cannot be read.
-func Protection(name string) crypto.Protection {
-	info, err := crypto.ReadKeyFileInfo(config.KeysDir(), name)
+func Protection(name string) keystore.Protection {
+	info, err := keystore.ReadInfo(config.KeysDir(), name)
 	if err != nil {
 		return ""
 	}
@@ -71,7 +72,7 @@ func Protection(name string) crypto.Protection {
 // full fingerprint names a key file here, never a prefix: fp may come from
 // the server.
 func SecurityKeyNote(fp string) string {
-	if len(fp) == 64 && Protection(fp) == crypto.ProtectionSecurityKey {
+	if len(fp) == 64 && Protection(fp) == keystore.ProtectionSecurityKey {
 		return " (security key)"
 	}
 	return ""
@@ -81,10 +82,10 @@ func SecurityKeyNote(fp string) string {
 // "security-key" from its key file when it is on this device,
 // "security-key (reported)" from the label one of the user's devices set
 // when it is not, else "". The server does not check the label.
-func RemoteLabel(k sdk.RemoteKey) string {
+func RemoteLabel(k sdkidentity.Key) string {
 	if len(k.Fingerprint) == 64 {
 		if p := Protection(k.Fingerprint); p != "" {
-			if p == crypto.ProtectionSecurityKey {
+			if p == keystore.ProtectionSecurityKey {
 				return "security-key"
 			}
 			return ""
@@ -103,7 +104,7 @@ func RequireTerminal(name string) error {
 	if err != nil {
 		what := errors.New("a security key needs a terminal")
 		if name != "" {
-			what = fmt.Errorf("key pair %s is protected by a security key, which needs a terminal", crypto.ShortFingerprint(name))
+			what = fmt.Errorf("key pair %s is protected by a security key, which needs a terminal", keys.ShortFingerprint(name))
 		}
 		return errs.WithDetail(what, "Run the command in a terminal. Automation needs a key pair of its own, with a password or none.")
 	}

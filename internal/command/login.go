@@ -9,7 +9,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/deepsecret-io/sdk/api"
 	"github.com/spf13/cobra"
 
 	"github.com/deepsecret-io/cli/internal/auth"
@@ -72,7 +71,7 @@ func newLogoutCmd() *cobra.Command {
 				ui.Success("Logged out on this device.")
 				return nil
 			}
-			api.Module(logging.Log, "auth").Info("logged out", "email", tf.Email)
+			logging.Module(logging.Log, "auth").Info("logged out", "email", tf.Email)
 			ui.Success("Logged out: the session is revoked, and its token removed.")
 			return nil
 		},
