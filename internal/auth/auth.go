@@ -54,7 +54,7 @@ var Source string
 // with 401: the credential from source is not valid, and what to do next
 // depends on where it came from. The key itself is never shown.
 func Refused(source string) (summary, detail string) {
-	const newKey = "create a new key in the DeepSecret app at https://app.deepsecret.io/account/api-keys (this needs an active plan)"
+	const newKey = "create a new key in the DeepSecret app at https://app.deepsecret.io/account/api-keys"
 	switch source {
 	case "login session":
 		return "Your login session has ended", "Sign in again with 'secret login'."
