@@ -13,8 +13,11 @@ dist/
 /cli
 ./dist/
 
-# Release upload settings (R2 keys) for task release-upload.
+# Local settings never belong in git.
 .env
+
+# Release tools that task release-build and task release-snapshot install.
+/.tools/
 
 # Decrypted secrets never belong here: a decrypt writes into
 # ./<revision-id>/ unless --dir says otherwise.

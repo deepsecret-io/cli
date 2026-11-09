@@ -1,12 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 DeepSecret
 
-// Package safefile writes files without following links or leaving partial
-// files behind.
+// Package safefile creates and reads the files the CLI keeps private:
+// decrypted output, the config, the login token and the folders that hold
+// them. It writes without following links or leaving partial files behind.
+//
+// Private means the user's own: mode 0600 for a file and 0700 for a folder
+// on Unix (private_unix.go), and on Windows, which ignores those modes, a
+// security descriptor that makes this user the owner and grants nobody
+// else any access (private_windows.go). ReadPrivate refuses, on Windows, a
+// file someone else may open.
 package safefile
 
 import (
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,8 +22,21 @@ import (
 	"github.com/deepsecret-io/cli/internal/errs"
 )
 
+// ErrNotPrivate is a file ReadPrivate refused: someone other than this
+// user, SYSTEM and Administrators owns it or may open it.
+var ErrNotPrivate = errors.New("the file is open to other users")
+
+// notPrivateError is ReadPrivate refusing the file at path
+// (ErrNotPrivate).
+type notPrivateError struct{ path string }
+
+func (e *notPrivateError) Error() string { return e.path + " is open to other users" }
+
+func (e *notPrivateError) Is(target error) bool { return target == ErrNotPrivate }
+
 // Write writes decrypted data to dest, created with mode (the umask
-// applies) by the platform's createExclusive. Without force it refuses a
+// applies; on Windows it is private to this user whatever mode says) by
+// the platform's createExclusive. Without force it refuses a
 // dest that exists. With force it writes a new file beside dest and renames
 // it over dest once complete, so dest gets mode instead of keeping an old
 // file's, a link at dest is replaced rather than written through, and a

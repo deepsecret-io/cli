@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -19,10 +20,12 @@ import (
 	sdkidentity "github.com/deepsecret-io/deepsecret-go/identity"
 	"github.com/deepsecret-io/deepsecret-go/keys"
 	"github.com/deepsecret-io/deepsecret-go/keystore"
+	"github.com/deepsecret-io/deepsecret-go/trust"
 
 	"github.com/deepsecret-io/cli/internal/auth"
 	"github.com/deepsecret-io/cli/internal/config"
 	"github.com/deepsecret-io/cli/internal/identity"
+	"github.com/deepsecret-io/cli/internal/testutil"
 )
 
 // fakeSecurityKey is a FIDO2 key in memory.
@@ -80,7 +83,7 @@ func protectedKeyPair(t *testing.T) (*keys.Pair, string) {
 // A security-key protected key pair reads like any other for its public
 // keys, and is told apart from a password-protected one.
 func TestSecurityKeyProtectedKeyFile(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SetHome(t, t.TempDir())
 	kp, fp := protectedKeyPair(t)
 	if p := identity.Protection(fp); p != keystore.ProtectionSecurityKey {
 		t.Fatalf("keyProtection = %q", p)
@@ -100,7 +103,7 @@ func TestSecurityKeyProtectedKeyFile(t *testing.T) {
 // Users without a security key see nothing new: doctor says nothing, an
 // unprotected key needs nothing, and --recovery-code is refused.
 func TestNoSecurityKeyNoChange(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SetHome(t, t.TempDir())
 	kp, _ := keys.Generate()
 	fp, _ := keys.Fingerprint(kp)
 	if err := identity.SaveKeyPair(fp, kp, ""); err != nil {
@@ -132,7 +135,7 @@ func TestCheckSecondWay(t *testing.T) {
 // The security key label: read from the key file on this device, for a
 // full fingerprint only, and from the server's label for a key elsewhere.
 func TestSecurityKeyLabel(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SetHome(t, t.TempDir())
 	_, protected := protectedKeyPair(t)
 	kp, _ := keys.Generate()
 	plain, _ := keys.Fingerprint(kp)
@@ -162,10 +165,66 @@ func TestSecurityKeyLabel(t *testing.T) {
 	}
 }
 
+// identity sync on a key registered from another device records the
+// account signed in as yours on this device with it, without unlocking the
+// key pair or uploading anything: a secret it signed for that account then
+// opens here instead of being refused as from an account this device does
+// not know as yours.
+func TestSyncRegisteredKeyRecordsTheAccount(t *testing.T) {
+	testutil.SetHome(t, t.TempDir())
+	_, fp := protectedKeyPair(t)
+	const bob = "bob@example.com"
+	var mu sync.Mutex
+	var writes []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			mu.Lock()
+			writes = append(writes, r.Method+" "+r.URL.Path)
+			mu.Unlock()
+		}
+		var data any = map[string]any{}
+		switch r.URL.Path {
+		case "/api/v1/identities":
+			data = map[string]any{"keys": []map[string]any{{"id": "k1", "fingerprint": fp, "is_primary": true, "security_key": true}}}
+		case "/api/v1/actors/me":
+			data = map[string]any{"actor": map[string]any{"id": "actor-1", "email": bob},
+				"membership": map[string]any{"org_id": "org-1", "role": "owner"}}
+		case "/api/v1/orgs":
+			data = []any{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "data": data})
+	}))
+	defer srv.Close()
+	c, err := auth.NewClient(srv.URL, "test-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out := testutil.StderrOf(t, func() {
+		if err := syncRegisteredKey(context.Background(), c, &sdkidentity.Key{ID: "k1", Fingerprint: fp, IsPrimary: true, SecurityKey: true}, fp); err != nil {
+			t.Error(err)
+		}
+	})
+	if !strings.Contains(out, "Key "+keys.ShortFingerprint(fp)+" is registered") {
+		t.Errorf("%q does not say the key is registered", out)
+	}
+	known, err := c.Trust.List(bob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(known) != 1 || known[0].Fingerprint != fp || known[0].State != trust.Own {
+		t.Fatalf("bob's known keys %+v, want the key pair here as the user's own", known)
+	}
+	if len(writes) != 0 {
+		t.Errorf("requests %q, want reads only", writes)
+	}
+}
+
 // identity sync on a registered key sets its label from the key file,
 // and sends nothing when the label is already right.
 func TestRefreshSecurityKeyLabel(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SetHome(t, t.TempDir())
 	_, fp := protectedKeyPair(t)
 	var mu sync.Mutex
 	var puts []string

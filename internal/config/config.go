@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 
 	"github.com/deepsecret-io/cli/internal/errs"
+	"github.com/deepsecret-io/cli/internal/safefile"
 )
 
 // Config stored at ~/.deepsecret/config.json
@@ -67,14 +68,16 @@ func KeysDir() string {
 }
 
 // Sensitive fields (api_key, bearer token) are stored as plaintext in files
-// with mode 0600 inside a 0700 directory. Operators who need stronger
+// private to the user (safefile): mode 0600 inside a 0700 directory on
+// Unix, an owner-only ACL on Windows. Operators who need stronger
 // isolation should source the API key from a secrets manager (HashiCorp
 // Vault, AWS Secrets Manager, 1Password CLI, etc.) and pass it via
 // --api-key-file or --api-key-stdin.
 
-// Load reads the config file.
+// Load reads the config file, and on Windows refuses one that someone else
+// may open (safefile.ErrNotPrivate).
 func Load() (*Config, error) {
-	data, err := os.ReadFile(Path())
+	data, err := safefile.ReadPrivate(Path())
 	if err != nil {
 		return nil, err
 	}
@@ -87,10 +90,10 @@ func Load() (*Config, error) {
 
 // Save writes the config file, private to the user.
 func Save(c *Config) error {
-	if err := os.MkdirAll(Dir(), 0700); err != nil {
+	if err := safefile.MkdirPrivate(Dir()); err != nil {
 		return err
 	}
-	// #nosec G117 -- the API key is what the config file holds; writePrivateFile keeps it 0600.
+	// #nosec G117 -- the API key is what the config file holds; writePrivateFile keeps it private.
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return fmt.Errorf("could not encode the config: %w", err)
@@ -98,12 +101,12 @@ func Save(c *Config) error {
 	return writePrivateFile(Path(), data)
 }
 
-// writePrivateFile replaces path with data through a new 0600 file renamed
-// over it, so the file is private even when an older one was not, a link
-// at path is replaced rather than followed, and a reader never sees half
-// of it.
+// writePrivateFile replaces path with data through a new file private to
+// the user (safefile.CreateTemp) renamed over it, so the file is private
+// even when an older one was not, a link at path is replaced rather than
+// followed, and a reader never sees half of it.
 func writePrivateFile(path string, data []byte) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*")
+	tmp, err := safefile.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+"-*")
 	if err != nil {
 		return err
 	}

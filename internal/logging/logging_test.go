@@ -17,6 +17,8 @@ import (
 	"time"
 
 	deepsecret "github.com/deepsecret-io/deepsecret-go"
+
+	"github.com/deepsecret-io/cli/internal/testutil"
 )
 
 // textLogger is a logger writing text lines to a buffer at level.
@@ -126,9 +128,7 @@ func TestSetupLogging(t *testing.T) {
 	if err != nil || !strings.Contains(string(b), `"@module":"auth"`) {
 		t.Fatalf("log file: %q, %v", b, err)
 	}
-	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
-		t.Fatalf("log file mode %v, want 0600", fi.Mode().Perm())
-	}
+	testutil.AssertPrivate(t, path)
 }
 
 // trace logs at the trace level, as the SDK does for each request and part.

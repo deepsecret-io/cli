@@ -7,16 +7,25 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The Release workflow runs the tests on the tag, with its Go version.
+  workflow_call:
+    inputs:
+      go-version:
+        description: The exact Go version the release builds with
+        type: string
+        required: true
 
 permissions:
   contents: read
 
+# A literal prefix: in a called workflow github.workflow is the caller's
+# name, so it would share the group with the Release workflow's other jobs.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 env:
-  GO_VERSION: 1.27.x
+  GO_VERSION: ${{ inputs.go-version || '1.27.x' }}
 
 # go.mod requires an SDK release, which go fetches like any module: from
 # the Go module mirror once the SDK repo is public.
@@ -36,8 +45,40 @@ jobs:
       - run: go vet ./...
       - run: go test -race ./...
 
+  # The release ships Windows binaries, so the tests run on Windows too,
+  # built as the release builds (CGO_ENABLED=0): the owner-only ACLs the
+  # CLI and the SDK give its config, login token, key files and decrypted
+  # files exist only there, and only these runs check them. The race
+  # detector needs cgo, so it runs in the Linux job alone.
+  test-windows:
+    name: test (windows)
+    runs-on: windows-2025
+    timeout-minutes: 20
+    env:
+      CGO_ENABLED: '0'
+    steps:
+      # Check out the files as committed, with LF line endings.
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+      # Test files in t.TempDir() inherit this folder's ACL, and the checks
+      # refuse any file someone other than this user, SYSTEM and
+      # Administrators may open: the ACL is here to explain such a failure.
+      - name: Show the temporary folder's ACL
+        run: icacls $env:TEMP
+      - run: go vet ./...
+      - run: go test ./...
+
+  # Lint reports only the issues a change adds, which a tag has no base
+  # for, so it gates changes and not releases.
   lint:
     name: lint
+    if: ${{ github.ref_type != 'tag' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:

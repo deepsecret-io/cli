@@ -157,11 +157,12 @@ func commandUnlock(ctx context.Context, c *deepsecret.Client, identityFP string,
 // showRecoveryCode shows a new recovery code once, on the terminal only,
 // and asks for two of its groups back, so it is known to be written down.
 func showRecoveryCode(ctx context.Context, code string) error {
-	out, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	t, err := prompt.OpenTerminal()
 	if err != nil {
 		return errors.New("a recovery code is shown only on a terminal; run the command in one")
 	}
-	defer func() { _ = out.Close() }()
+	defer func() { _ = t.Close() }()
+	out := t.Out
 	_, _ = fmt.Fprintf(out, "\n  Recovery code (shown once; write it down and keep it apart from your security keys):\n\n      %s\n\n"+
 		"  It unlocks the key pair without a security key. Anyone who has it and a copy of the key file can too.\n\n", code)
 	groups := strings.Split(code, "-")
@@ -175,7 +176,7 @@ func showRecoveryCode(ctx context.Context, code string) error {
 	for attempt := 0; attempt < 3; attempt++ {
 		ok := true
 		for _, i := range []int{first, second} {
-			typed, err := prompt.Line(ctx, fmt.Sprintf("Type group %d of the recovery code: ", i+1))
+			typed, err := prompt.Password(ctx, fmt.Sprintf("Type group %d of the recovery code: ", i+1))
 			if err != nil {
 				return errs.WithDetail(err, recoveryCodeNotSaved)
 			}

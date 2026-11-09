@@ -17,8 +17,8 @@ import (
 	"unicode/utf8"
 )
 
-// Password reads a password, a PIN or a recovery code from the
-// controlling terminal without echoing. It prefers /dev/tty over stdin so
+// Password reads a password, a PIN or a recovery code from the terminal
+// without echoing. It prefers the terminal (OpenTerminal) over stdin so
 // the prompt still works when the caller is piping data into stdin (e.g.
 // `kubectl ... | secret encrypt`), where stdin is a pipe and reading it as a
 // terminal would fail with "inappropriate ioctl for device". Ctrl+C stops
@@ -26,15 +26,15 @@ import (
 // is overwritten with zeros before returning; the only remaining copy is
 // the immutable Go string the caller holds.
 func Password(ctx context.Context, prompt string) (string, error) {
-	// Fallback: stdin is the only thing left. This is the path on systems
-	// without /dev/tty (e.g. Windows without ConPTY, some CI containers).
+	// Fallback: stdin is the only thing left. This is the path where no
+	// terminal opens (some CI containers, or Windows with none of stdin,
+	// stdout and stderr on a console).
 	in, out := os.Stdin, os.Stderr
-	if tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0); err == nil {
+	if t, err := OpenTerminal(); err == nil {
 		// Closing it does not end or wait for a read left waiting
-		// (readHidden): Fd made the descriptor blocking, so Close leaves
-		// close(2) to the read's return.
-		defer func() { _ = tty.Close() }() // opened to read one line
-		in, out = tty, tty
+		// (readHidden).
+		defer func() { _ = t.Close() }() // opened to read one line
+		in, out = t.In, t.Out
 	}
 	OpenLine(out, prompt)
 	pw, err := readHidden(ctx, in)
@@ -194,9 +194,9 @@ func PasswordConfirm(ctx context.Context, prompt string) (string, error) {
 func Line(ctx context.Context, prompt string) (string, error) {
 	var in io.Reader = os.Stdin
 	out := os.Stderr
-	if tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0); err == nil {
-		defer func() { _ = tty.Close() }()
-		in, out = tty, tty
+	if t, err := OpenTerminal(); err == nil {
+		defer func() { _ = t.Close() }() // does not wait for a read left waiting
+		in, out = t.In, t.Out
 	}
 	_, _ = fmt.Fprint(out, prompt)
 	line, err := readVisibleLine(ctx, in)

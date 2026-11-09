@@ -387,7 +387,7 @@ func newIdentitySyncCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "sync",
 		Aliases: []string{"push"},
-		Short:   "Register a key pair's public keys and make it your primary key, or refresh a registered key's security key label (alias: push)",
+		Short:   "Register a key pair's public keys and make it your primary key, or, for a registered key, record this account as yours on this device and refresh its security key label (alias: push)",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			c, err := auth.NewAuthenticatedClient()
@@ -406,10 +406,11 @@ func newIdentitySyncCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			// A registered key is not uploaded again, nor unlocked: only its
-			// security key label is brought up to date.
+			// A registered key is not uploaded again, nor unlocked: the
+			// account is recorded as yours with it, and its security key
+			// label is brought up to date.
 			if k := identity.Registered(remote, name); k != nil {
-				return refreshSecurityKeyLabel(cmd.Context(), c, k, name)
+				return syncRegisteredKey(cmd.Context(), c, k, name)
 			}
 			kp, err := identity.LoadKeyPair(cmd.Context(), name)
 			if err != nil {
@@ -446,6 +447,20 @@ func newIdentitySyncCmd() *cobra.Command {
 	cmd.Flags().VarP(flags.NewFingerprint(&identityFP), "identity", "i", "Key pair `fingerprint`, or a prefix of 16+ characters (default: the one not registered yet)")
 	flags.SetGroup(cmd.Flags(), flags.GroupIdentity, "identity")
 	return cmd
+}
+
+// syncRegisteredKey records the account signed in as one of the user's own
+// on this device, used with the key pair name, which k says is registered for
+// it already (as from another device), then brings k's security key label up
+// to date. Nothing is uploaded or unlocked. A secret this device refused as
+// from an account it does not know as the user's opens once that account is
+// recorded with the key that signed it.
+func syncRegisteredKey(ctx context.Context, c *deepsecret.Client, k *sdkidentity.Key, name string) error {
+	if err := c.Identity.RecordOwnAccount(ctx, name); err != nil {
+		return fmt.Errorf("could not record this account as yours on this device: %w", errs.APICause(err))
+	}
+	logging.Module(logging.Log, "identity").Info("own account recorded", "fingerprint", name)
+	return refreshSecurityKeyLabel(ctx, c, k, name)
 }
 
 // keyToSync picks the key pair identity sync registers: the one

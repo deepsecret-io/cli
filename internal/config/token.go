@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/deepsecret-io/cli/internal/logging"
+	"github.com/deepsecret-io/cli/internal/safefile"
 	"github.com/deepsecret-io/cli/internal/ui"
 )
 
@@ -28,7 +29,7 @@ func tokenPath() string {
 
 // SaveToken writes the login token, private to the user.
 func SaveToken(token, email, expiresAt string) error {
-	if err := os.MkdirAll(Dir(), 0700); err != nil {
+	if err := safefile.MkdirPrivate(Dir()); err != nil {
 		return err
 	}
 	tf := TokenFile{Token: token, Email: email, ExpiresAt: expiresAt}
@@ -61,9 +62,10 @@ func SaveRefreshedToken(token string, expiresAt time.Time) error {
 var ErrSessionExpired = errors.New("the login session expired")
 
 // LoadToken reads the login token, and refuses one that has expired
-// (ErrSessionExpired).
+// (ErrSessionExpired) or, on Windows, a token file someone else may open
+// (safefile.ErrNotPrivate).
 func LoadToken() (string, error) {
-	data, err := os.ReadFile(tokenPath())
+	data, err := safefile.ReadPrivate(tokenPath())
 	if err != nil {
 		return "", err
 	}
@@ -88,9 +90,23 @@ func LoadToken() (string, error) {
 	return token, nil
 }
 
-// LoadTokenFile reads the token file as it is, expired or not.
+// LoadTokenFile reads the token file as it is, expired or not, and on
+// Windows refuses one someone else may open (safefile.ErrNotPrivate).
 func LoadTokenFile() (*TokenFile, error) {
-	data, err := os.ReadFile(tokenPath())
+	return parseTokenFile(safefile.ReadPrivate(tokenPath()))
+}
+
+// LoadTokenFileToRevoke reads the token file as LoadTokenFile does, but
+// also when someone else may open it: logout revokes and removes the
+// token, which is what an exposed one needs. Sending a token someone else
+// planted to be revoked only ends their session.
+func LoadTokenFileToRevoke() (*TokenFile, error) {
+	return parseTokenFile(os.ReadFile(tokenPath()))
+}
+
+// parseTokenFile decodes the token file read as data, or returns the error
+// reading it gave.
+func parseTokenFile(data []byte, err error) (*TokenFile, error) {
 	if err != nil {
 		return nil, err
 	}

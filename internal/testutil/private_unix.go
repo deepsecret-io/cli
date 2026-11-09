@@ -1,0 +1,31 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 DeepSecret
+
+//go:build !windows
+
+package testutil
+
+import (
+	"os"
+	"testing"
+)
+
+// AssertPrivate fails t unless path is private to this user as the CLI
+// makes what it keeps: a regular file with mode 0600, or a folder with
+// mode 0700.
+func AssertPrivate(t *testing.T, path string) {
+	t.Helper()
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := os.FileMode(0o600)
+	if info.IsDir() {
+		want = 0o700
+	} else if !info.Mode().IsRegular() {
+		t.Fatalf("%s is %v, want a regular file or a folder", path, info.Mode())
+	}
+	if info.Mode().Perm() != want {
+		t.Errorf("%s has mode %v, want %v", path, info.Mode().Perm(), want)
+	}
+}

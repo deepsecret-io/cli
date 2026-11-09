@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/deepsecret-io/cli/internal/testutil"
 	"github.com/deepsecret-io/deepsecret-go/secrets"
 )
 
@@ -48,7 +49,7 @@ func TestFindPending(t *testing.T) {
 // shared; otherwise they live in the config folder.
 func TestTransferDirs(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testutil.SetHome(t, home)
 	t.Setenv(secrets.TempDirEnv, "")
 	if got := UploadsDir(); got != filepath.Join(home, ".deepsecret", "uploads") {
 		t.Fatalf("default: %s", got)
@@ -56,11 +57,18 @@ func TestTransferDirs(t *testing.T) {
 	if got := DownloadsDir(); got != filepath.Join(home, ".deepsecret", "downloads") {
 		t.Fatalf("default: %s", got)
 	}
-	t.Setenv(secrets.TempDirEnv, "/big/disk")
-	if got := UploadsDir(); got != fmt.Sprintf("/big/disk/deepsecret-uploads-%d", os.Getuid()) {
+	big := filepath.Join(t.TempDir(), "big")
+	t.Setenv(secrets.TempDirEnv, big)
+	if got := UploadsDir(); got != filepath.Join(big, "deepsecret-uploads-"+userTag()) {
 		t.Fatalf("with %s: %s", secrets.TempDirEnv, got)
 	}
-	if got := DownloadsDir(); got != fmt.Sprintf("/big/disk/deepsecret-downloads-%d", os.Getuid()) {
+	if got := DownloadsDir(); got != filepath.Join(big, "deepsecret-downloads-"+userTag()) {
 		t.Fatalf("with %s: %s", secrets.TempDirEnv, got)
+	}
+	// The user ID on Unix; the account name on Windows, which has none.
+	if uid := os.Getuid(); uid >= 0 && userTag() != fmt.Sprint(uid) {
+		t.Errorf("userTag() = %q, want the user ID %d", userTag(), uid)
+	} else if uid < 0 && (userTag() == "" || strings.ContainsAny(userTag(), `\/:`)) {
+		t.Errorf("userTag() = %q, want a folder-safe account name", userTag())
 	}
 }

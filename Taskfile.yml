@@ -4,13 +4,16 @@
 # CLI tasks. `task --list` shows them; run from cli/.
 #
 # Releases follow semver.org: vMAJOR.MINOR.PATCH, and while the major
-# version is 0 a breaking change bumps the minor version. To release:
+# version is 0 a breaking change bumps the minor version. Pushing the tag
+# is the release: the Release workflow (.github/workflows/release.yml)
+# checks, tests, scans, builds, signs, attests and publishes it. RELEASING.md
+# has the whole process. To release:
 #   1. Publish the SDK release the CLI needs (in the SDK repo: task
 #      release VERSION=...), then GOWORK=off go get github.com/deepsecret-io/deepsecret-go@...
 #      and GOWORK=off go mod tidy, and commit and push.
-#   2. From a clean main that is pushed: task release-upload VERSION=v0.1.0.
-#      It refuses anything else, and tags the commit only once the upload
-#      succeeded.
+#   2. From a clean main that is pushed: task release VERSION=v0.1.0.
+#      It runs the release checks, the security gate and a full build of
+#      every platform here first, then tags HEAD and pushes the tag.
 version: '3'
 
 # Tasks build with the SDK version go.mod requires, never a local ../sdk
@@ -24,18 +27,16 @@ vars:
   BINARY: secret
   DIST: dist
   SDK: github.com/deepsecret-io/deepsecret-go
-  # A release version, vMAJOR.MINOR.PATCH (semver.org). Builds outside
-  # `task release` say "dev".
+  # A release version, vMAJOR.MINOR.PATCH (semver.org). Builds that are
+  # not a release say "dev".
   SEMVER: '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
-  # os/arch:archive-label:build-tags. Security keys load libfido2 at run
-  # time, which on Linux links the binary against glibc's loader, so the
-  # plain Linux archives stay fully static (nofido2: no security keys, run
-  # anywhere, Alpine included) and the -fido2 ones add security keys for
-  # glibc systems. macOS binaries always link libSystem, so they have both.
-  PLATFORMS: >-
-    darwin/arm64:macos-arm64: darwin/amd64:macos-x86_64:
-    linux/amd64:linux-x86_64:nofido2 linux/arm64:linux-arm64:nofido2
-    linux/amd64:linux-x86_64-fido2: linux/arm64:linux-arm64-fido2:
+  # Release tools for `task release-build` and `task release-snapshot`
+  # (platforms and archives are in .goreleaser.yaml), installed into TOOLS.
+  # Pinned and checked against the Go checksum database like the scanners
+  # below, and the Release workflow uses these same versions.
+  GORELEASER: github.com/goreleaser/goreleaser/v2@v2.20.0
+  SYFT: github.com/anchore/syft/cmd/syft@v1.57.0
+  TOOLS: .tools
   # Scanners for `task security`, pinned and checked against the Go
   # checksum database. Dependabot does not see them; bump them by hand.
   GOVULNCHECK: golang.org/x/vuln/cmd/govulncheck@v1.9.0
@@ -59,56 +60,37 @@ tasks:
     cmd: go build -trimpath -ldflags "-s -w" -o {{.DIST}}/{{.BINARY}} ./cmd/secret
 
   release:
-    desc: 'Check, pass the security gate, then cross-compile VERSION for every platform into dist/*.tar.gz plus SHA256SUMS: task release VERSION=v0.1.0'
-    # VERSION reaches the shell as an environment variable, never as
-    # command text.
+    desc: 'Check, pass the security gate and build every platform here, then tag HEAD as VERSION and push the tag, which starts the Release workflow: task release VERSION=v0.1.0'
+    # VERSION reaches the shell as the environment variable RELEASE_VERSION,
+    # never as command text. A variable the shell already exports wins over
+    # env: here, so the name is one a shell is unlikely to have.
     requires:
       vars: [VERSION]
     env:
-      VERSION: '{{.VERSION}}'
+      RELEASE_VERSION: '{{.VERSION}}'
+    preconditions:
+      - sh: printf '%s' "$RELEASE_VERSION" | grep -Eq '{{.SEMVER}}'
+        msg: 'VERSION must be vMAJOR.MINOR.PATCH, like v0.1.0'
+      - sh: test -z "$(git ls-remote --tags origin "refs/tags/$RELEASE_VERSION")"
+        msg: 'this version is already tagged on origin'
     cmds:
+      - git fetch --quiet --tags origin main
       - task: release-check
       - task: security
-      - rm -rf {{.DIST}} && mkdir -p {{.DIST}}
-      - |
-        for p in {{.PLATFORMS}}; do
-          target="${p%%:*}"; rest="${p#*:}"; label="${rest%%:*}"; tags="${rest#*:}"
-          stage="{{.DIST}}/{{.BINARY}}-$label"
-          mkdir -p "$stage"
-          CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" \
-            go build -trimpath -tags "$tags" -ldflags "-s -w -X main.version=$VERSION" -o "$stage/{{.BINARY}}" ./cmd/secret
-          cp LICENSE "$stage/"
-          tar -C {{.DIST}} -czf "$stage.tar.gz" "{{.BINARY}}-$label"
-          rm -rf "$stage"
-          echo "  $target -> $stage.tar.gz"
-        done
-      - cd {{.DIST}} && shasum -a 256 {{.BINARY}}-*.tar.gz > SHA256SUMS
-
-  release-upload:
-    desc: 'Release VERSION, upload dist/ to R2, update the landing page, then tag HEAD and push the tag: task release-upload VERSION=v0.1.0'
-    # R2 settings (R2_ACCOUNT_ID, R2_BUCKET, R2_ACCESS_KEY_ID,
-    # R2_SECRET_ACCESS_KEY, ...) may live in .env. They load for this task
-    # only, so the build and the scanners never see the keys. The upload
-    # script documents every variable and its default.
-    requires:
-      vars: [VERSION]
-    dotenv: ['.env']
-    env:
-      BINARY: '{{.BINARY}}'
-      DIST: '{{.DIST}}'
-      VERSION: '{{.VERSION}}'
-    cmds:
-      - task: release
-      - ./scripts/release-upload.sh
-      - git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null || git tag -a "$VERSION" -m "secret $VERSION"
-      - git push origin "refs/tags/$VERSION"
+      - task: release-snapshot
+      - git rev-parse -q --verify "refs/tags/$RELEASE_VERSION" >/dev/null || git tag -a "$RELEASE_VERSION" -m "secret $RELEASE_VERSION"
+      - git push origin "refs/tags/$RELEASE_VERSION"
 
   release-check:
-    internal: true
+    desc: 'The checks a release must pass, run by task release before tagging and by the Release workflow on the tag: task release-check VERSION=v0.1.0'
+    # It reads origin/main and the tags as they are here; task release
+    # fetches them first, and the workflow checks out the full history.
+    requires:
+      vars: [VERSION]
     env:
-      VERSION: '{{.VERSION}}'
+      RELEASE_VERSION: '{{.VERSION}}'
     preconditions:
-      - sh: printf '%s' "$VERSION" | grep -Eq '{{.SEMVER}}'
+      - sh: printf '%s' "$RELEASE_VERSION" | grep -Eq '{{.SEMVER}}'
         msg: 'VERSION must be vMAJOR.MINOR.PATCH, like v0.1.0'
       - sh: test "$(go env GOWORK)" = off
         msg: 'GOWORK is set, so the build would not use the SDK version go.mod requires: unset it'
@@ -118,18 +100,51 @@ tasks:
         msg: 'go.mod must require an SDK release (vMAJOR.MINOR.PATCH), not a pseudo-version'
       - sh: go list -deps ./... >/dev/null 2>&1
         msg: 'the modules go.mod requires do not resolve (go list -deps ./... says why): publish the SDK release, then GOWORK=off go mod tidy'
+      - sh: go mod tidy -diff >/dev/null
+        msg: 'go.mod or go.sum is not tidy: run GOWORK=off go mod tidy and commit the result'
       - sh: test -z "$(git status --porcelain)"
         msg: 'the tree has uncommitted or untracked files: a release is a commit'
-      - sh: git fetch --quiet origin main && git merge-base --is-ancestor HEAD origin/main
+      - sh: git merge-base --is-ancestor HEAD origin/main
         msg: 'HEAD is not on origin/main: push it first'
-      - sh: test -z "$(git ls-remote --tags origin "refs/tags/$VERSION")"
-        msg: 'this version is already published'
-      - sh: '! git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null || test "$(git rev-list -n 1 "refs/tags/$VERSION")" = "$(git rev-parse HEAD)"'
-        msg: 'a local tag for this version points at another commit'
+      - sh: '! git rev-parse -q --verify "refs/tags/$RELEASE_VERSION" >/dev/null || test "$(git rev-list -n 1 "refs/tags/$RELEASE_VERSION")" = "$(git rev-parse HEAD)"'
+        msg: 'the tag for this version points at another commit'
       - sh: |
-          last=$(git tag --list 'v*' | grep -E '{{.SEMVER}}' | grep -vxF "$VERSION" | sort -V | tail -n 1)
-          test -z "$last" || test "$(printf '%s\n%s\n' "$last" "$VERSION" | sort -V | tail -n 1)" = "$VERSION"
+          last=$(git tag --list 'v*' | grep -E '{{.SEMVER}}' | grep -vxF "$RELEASE_VERSION" | sort -V | tail -n 1)
+          test -z "$last" || test "$(printf '%s\n%s\n' "$last" "$RELEASE_VERSION" | sort -V | tail -n 1)" = "$RELEASE_VERSION"
         msg: 'VERSION is not newer than the last release'
+
+  release-build:
+    desc: 'Build the release for the tag VERSION at HEAD into dist/ (archives, SBOMs, SHA256SUMS and install.sh), as the Release workflow does: task release-build VERSION=v0.1.0'
+    # GoReleaser refuses a dirty tree and a tag that is not at HEAD. It
+    # publishes nothing: release.yml signs, attests and publishes dist/.
+    requires:
+      vars: [VERSION]
+    deps: [release-tools]
+    env:
+      RELEASE_VERSION: '{{.VERSION}}'
+    # Variables the shell already has win over env: here, so PATH and the
+    # tag are set on the command itself. GoReleaser runs syft from PATH.
+    cmds:
+      - GORELEASER_CURRENT_TAG="$RELEASE_VERSION" PATH="{{.TASKFILE_DIR}}/{{.TOOLS}}:$PATH" goreleaser release --clean --skip=publish
+      - cp scripts/install.sh {{.DIST}}/install.sh
+
+  release-snapshot:
+    desc: 'Build every release platform into dist/ as a dry run: binaries say "dev", nothing is signed or published'
+    deps: [release-tools]
+    cmds:
+      - PATH="{{.TASKFILE_DIR}}/{{.TOOLS}}:$PATH" goreleaser release --snapshot --clean --skip=publish
+      - cp scripts/install.sh {{.DIST}}/install.sh
+
+  release-tools:
+    internal: true
+    # go install refuses two modules in one call, so one call each.
+    cmds:
+      - GOBIN="{{.TASKFILE_DIR}}/{{.TOOLS}}" go install {{.GORELEASER}}
+      - GOBIN="{{.TASKFILE_DIR}}/{{.TOOLS}}" go install {{.SYFT}}
+      - printf '%s\n' '{{.GORELEASER}} {{.SYFT}}' > {{.TOOLS}}/versions
+    status:
+      - test -x {{.TOOLS}}/goreleaser && test -x {{.TOOLS}}/syft
+      - test "$(cat {{.TOOLS}}/versions 2>/dev/null)" = '{{.GORELEASER}} {{.SYFT}}'
 
   security:
     desc: 'Release gate: known vulnerabilities, gosec, disallowed licenses and secrets in git history (reports in reports/)'

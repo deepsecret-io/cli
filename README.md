@@ -8,7 +8,33 @@ You need a [DeepSecret](https://deepsecret.io) account, with a free trial or a p
 
 ## Install
 
-There is no release yet, so build it from source. You need Go 1.26 or newer.
+Each [release](https://github.com/deepsecret-io/cli/releases) has an archive for macOS, Linux and Windows, on arm64 and amd64 (x86_64). For macOS on Apple silicon:
+
+```bash
+curl -fsSLO https://github.com/deepsecret-io/cli/releases/latest/download/secret_darwin_arm64.tar.gz
+curl -fsSLO https://github.com/deepsecret-io/cli/releases/latest/download/SHA256SUMS
+shasum -a 256 --check --ignore-missing SHA256SUMS
+tar -xzf secret_darwin_arm64.tar.gz
+sudo install -d /usr/local/bin && sudo install -m 755 secret_darwin_arm64/secret /usr/local/bin/secret
+```
+
+The other archives are `secret_darwin_amd64` (Intel Macs), `secret_linux_<arch>_fido2` (Linux with glibc, with security key support) and `secret_linux_<arch>` (any Linux, Alpine included, fully static, without security key support), with `amd64` or `arm64` for `<arch>`. On Linux, check with `sha256sum --check --ignore-missing SHA256SUMS`. [Verifying a release](#verifying-a-release) shows how to check the signature and the build provenance too.
+
+On Windows, in PowerShell (use `secret_windows_arm64` on Arm):
+
+```powershell
+curl.exe -fsSLO https://github.com/deepsecret-io/cli/releases/latest/download/secret_windows_amd64.zip
+curl.exe -fsSLO https://github.com/deepsecret-io/cli/releases/latest/download/SHA256SUMS
+$want = (Select-String -Path SHA256SUMS -Pattern ' secret_windows_amd64\.zip$').Line.Split(' ')[0]
+if ((Get-FileHash secret_windows_amd64.zip -Algorithm SHA256).Hash -ne $want) { throw 'checksum mismatch' }
+Expand-Archive secret_windows_amd64.zip -DestinationPath .
+```
+
+Then move `secret_windows_amd64\secret.exe` to a folder on your `PATH`. The Windows build has no security key support.
+
+### From source
+
+You need Go 1.26 or newer.
 
 ```bash
 git clone https://github.com/deepsecret-io/cli.git
@@ -19,10 +45,6 @@ go build -trimpath -o secret ./cmd/secret
 Then move `secret` somewhere on your `PATH`. `secret --version` says `dev` on a build like this one.
 
 It builds on macOS, Linux and Windows.
-
-### Release archives
-
-Release archives for macOS and Linux (arm64 and x86_64) will come later. They will be published with an installer that checks each download's SHA-256, and this section will say how to use it.
 
 ## Quick start
 
@@ -62,7 +84,7 @@ Files are written to a folder named after the revision, `./<revision-id>/`, so a
 | `secret delete` | Delete secrets you sent |
 | `secret resume` | Finish or discard an interrupted upload, or list interrupted transfers |
 | `secret identity` | Manage your key pairs and the keys you know |
-| `secret groups` | List and inspect your organization's groups |
+| `secret groups` | List and inspect the groups you can send to: every group for owners and admins, your own for members |
 | `secret config` | Show the settings, or save an API key |
 | `secret completion` | Generate a shell completion script |
 
@@ -123,7 +145,7 @@ secret identity accept alice@example.com <fingerprint>
 
 ## Configuration
 
-The CLI keeps its login, keys and settings in `~/.deepsecret`.
+The CLI keeps its login, keys and settings in `~/.deepsecret` (`%USERPROFILE%\.deepsecret` on Windows), private to your user: mode 0700 and 0600 on macOS and Linux, and on Windows an ACL that grants your account alone. Decrypted files get the same protection. On Windows the CLI refuses a config, login or key file that another account may open, and says which `icacls` command fixes it.
 
 | Variable | What it does |
 |---|---|
@@ -154,13 +176,17 @@ The address of the API is compiled in. No flag, variable or config file changes 
 
 ## Verifying a release
 
-There is nothing to verify yet, since there is no release. Each release will include a `SHA256SUMS` file, and you will check an archive with:
+GitHub Actions builds every release from its `vX.Y.Z` tag. Next to the archives, each release has `SHA256SUMS`, its Sigstore signature `SHA256SUMS.sigstore.json` and an SBOM per archive, and every file has a GitHub build provenance attestation. The checksum alone catches a damaged download; the signature and the attestation show that this repository's Release workflow made the file:
 
 ```bash
-shasum -a 256 --check --ignore-missing SHA256SUMS
+cosign verify-blob SHA256SUMS --bundle SHA256SUMS.sigstore.json \
+  --certificate-identity https://github.com/deepsecret-io/cli/.github/workflows/release.yml@refs/tags/v0.1.0 \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+gh attestation verify secret_darwin_arm64.tar.gz --repo deepsecret-io/cli \
+  --signer-workflow deepsecret-io/cli/.github/workflows/release.yml
 ```
 
-This catches a damaged download. The file comes from the same place as the archive, so it does not protect you if that place is compromised: to rule that out, build from the release's git tag yourself. Releases are tagged `vX.Y.Z`.
+Use the tag you downloaded in the certificate identity. [RELEASING.md](RELEASING.md) explains each check, how to rebuild a release byte for byte, and how releases are made.
 
 ## Development
 
@@ -191,7 +217,7 @@ Encryption, the protocol and the API live in the [SDK](https://github.com/deepse
 | `internal/logging` | The diagnostic log (`--debug`, `DS_LOG`, `DS_LOG_PATH`) |
 | `internal/flags` | Validated flag types, argument checks and grouped help |
 | `internal/fingerprint` | Checking, matching and grouping key fingerprints |
-| `internal/safefile` | File writes that follow no links and leave no partial file |
+| `internal/safefile` | Files private to the user (0600 and 0700, an owner-only ACL on Windows), written without following links or leaving a partial file |
 | `internal/prompt` | Hidden terminal input |
 | `internal/console` | ANSI styles, terminal detection, sanitizing and the live view |
 | `internal/errs` | Errors that carry the detail of their Error block |

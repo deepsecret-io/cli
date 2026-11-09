@@ -102,7 +102,7 @@ func newGroupsListCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:     "list",
 		Aliases: []string{"ls"},
-		Short:   "List groups in your organization (alias: ls)",
+		Short:   "List the groups you can send to (alias: ls)",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			c, err := auth.NewAuthenticatedClient()
@@ -114,19 +114,23 @@ func newGroupsListCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("could not fetch your account: %w", errs.APICause(err))
 			}
-			groups, err := orgGroups(cmd.Context(), c, info)
+			groups, all, err := orgGroups(cmd.Context(), c, info)
 			if err != nil {
 				return err
 			}
 
 			if len(groups) == 0 {
-				ui.Dimmed("Your organization has no groups yet.")
+				ui.Dimmed(noGroups(all))
 				return nil
 			}
 
 			sort.Slice(groups, func(i, j int) bool { return groups[i].Name < groups[j].Name })
 
-			ui.Header(fmt.Sprintf("Groups (%d)", len(groups)))
+			title := "Groups"
+			if !all {
+				title = "Your groups"
+			}
+			ui.Header(fmt.Sprintf("%s (%d)", title, len(groups)))
 			fmt.Fprintln(os.Stderr)
 
 			// Rows wait in the tabwriter until Flush, which returns any write error.
@@ -145,23 +149,33 @@ func newGroupsListCmd() *cobra.Command {
 	}
 }
 
-// orgGroups lists the groups of the organization of the account info
-// describes.
-func orgGroups(ctx context.Context, c *deepsecret.Client, info *sdkidentity.Actor) ([]sdkidentity.Group, error) {
+// orgGroups lists the groups the account info describes can send to: every
+// group of its organization for an owner or admin, and the groups they
+// belong to for a member. The server's "groups" permission says which, and
+// all reports it.
+func orgGroups(ctx context.Context, c *deepsecret.Client, info *sdkidentity.Actor) (groups []sdkidentity.Group, all bool, err error) {
 	if info.OrgID == "" {
-		return nil, errors.New("your account is not in an organization, so it has no groups")
+		return nil, false, errors.New("your account is not in an organization, so it has no groups")
 	}
-	groups, err := c.Identity.ListGroups(ctx, info.OrgID)
+	if info.Permissions["groups"] {
+		groups, err = c.Identity.ListGroups(ctx, info.OrgID)
+		if err != nil {
+			return nil, true, fmt.Errorf("could not list your organization's groups: %w", errs.APICause(err))
+		}
+		return groups, true, nil
+	}
+	groups, err = c.Identity.ListMyGroups(ctx, info.OrgID)
 	if err != nil {
-		return nil, fmt.Errorf("could not list your organization's groups: %w", errs.APICause(err))
+		return nil, false, fmt.Errorf("could not list your groups: %w", errs.APICause(err))
 	}
-	return groups, nil
+	return groups, false, nil
 }
 
-// findGroup finds the group named name, in any case, in the organization
-// of the account info describes.
+// findGroup finds the group named name, in any case, among the groups the
+// account info describes can send to. For a member, a group they are not
+// in is not found, like one that does not exist.
 func findGroup(ctx context.Context, c *deepsecret.Client, info *sdkidentity.Actor, name string) (*sdkidentity.Group, error) {
-	groups, err := orgGroups(ctx, c, info)
+	groups, all, err := orgGroups(ctx, c, info)
 	if err != nil {
 		return nil, err
 	}
@@ -170,21 +184,33 @@ func findGroup(ctx context.Context, c *deepsecret.Client, info *sdkidentity.Acto
 			return &groups[i], nil
 		}
 	}
-	return nil, errs.WithDetail(fmt.Errorf("group %q not found", name), groupNames(groups))
+	return nil, errs.WithDetail(fmt.Errorf("group %q not found", name), groupNames(groups, all))
 }
 
-// groupNames names an organization's groups, for the error of a group not
-// found among them.
-func groupNames(groups []sdkidentity.Group) string {
+// groupNames names the groups that were searched, for the error of a group
+// not found among them: the organization's, or the caller's own.
+func groupNames(groups []sdkidentity.Group, all bool) string {
 	if len(groups) == 0 {
-		return "Your organization has no groups yet."
+		return noGroups(all)
 	}
 	names := make([]string, len(groups))
 	for i, g := range groups {
 		names[i] = console.Safe(g.Name)
 	}
 	sort.Strings(names)
+	if !all {
+		return "The groups you belong to: " + strings.Join(names, ", ") + "."
+	}
 	return "Your organization's groups: " + strings.Join(names, ", ") + "."
+}
+
+// noGroups says there is no group to list: none in the organization, or
+// none the caller belongs to.
+func noGroups(all bool) string {
+	if all {
+		return "Your organization has no groups yet."
+	}
+	return "You belong to no group yet. Your organization's owner or an admin adds members to groups."
 }
 
 // groupNameArg accepts exactly one group name that is not blank.

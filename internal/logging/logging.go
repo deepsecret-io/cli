@@ -20,6 +20,7 @@ import (
 	deepsecret "github.com/deepsecret-io/deepsecret-go"
 
 	"github.com/deepsecret-io/cli/internal/console"
+	"github.com/deepsecret-io/cli/internal/safefile"
 )
 
 // Logs, as Terraform writes them. They are off unless asked for: --debug
@@ -81,7 +82,7 @@ func Setup(debugFlag bool) error {
 	var w io.Writer = stderrAboveLive{}
 	color := console.Reset != ""
 	if path := os.Getenv("DS_LOG_PATH"); path != "" {
-		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600) // #nosec G304 G703 -- the path the user set in DS_LOG_PATH
+		f, err := safefile.OpenAppend(path) // created private to the user: 0600, an owner-only ACL on Windows
 		if err != nil {
 			return fmt.Errorf("could not open the log file DS_LOG_PATH names: %w", err)
 		}

@@ -10,12 +10,13 @@ import (
 
 	"github.com/deepsecret-io/cli/internal/config"
 	"github.com/deepsecret-io/cli/internal/errs"
+	"github.com/deepsecret-io/cli/internal/testutil"
 )
 
 // An expired login says so, rather than "not logged in"; a saved API key
 // is used without a login.
 func TestResolveAuth(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SetHome(t, t.TempDir())
 	savedKey := FlagKey
 	t.Cleanup(func() { FlagKey = savedKey })
 	FlagKey = ""

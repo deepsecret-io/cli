@@ -8,13 +8,14 @@ import (
 	"testing"
 
 	"github.com/deepsecret-io/cli/internal/config"
+	"github.com/deepsecret-io/cli/internal/testutil"
 	"github.com/deepsecret-io/deepsecret-go/keys"
 	"github.com/deepsecret-io/deepsecret-go/keystore"
 )
 
 // The key pair check says which keys a password protects.
 func TestDoctorNotesAPasswordKey(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SetHome(t, t.TempDir())
 	save := func(password string) string {
 		t.Helper()
 		kp, err := keys.Generate()

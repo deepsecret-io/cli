@@ -4,6 +4,7 @@
 package command
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"github.com/deepsecret-io/cli/internal/flags"
 	"github.com/deepsecret-io/cli/internal/logging"
 	"github.com/deepsecret-io/cli/internal/login"
+	"github.com/deepsecret-io/cli/internal/safefile"
 	"github.com/deepsecret-io/cli/internal/ui"
 )
 
@@ -55,7 +57,11 @@ func newLogoutCmd() *cobra.Command {
 		Short: "Revoke and remove the stored login token",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			tf, err := config.LoadTokenFile()
+			// A token others may open is revoked and removed all the
+			// same: that is what an exposed token needs.
+			_, err := config.LoadTokenFile()
+			exposed := errors.Is(err, safefile.ErrNotPrivate)
+			tf, err := config.LoadTokenFileToRevoke()
 			if err != nil || tf.Token == "" {
 				return errors.New("not logged in: there is no login session on this device")
 			}
@@ -64,6 +70,10 @@ func newLogoutCmd() *cobra.Command {
 			revokeErr := login.Revoke(cmd.Context(), config.APIBaseURL, tf.Token)
 			if err := config.RemoveToken(); err != nil {
 				return fmt.Errorf("could not remove the login token: %w", err)
+			}
+			if exposed {
+				ui.Warning("The login token file was open to other users",
+					"Other accounts on this device may have read it. Sign in again with 'secret login': the new token file is private to you.")
 			}
 			if revokeErr != nil {
 				ui.Warning("The server could not revoke the login token",
@@ -83,14 +93,28 @@ func newLogoutCmd() *cobra.Command {
 // else the login session, else the saved key (auth.Resolve).
 func showAuthStatus() error {
 	fmt.Fprintln(os.Stderr)
-	if tf, err := config.LoadTokenFile(); err == nil && tf.Token != "" {
+	// A token or config file others may open fails the command once its
+	// status is shown, whichever credential is in use: the fix comes with
+	// the error.
+	var refused error
+	tf, err := config.LoadTokenFile()
+	switch {
+	case err == nil && tf.Token != "":
 		ui.KeyValue("Login", console.Safe(orDefault(tf.Email, "account not recorded"))+" (browser sign-in)")
 		ui.KeyValue("Token expires", tokenExpiry(tf.ExpiresAt, time.Now()))
-	} else {
+	case errors.Is(err, safefile.ErrNotPrivate):
+		ui.KeyValue("Login", "refused: the token file is open to other users")
+		refused = err
+	default:
 		ui.KeyValue("Login", "not logged in (run: secret login)")
 	}
-	if cfg, err := config.Load(); err == nil && cfg.APIKey != "" {
+	cfg, err := config.Load()
+	switch {
+	case err == nil && cfg.APIKey != "":
 		ui.KeyValue("Saved API key", "set (used when not logged in)")
+	case errors.Is(err, safefile.ErrNotPrivate):
+		ui.KeyValue("Saved API key", "refused: the config file is open to other users")
+		refused = cmp.Or(refused, err)
 	}
 	_, source, err := auth.Resolve()
 	if err != nil {
@@ -99,7 +123,7 @@ func showAuthStatus() error {
 	ui.KeyValue("In use", source)
 	ui.KeyValue("API URL", config.APIBaseURL)
 	fmt.Fprintln(os.Stderr)
-	return nil
+	return refused
 }
 
 // tokenExpiry says when the stored session token, expiring at expiresAt,

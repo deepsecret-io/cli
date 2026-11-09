@@ -100,7 +100,7 @@ func RemoteLabel(k sdkidentity.Key) string {
 // RequireTerminal refuses to start a security key request nobody can
 // answer: it needs a touch, and usually a PIN typed on the terminal.
 func RequireTerminal(name string) error {
-	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	t, err := prompt.OpenTerminal()
 	if err != nil {
 		what := errors.New("a security key needs a terminal")
 		if name != "" {
@@ -108,5 +108,5 @@ func RequireTerminal(name string) error {
 		}
 		return errs.WithDetail(what, "Run the command in a terminal. Automation needs a key pair of its own, with a password or none.")
 	}
-	return tty.Close()
+	return t.Close()
 }

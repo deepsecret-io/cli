@@ -1,0 +1,133 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 DeepSecret
+
+# GoReleaser builds the release into dist/: an archive per platform, an SPDX
+# SBOM per archive and SHA256SUMS. It never publishes. The Release workflow
+# (.github/workflows/release.yml) signs, attests and publishes what it
+# built; `task release-snapshot` runs the same build on your machine. The
+# GoReleaser version is GORELEASER in Taskfile.yml. RELEASING.md has the
+# whole process.
+version: 2
+
+project_name: secret
+
+env:
+  # Build with the SDK version go.mod requires, never a local ../sdk through
+  # a go.work, with the Go toolchain that is installed and with no change to
+  # go.mod or go.sum.
+  - GOWORK=off
+  - GOTOOLCHAIN=local
+  - GOFLAGS=-mod=readonly
+  # The binaries load libfido2 at run time (purego), so none uses cgo.
+  - CGO_ENABLED=0
+
+# Windows ignores the 0600 and 0700 modes the CLI relies on elsewhere, so
+# there the CLI (internal/safefile) and the SDK (internal/disk) create the
+# config, the login token, key files and decrypted files with an owner-only
+# ACL, and refuse to read a config, token or key file others may open. Key
+# files are the SDK's, so a Windows release needs an SDK release with that
+# code: the Windows CI job (ci.yml, test (windows)), which the Release
+# workflow runs, checks it through internal/identity's TestKeyFilesArePrivate
+# and fails on an SDK without it.
+#
+# Every build is reproducible: the same commit and Go version give the same
+# bytes. -trimpath drops local paths, the build ID is empty, and file times
+# are the commit's time. The version is the tag, as vMAJOR.MINOR.PATCH; a
+# snapshot says "dev", like every build that is not a release.
+builds:
+  # macOS links libSystem, so these binaries always have security key
+  # (YubiKey) support. Windows has none: its build of the SDK's fido2
+  # package is a stub that says so. GoReleaser names the Windows binary
+  # secret.exe.
+  - id: darwin-windows
+    main: ./cmd/secret
+    binary: secret
+    goos: [darwin, windows]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags: &ldflags
+      - -s -w -buildid= -X main.version={{ if .IsSnapshot }}dev{{ else }}{{ .Tag }}{{ end }}
+    mod_timestamp: &mtime '{{ .CommitTimestamp }}'
+
+  # Fully static, with no security key support (nofido2): runs on any Linux,
+  # Alpine and other musl systems included.
+  - id: linux
+    main: ./cmd/secret
+    binary: secret
+    goos: [linux]
+    goarch: [amd64, arm64]
+    tags: [nofido2]
+    flags: [-trimpath]
+    ldflags: *ldflags
+    mod_timestamp: *mtime
+
+  # Security key support: loading libfido2 links the binary against glibc's
+  # dynamic loader, so these run on glibc systems only.
+  - id: linux-fido2
+    main: ./cmd/secret
+    binary: secret
+    goos: [linux]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags: *ldflags
+    mod_timestamp: *mtime
+
+# Names carry no version, so releases/latest/download/<name> always works:
+# secret_<os>_<arch>.tar.gz, secret_linux_<arch>_fido2.tar.gz and, for
+# Windows, secret_windows_<arch>.zip. Each holds a folder of the same name
+# with the binary and the LICENSE.
+archives:
+  - id: default
+    ids: [darwin-windows, linux]
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: '{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}'
+    wrap_in_directory: true
+    builds_info: &binary_info
+      owner: root
+      group: root
+      mode: 0755
+      mtime: '{{ .CommitDate }}'
+    files: &files
+      - src: LICENSE
+        info:
+          owner: root
+          group: root
+          mode: 0644
+          mtime: '{{ .CommitDate }}'
+
+  - id: fido2
+    ids: [linux-fido2]
+    formats: [tar.gz]
+    name_template: '{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}_fido2'
+    wrap_in_directory: true
+    builds_info: *binary_info
+    files: *files
+
+# One SBOM per archive, from the Go build information in its binary (syft,
+# version SYFT in Taskfile.yml).
+sboms:
+  - id: archive
+    artifacts: archive
+    documents: ['{{ .ArtifactName }}.spdx.json']
+
+# SHA256SUMS lists every archive, every SBOM and the installer. The Release
+# workflow signs it with Sigstore and attests each file it lists.
+checksum:
+  name_template: SHA256SUMS
+  algorithm: sha256
+  extra_files:
+    - glob: ./scripts/install.sh
+
+# Publishing is the Release workflow's job, after signing and attesting. This
+# keeps a goreleaser run anywhere else from publishing unsigned files.
+release:
+  disable: true
+
+changelog:
+  disable: true
+
+metadata:
+  mod_timestamp: *mtime

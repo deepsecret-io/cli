@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/deepsecret-io/cli/internal/errs"
+	"github.com/deepsecret-io/cli/internal/testutil"
 )
 
 // A decrypted file whose write fails is removed, not left half written.
@@ -37,13 +38,10 @@ func TestWriteAndCloseRemovesPartialFile(t *testing.T) {
 	}
 }
 
-// With --overwrite, a decrypted file replaces the old one: it gets its own
-// mode (0600), not the old file's, and a link at -o is replaced, never
-// written through.
+// With --overwrite, a decrypted file replaces the old one: it is private
+// (0600, or an owner-only ACL on Windows), not left with the old file's
+// access, and a link at -o is replaced, never written through.
 func TestSafeWriteFileOverwriteReplaces(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("file modes and links differ on Windows")
-	}
 	dir := t.TempDir()
 	dest := filepath.Join(dir, "secret.txt")
 	if err := os.WriteFile(dest, []byte("old"), 0o644); err != nil {
@@ -62,9 +60,10 @@ func TestSafeWriteFileOverwriteReplaces(t *testing.T) {
 	if err := Write(dest, []byte("new"), 0o600, true); err != nil {
 		t.Fatal(err)
 	}
-	if info, err := os.Lstat(dest); err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
-		t.Fatalf("after overwrite: %v, %v; want a 0600 file", info, err)
+	if info, err := os.Lstat(dest); err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("after overwrite: %v, %v; want a regular file", info, err)
 	}
+	testutil.AssertPrivate(t, dest)
 	if data, _ := os.ReadFile(dest); string(data) != "new" {
 		t.Fatalf("after overwrite the file holds %q", data)
 	}
@@ -77,6 +76,9 @@ func TestSafeWriteFileOverwriteReplaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(elsewhere, dest); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("creating a symlink needs a privilege this account lacks: %v", err)
+		}
 		t.Fatal(err)
 	}
 	if err := Write(dest, []byte("newer"), 0o600, false); err == nil {
@@ -88,9 +90,10 @@ func TestSafeWriteFileOverwriteReplaces(t *testing.T) {
 	if data, _ := os.ReadFile(elsewhere); string(data) != "untouched" {
 		t.Errorf("the decrypted data was written through the link: %q", data)
 	}
-	if info, err := os.Lstat(dest); err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
-		t.Errorf("after overwrite: %v, %v; want a 0600 file", info, err)
+	if info, err := os.Lstat(dest); err != nil || !info.Mode().IsRegular() {
+		t.Errorf("after overwrite: %v, %v; want a regular file", info, err)
 	}
+	testutil.AssertPrivate(t, dest)
 	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
 		t.Errorf("the output folder holds %d entries; a temporary file was left", len(entries))
 	}

@@ -12,6 +12,7 @@ import (
 	"github.com/deepsecret-io/cli/internal/config"
 	"github.com/deepsecret-io/cli/internal/errs"
 	"github.com/deepsecret-io/cli/internal/logging"
+	"github.com/deepsecret-io/cli/internal/safefile"
 )
 
 // FlagKey is the key given with --api-key, --api-key-file, --api-key-stdin or
@@ -25,7 +26,8 @@ var (
 // given with a flag or DS_API_KEY, the login session, then the API key
 // saved in the config file. It returns the credential and where it came
 // from. The API URL is compiled in (config.APIBaseURL), so it returns no
-// URL.
+// URL. A token or config file others may open (safefile.ErrNotPrivate) is
+// an error, not a credential to skip: the user must know it is exposed.
 func Resolve() (key, source string, err error) {
 	if FlagKey != "" {
 		return FlagKey, FlagKeyOrigin, nil
@@ -34,8 +36,15 @@ func Resolve() (key, source string, err error) {
 	if tokenErr == nil {
 		return "bearer:" + token, "login session", nil
 	}
-	if cfg, err := config.Load(); err == nil && cfg.APIKey != "" {
+	if errors.Is(tokenErr, safefile.ErrNotPrivate) {
+		return "", "", tokenErr
+	}
+	cfg, cfgErr := config.Load()
+	if cfgErr == nil && cfg.APIKey != "" {
 		return cfg.APIKey, "saved API key", nil
+	}
+	if errors.Is(cfgErr, safefile.ErrNotPrivate) {
+		return "", "", cfgErr
 	}
 	summary := "not logged in"
 	if errors.Is(tokenErr, config.ErrSessionExpired) {

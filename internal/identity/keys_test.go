@@ -13,13 +13,14 @@ import (
 	"github.com/deepsecret-io/deepsecret-go/keys"
 
 	"github.com/deepsecret-io/cli/internal/config"
+	"github.com/deepsecret-io/cli/internal/testutil"
 )
 
 // Key fingerprints name files in the keys directory, and the server
 // supplies some of them: one that is not hex is never used as a path.
 func TestKeyFileRefusesPaths(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testutil.SetHome(t, home)
 	if err := os.MkdirAll(config.KeysDir(), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +54,7 @@ func TestKeyFileRefusesPaths(t *testing.T) {
 // identity show reads the public keys of an encrypted key pair without
 // its password.
 func TestReadPublicKeysNeedsNoPassword(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SetHome(t, t.TempDir())
 	kp, err := keys.Generate()
 	if err != nil {
 		t.Fatal(err)

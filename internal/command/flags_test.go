@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
+	"github.com/deepsecret-io/cli/internal/errs"
 	"github.com/deepsecret-io/cli/internal/flags"
 )
 
@@ -37,6 +38,9 @@ const fullFP = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 // error that names what is wrong.
 func TestFlagAndArgumentChecks(t *testing.T) {
 	dir := t.TempDir()
+	// The system's own words for a missing file, which differ on Windows.
+	_, statErr := os.Lstat(dir + "/missing")
+	missing := "cannot read " + dir + "/missing: " + errs.PathCause(statErr).Error()
 	cases := []struct {
 		args []string
 		want string
@@ -67,8 +71,8 @@ func TestFlagAndArgumentChecks(t *testing.T) {
 		{[]string{"encrypt", "-d", "K=V", "-t", "a@example.com", "-g", "eng"}, "none of the others can be"},
 		{[]string{"encrypt", "-f", "x", "-d", "K=V"}, "none of the others can be"},
 		{[]string{"encrypt", "x", "-d", "K=V"}, "give files or --data, not both"},
-		{[]string{"encrypt", "-f", dir + "/missing"}, "cannot read " + dir + "/missing: no such file or directory"},
-		{[]string{"encrypt", dir, dir + "/missing", "-t", "a@example.com"}, "cannot read " + dir + "/missing: no such file or directory"},
+		{[]string{"encrypt", "-f", dir + "/missing"}, missing},
+		{[]string{"encrypt", dir, dir + "/missing", "-t", "a@example.com"}, missing},
 		{[]string{"encrypt", "-d", "K=V", "--local", "--ttl", "1h"}, "none of the others can be"},
 		{[]string{"encrypt", "-d", "K=V", "--local", "--threads", "8"}, "none of the others can be"},
 		{[]string{"encrypt", "-d", "K=V", "-o", "x.cbor"}, "--output only applies with --local"},

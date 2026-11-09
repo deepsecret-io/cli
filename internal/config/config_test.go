@@ -15,15 +15,12 @@ import (
 	"github.com/deepsecret-io/cli/internal/testutil"
 )
 
-// The config file holds the API key: saving it makes the file private even
-// when an older one was not, and replaces a link instead of writing
-// through it.
+// The config file holds the API key: saving it makes the file private
+// (0600, or an owner-only ACL on Windows) even when an older one was not,
+// and replaces a link instead of writing through it.
 func TestSaveConfigIsPrivate(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("file modes and links differ on Windows")
-	}
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testutil.SetHome(t, home)
 	if err := os.MkdirAll(Dir(), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -33,9 +30,7 @@ func TestSaveConfigIsPrivate(t *testing.T) {
 	if err := Save(&Config{APIKey: "ds_test_key"}); err != nil {
 		t.Fatal(err)
 	}
-	if info, err := os.Stat(Path()); err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("config mode: %v, %v; want 0600", info, err)
-	}
+	testutil.AssertPrivate(t, Path())
 
 	elsewhere := filepath.Join(home, "elsewhere.json")
 	if err := os.WriteFile(elsewhere, []byte("untouched"), 0o644); err != nil {
@@ -45,6 +40,9 @@ func TestSaveConfigIsPrivate(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(elsewhere, Path()); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("creating a symlink needs a privilege this account lacks: %v", err)
+		}
 		t.Fatal(err)
 	}
 	if err := Save(&Config{APIKey: "ds_test_key"}); err != nil {
@@ -56,6 +54,7 @@ func TestSaveConfigIsPrivate(t *testing.T) {
 	if info, err := os.Lstat(Path()); err != nil || !info.Mode().IsRegular() {
 		t.Errorf("config is not a regular file: %v, %v", info, err)
 	}
+	testutil.AssertPrivate(t, Path())
 	if c, err := Load(); err != nil || c.APIKey != "ds_test_key" {
 		t.Errorf("config: %+v, %v", c, err)
 	}
@@ -69,7 +68,7 @@ func TestSaveConfigIsPrivate(t *testing.T) {
 // revoked the stored one, so the next command needs a new login.
 func TestSaveRefreshedTokenWarns(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	testutil.SetHome(t, home)
 	// A file where the config folder goes: nothing can be saved in it.
 	if err := os.WriteFile(filepath.Join(home, ".deepsecret"), nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -82,9 +81,10 @@ func TestSaveRefreshedTokenWarns(t *testing.T) {
 }
 
 // A refreshed session token replaces the stored one in place, keeping the
-// email, private to the user, with no temporary file left behind.
+// email, private to the user in a folder private to the user, with no
+// temporary file left behind.
 func TestSaveRefreshedToken(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SetHome(t, t.TempDir())
 	if err := SaveToken("old", "alice@example.com", time.Now().Add(time.Hour).UTC().Format(time.RFC3339)); err != nil {
 		t.Fatal(err)
 	}
@@ -95,9 +95,8 @@ func TestSaveRefreshedToken(t *testing.T) {
 	if err != nil || tf.Token != "new" || tf.Email != "alice@example.com" {
 		t.Fatalf("token file: %+v, %v", tf, err)
 	}
-	if info, err := os.Stat(tokenPath()); err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("token file mode: %v, %v", info.Mode(), err)
-	}
+	testutil.AssertPrivate(t, tokenPath())
+	testutil.AssertPrivate(t, Dir())
 	entries, _ := os.ReadDir(Dir())
 	if len(entries) != 1 {
 		t.Fatalf("config folder holds %d files, want only the token", len(entries))

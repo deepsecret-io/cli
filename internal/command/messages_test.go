@@ -268,7 +268,7 @@ func TestPageBounds(t *testing.T) {
 // yet, matching the server's fingerprints however long, and says what to
 // do when there is none or several.
 func TestKeyToSync(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SetHome(t, t.TempDir())
 	a, b := strings.Repeat("a", 64), strings.Repeat("b", 64)
 	if _, err := keyToSync("", nil); err == nil || !strings.Contains(err.Error(), "no key pair on this device") {
 		t.Fatalf("no key pairs: %v", err)
@@ -302,7 +302,7 @@ func TestKeyToSync(t *testing.T) {
 // login --check says a saved API key is used only without a login, and
 // which credential commands use.
 func TestShowAuthStatus(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SetHome(t, t.TempDir())
 	savedKey := auth.FlagKey
 	t.Cleanup(func() { auth.FlagKey = savedKey })
 	auth.FlagKey = ""
@@ -327,7 +327,7 @@ func TestShowAuthStatus(t *testing.T) {
 // secret config reports a config file it cannot read, instead of showing
 // the API key as not set.
 func TestConfigReportsAnUnreadableFile(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	testutil.SetHome(t, t.TempDir())
 	t.Setenv("DS_API_KEY", "")
 	if err := os.MkdirAll(config.Dir(), 0o700); err != nil {
 		t.Fatal(err)

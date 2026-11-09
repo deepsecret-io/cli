@@ -31,11 +31,12 @@ import (
 
 // forceOverwrite is wired from the --overwrite flag in newDecryptCmd. When false,
 // existing destination files cause writes to fail (O_EXCL); when true, they
-// are replaced by a new file renamed over them (safefile.Write). On Unix, a
-// symlink at a created file's leaf is rejected (O_NOFOLLOW), so an attacker
-// who can plant one in outputDir cannot redirect plaintext writes; see
-// decrypt_unix.go / decrypt_windows.go for the platform-specific
-// createExclusive.
+// are replaced by a new file renamed over them (safefile.Write). A link at
+// a created file's leaf is rejected (O_NOFOLLOW on Unix, an open that does
+// not follow reparse points on Windows), so an attacker who can plant one
+// in outputDir cannot redirect plaintext writes, and on Windows the file
+// gets an owner-only ACL; see createExclusive in safefile/private_unix.go
+// and safefile/private_windows.go.
 var forceOverwrite bool
 
 func newDecryptCmd() *cobra.Command {
@@ -102,7 +103,7 @@ plan and every change to it.`,
 			// revision ID yet.
 			if outputDir != "" {
 				if info, err := os.Stat(outputDir); err != nil {
-					if err := os.MkdirAll(outputDir, 0o700); err != nil {
+					if err := safefile.MkdirPrivate(outputDir); err != nil {
 						return fmt.Errorf("could not create the output directory %s: %w", outputDir, errs.PathCause(err))
 					}
 				} else if !info.IsDir() {
@@ -315,6 +316,10 @@ plan and every change to it.`,
 				if errors.As(err, &stale) {
 					return errs.WithDetail(err, staleRevisionDetail(secretID, stale))
 				}
+				var unrecorded *trust.UnrecordedSenderError
+				if errors.As(err, &unrecorded) {
+					return errs.WithDetail(err, recordAccountAdvice(unrecorded.Email, unrecorded.Fingerprint))
+				}
 				return err
 			}
 			result := opened.Result
@@ -356,22 +361,7 @@ plan and every change to it.`,
 			case result.Compressed:
 				ui.KeyValue("Compression", console.Safe(strings.ToUpper(result.Compression)))
 			}
-			if result.SenderEmail != "" {
-				// A key pair on this device sealed it: one of yours.
-				// Only a full fingerprint names a key file, as for
-				// identity.SecurityKeyNote.
-				notes := []string{"their registered key"}
-				if len(result.SenderFingerprint) == 64 && identity.Protection(result.SenderFingerprint) != "" {
-					notes[0] = "your key"
-				}
-				if identity.SecurityKeyNote(result.SenderFingerprint) != "" {
-					notes = append(notes, "security key")
-				}
-				ui.KeyValue("Sender", fmt.Sprintf("%s  %s%s%s (%s)", console.Safe(result.SenderEmail),
-					console.Dim, keys.ShortFingerprint(result.SenderFingerprint), console.Reset, strings.Join(notes, ", ")))
-			} else {
-				ui.KeyValue("Sender", keys.ShortFingerprint(result.SenderFingerprint)+identity.SecurityKeyNote(result.SenderFingerprint))
-			}
+			ui.KeyValue("Sender", senderLine(&result))
 			// The recipient list is the one the sender signed; emails are
 			// the server's labels for those keys (the sender's, in a local
 			// file).
@@ -403,6 +393,7 @@ plan and every change to it.`,
 			if result.SenderFirstUse {
 				printFirstUse([]secrets.Recipient{{Email: result.SenderEmail, Fingerprint: result.SenderFingerprint}})
 			}
+			printOwnKeyNotice(&result)
 
 			if written != nil {
 				printWrittenFiles(written, outputDir)
@@ -434,6 +425,58 @@ plan and every change to it.`,
 		cmd.MarkFlagsMutuallyExclusive("local", serverOnly)
 	}
 	return cmd
+}
+
+// senderLine is a decrypt's Sender value: the sender the server names, the
+// short fingerprint of the key that signed it, and what that key is. A key
+// pair on this device is the user's, whoever the server names, so the line
+// says so rather than call it the sender's registered key.
+func senderLine(r *secrets.DecryptResult) string {
+	var notes []string
+	switch {
+	case r.SenderOwnKey:
+		notes = append(notes, "a key on this device")
+	case r.SenderEmail != "":
+		notes = append(notes, "their registered key")
+	}
+	if identity.SecurityKeyNote(r.SenderFingerprint) != "" {
+		notes = append(notes, "security key")
+	}
+	line := keys.ShortFingerprint(r.SenderFingerprint)
+	if r.SenderEmail != "" {
+		line = console.Safe(r.SenderEmail) + "  " + console.Dim + line + console.Reset
+	}
+	if len(notes) > 0 {
+		line += " (" + strings.Join(notes, ", ") + ")"
+	}
+	return line
+}
+
+// printOwnKeyNotice warns, under a decrypt's result block, when a key pair
+// on this device signed the secret but the sender the server names is not
+// recorded here as one of the user's accounts. That is either an account of
+// the user's this device does not know yet, or the server naming someone
+// else as the sender of the user's own secret: nothing here tells them
+// apart, so the SDK opens it and the user is told.
+func printOwnKeyNotice(r *secrets.DecryptResult) {
+	if !r.SenderOwnKey || r.SenderOwnAccount {
+		return
+	}
+	ui.Warning("This secret is signed with a key on this device",
+		fmt.Sprintf("It names %[1]s as its sender, but this device has not recorded %[1]s as one of your accounts.\n\n%[2]s\n\n"+
+			"If it is not, you signed this secret and it was relabelled as from %[1]s.",
+			console.Safe(r.SenderEmail), recordAccountAdvice(r.SenderEmail, r.SenderFingerprint)))
+}
+
+// recordAccountAdvice says how to record email, if it is the user's, as one
+// of their accounts on this device with fp, the key pair here that signed a
+// secret from it: signed in as it, identity sync records it without
+// uploading or unlocking anything when fp is registered for it already, and
+// otherwise registers fp and makes it the account's primary key.
+func recordAccountAdvice(email, fp string) string {
+	return fmt.Sprintf("If %s is your account, sign in as it (secret login) and record it as yours on this device with:\n\n"+
+		"  secret identity sync -i %s\n\n"+
+		"If that key is not registered for it yet, this also registers it and makes it your primary key.", console.Safe(email), console.Safe(fp))
 }
 
 // staleRevisionDetail says, for the Error block of a decrypt refused as a

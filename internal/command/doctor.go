@@ -25,6 +25,7 @@ import (
 	"github.com/deepsecret-io/cli/internal/errs"
 	"github.com/deepsecret-io/cli/internal/fingerprint"
 	"github.com/deepsecret-io/cli/internal/identity"
+	"github.com/deepsecret-io/cli/internal/safefile"
 	"github.com/deepsecret-io/cli/internal/ui"
 )
 
@@ -119,9 +120,17 @@ type credential struct {
 }
 
 func checkAuth(ctx context.Context) []checkResult {
+	// A token or config file others may open (safefile.ErrNotPrivate) is a
+	// failed check, not a missing credential: saving it again replaces it
+	// with a private file.
+	var refused []checkResult
 	var session *config.TokenFile
-	if tf, err := config.LoadTokenFile(); err == nil && tf.Token != "" {
+	tf, err := config.LoadTokenFile()
+	switch {
+	case err == nil && tf.Token != "":
 		session = tf
+	case errors.Is(err, safefile.ErrNotPrivate):
+		refused = append(refused, checkResult{name: "Login", detail: err.Error(), fix: "secret login"})
 	}
 	var keyList []credential
 	if auth.FlagKey != "" {
@@ -131,11 +140,18 @@ func checkAuth(ctx context.Context) []checkResult {
 		}
 		keyList = append(keyList, credential{"API key (" + auth.FlagKeyOrigin + ")", auth.FlagKey, fix})
 	}
-	if cfg, err := config.Load(); err == nil && cfg.APIKey != "" && cfg.APIKey != auth.FlagKey {
+	cfg, err := config.Load()
+	switch {
+	case err == nil && cfg.APIKey != "" && cfg.APIKey != auth.FlagKey:
 		keyList = append(keyList, credential{"API key (saved)", cfg.APIKey, "secret config --save-api-key --api-key-stdin"})
+	case errors.Is(err, safefile.ErrNotPrivate):
+		refused = append(refused, checkResult{name: "API key (saved)", detail: err.Error(), fix: "secret config --save-api-key --api-key-stdin"})
+	}
+	if len(refused) > 0 && session == nil && len(keyList) == 0 {
+		return refused // not "not logged in": that would hide why
 	}
 	verify := func(key string) error { return verifyCredential(ctx, key) }
-	return authChecks(session, keyList, verify, time.Now())
+	return append(refused, authChecks(session, keyList, verify, time.Now())...)
 }
 
 // verifyCredential asks the server whose key is. A login token gets a
@@ -258,14 +274,7 @@ func checkSecurityKeys() (checkResult, bool) {
 	}
 	st, err := fido2.Check()
 	if err != nil {
-		fix := "brew install libfido2"
-		if runtime.GOOS == "linux" {
-			fix = "apt install libfido2-1 (Debian, Ubuntu) or dnf install libfido2 (Fedora)"
-		}
-		if errors.Is(err, keystore.ErrNoSecurityKeySupport) && !strings.Contains(err.Error(), "libfido2") {
-			fix = "use a release of the CLI built with security key support"
-		}
-		return checkResult{name: "Security keys", detail: err.Error(), fix: fix}, true
+		return checkResult{name: "Security keys", detail: err.Error(), fix: securityKeyFix(runtime.GOOS, err)}, true
 	}
 	detail := "libfido2 at " + console.Safe(st.Library) + ", "
 	switch len(st.Devices) {
@@ -282,6 +291,22 @@ func checkSecurityKeys() (checkResult, bool) {
 		detail += "connected: " + strings.Join(names, ", ")
 	}
 	return checkResult{name: "Security keys", ok: true, detail: detail}, true
+}
+
+// securityKeyFix is how to make security keys work on goos after
+// fido2.Check failed with err: install libfido2, or, in a build without
+// security key support, unlock the key pair another way. Every Windows
+// build is one: the SDK builds its fido2 stub there.
+func securityKeyFix(goos string, err error) string {
+	switch {
+	case goos == "windows":
+		return "the CLI has no security key support on Windows: unlock the key pair with its recovery code (--recovery-code), or use it on macOS or Linux"
+	case errors.Is(err, keystore.ErrNoSecurityKeySupport) && !strings.Contains(err.Error(), "libfido2"):
+		return "use a release of the CLI built with security key support"
+	case goos == "linux":
+		return "apt install libfido2-1 (Debian, Ubuntu) or dnf install libfido2 (Fedora)"
+	}
+	return "brew install libfido2"
 }
 
 // checkRemoteSync checks the keys registered on the server against the key
