@@ -1,86 +1,165 @@
 # DeepSecret CLI
 
-Send passwords, API keys, config files and whole folders to the people who need them, end-to-end encrypted. `secret` encrypts everything on your computer before it is uploaded, so only the people you send to can open it. Not even DeepSecret can.
+Send passwords, API keys, config files and whole folders to the people who need them, end-to-end encrypted. `secret` encrypts everything on your computer before it is uploaded, for the people you send to. DeepSecret stores only the encrypted data and never has the keys to open it.
 
 You need a [DeepSecret account](https://app.deepsecret.io). Every plan starts with a 7-day free trial, no card needed.
 
 ## Install
 
-### macOS and Linux
+**macOS and Linux:**
 
 ```bash
-curl -fsSL https://github.com/deepsecret-io/cli/releases/latest/download/install.sh | bash -s -- v0.1.0
+curl -fsSL https://github.com/deepsecret-io/cli/releases/latest/download/install.sh | bash
 ```
 
-It picks the right build for your computer, checks it against the release's checksums, and installs `secret` in `/usr/local/bin`, asking for your password only if that folder needs it. To install somewhere else, put `INSTALL_DIR=~/.local/bin` before `bash`.
-
-### Windows
-
-In PowerShell:
+**Windows**, in PowerShell:
 
 ```powershell
-curl.exe -fsSLO https://github.com/deepsecret-io/cli/releases/latest/download/secret_windows_amd64.zip
-curl.exe -fsSLO https://github.com/deepsecret-io/cli/releases/latest/download/SHA256SUMS
-$want = (Select-String -Path SHA256SUMS -Pattern ' secret_windows_amd64\.zip$').Line.Split(' ')[0]
-if ((Get-FileHash secret_windows_amd64.zip -Algorithm SHA256).Hash -ne $want) { throw 'checksum mismatch' }
-Expand-Archive secret_windows_amd64.zip -DestinationPath .
+irm https://github.com/deepsecret-io/cli/releases/latest/download/install.ps1 | iex
 ```
 
-Then move `secret_windows_amd64\secret.exe` to a folder on your `PATH`. On Windows on Arm, use `secret_windows_arm64` in each line.
-
-### Check it worked
+Both pick the right build for your computer, check that it downloaded intact against the release's checksums, and install `secret`: in `/usr/local/bin` on macOS and Linux (asking for your password only if that folder needs it), and in `%LOCALAPPDATA%\Programs\DeepSecret` on Windows, added to your `PATH`, with no administrator rights needed. Open a new terminal, then check it worked:
 
 ```bash
 secret --version
 ```
 
-Every build is on the [releases page](https://github.com/deepsecret-io/cli/releases). To check a download's signature too, see [Verify a download](RELEASING.md#verify-a-download). To build it yourself, see [CONTRIBUTING.md](CONTRIBUTING.md).
+<details>
+<summary>Other ways to install</summary>
 
-## Get started
+- **A specific version:** `curl -fsSL https://github.com/deepsecret-io/cli/releases/latest/download/install.sh | bash -s -- v0.1.0`, or on Windows set `$env:DEEPSECRET_VERSION = 'v0.1.0'` before the command.
+- **Another folder:** put `INSTALL_DIR=~/.local/bin` before `bash`, or set `$env:INSTALL_DIR` on Windows.
+- **With the signature checked:** on macOS and Linux, the installer also checks that the release workflow signed the checksums when [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) is installed. Otherwise, or by hand, download your platform's archive and `SHA256SUMS` from the [releases page](https://github.com/deepsecret-io/cli/releases) and check them as [Verify a download](RELEASING.md#verify-a-download) shows.
+- **From source:** see [CONTRIBUTING.md](CONTRIBUTING.md).
 
-Three commands, once per computer:
+</details>
+
+## Set up, once per computer
+
+**1. Sign in.** It opens your browser:
 
 ```bash
-secret login               # sign in with your browser
-secret identity generate   # create your keys (add --password to protect them with a password)
-secret doctor              # check that everything is ready
+secret login
 ```
 
-Send a file:
+**2. Create your keys.** Your private keys never leave this computer. Choose how to protect them:
+
+| Protection | Command | To decrypt, you |
+|---|---|---|
+| None: the keys are stored unencrypted, readable only by your user account | `secret identity generate` | do nothing |
+| A password | `secret identity generate --password` | type the password |
+| A security key such as a YubiKey, plus a backup security key | `secret identity generate --security-key --backup` | touch either key |
+| A security key, plus a printed recovery code | `secret identity generate --security-key --recovery-code` | touch the key, or type the code if it is lost |
+| One security key and nothing else | `secret identity generate --security-key --single` | touch the key. If you lose it, the keys are gone for good |
+
+Security keys work on macOS and on Linux (the installer picks the build with security key support when your Linux has it), not on Windows. You can add one to existing keys later with `secret identity security-key`.
+
+The new keys are registered with your account, so people can send to you. To keep them on this computer only for now, add `--local`, and register them later with `secret identity sync`.
+
+**3. Check that everything is ready:**
 
 ```bash
+secret doctor
+```
+
+## Send a secret
+
+Files, folders, or key-value pairs, to whoever needs them:
+
+```bash
+# To yourself: with no recipient, only you can open it (to move it to another computer of yours, say)
+secret encrypt db.env
+
+# To someone else: only Alice can open it, not you
 secret encrypt db.env -t alice@example.com
+
+# To several people, yourself included
+secret encrypt db.env -t alice@example.com,bob@example.com,me@example.com
+
+# To a group in your organization: every other member of the group
+secret encrypt db.env -g engineering
+
+# Several files and a folder, under a name of your choice
+secret encrypt app.env certs/ -t alice@example.com -n "staging config"
+
+# Key-value pairs instead of files
+secret encrypt -d DB_PASS=hunter2 -d API_KEY=abc -t alice@example.com
 ```
 
-Alice opens it on her computer:
+Add rules when you send:
 
 ```bash
-secret list                  # what was sent to her
-secret decrypt <secret-id>   # download and decrypt it
+secret encrypt key.pem -t alice@example.com --ttl 24h            # expires in a day
+secret encrypt key.pem -t alice@example.com --ip 10.0.0.0/8      # opens from this network only
+secret encrypt . -t alice@example.com --archive                  # hides file names and sizes from the server
 ```
 
-Files go to a new folder named after the revision, so nothing in your current folder is ever overwritten. Text and key-value pairs are printed instead.
+Sending again under the same name adds a new revision of that secret. List everyone who should keep access, or add `--revoke-missing` to take it from anyone you leave out.
 
-## Everyday use
+## Open a secret
+
+**1. See what was sent to you:**
+
+```bash
+secret list
+```
+
+**2. Look at one, if you like:** who sent it, its files and its rules.
+
+```bash
+secret describe <secret-id>
+```
+
+**3. Download and decrypt it:**
+
+```bash
+secret decrypt <secret-id>                  # files go to a new folder, ./<revision-id>/
+secret decrypt <secret-id> --dir ./out      # or to a folder you choose
+secret decrypt <secret-id> -o db.env        # key-value pairs to a file instead of the screen
+```
+
+Decrypting never overwrites files in your current folder. Key-value pairs are printed on the screen unless you give `-o`.
+
+## Manage what you sent
 
 | To | Run |
 |---|---|
-| Send files or a folder to several people | `secret encrypt app.env certs/ -t alice@example.com,bob@example.com` |
-| Send key-value pairs | `secret encrypt -d DB_PASS=hunter2 -d API_KEY=abc -t alice@example.com` |
-| Send to a group in your organization | `secret encrypt db.env -g engineering` |
-| Make it expire, or work from one network only | `secret encrypt key.pem -t alice@example.com --ttl 24h --ip 10.0.0.0/8` |
-| Hide file names and sizes from the server | `secret encrypt . --archive -t alice@example.com` |
 | See what you sent | `secret list --sent` |
-| Open a secret into a folder you choose | `secret decrypt <secret-id> --dir ./out` |
+| Change when it expires | `secret policy <secret-id> --ttl 48h` |
+| Change or remove the network rule | `secret policy <secret-id> --ip 10.0.0.0/8`, or `--clear-ips` |
 | Take back someone's access | `secret revoke <secret-id> --to bob@example.com` |
-| Delete a secret you sent | `secret delete <secret-id>` |
+| Delete it for everyone | `secret delete <secret-id>` |
 | Finish an interrupted upload | `secret resume` |
 
-Sending again under the same name adds a new revision of that secret. `secret <command> --help` shows every option, with examples, and the [documentation](https://deepsecret.io/docs.html) explains it all in depth.
+## Watch progress and debug
+
+Every command takes these options:
+
+| Option | What it does |
+|---|---|
+| `--progress` | Shows a transfer's progress, connection by connection |
+| `--debug` | Writes debug logs to the terminal, with each transfer's plan |
+| `--help` | Shows every option of a command, with examples |
+
+```bash
+secret encrypt backup.tar -t alice@example.com --progress
+secret decrypt <secret-id> --progress
+secret decrypt <secret-id> --debug
+```
+
+For more control, set these before any command:
+
+```bash
+DS_LOG=trace secret decrypt <secret-id>                      # level: trace, debug, info, warn or error
+DS_LOG=json secret list                                      # logs as JSON
+DS_LOG=debug DS_LOG_PATH=./secret.log secret encrypt db.env  # logs to a file instead of the terminal
+```
+
+Debug logs can name your files, recipients and the servers the CLI talks to, so read them before you share them.
 
 ## When someone's key changes
 
-The CLI remembers the key it first saw for each person. If their key ever changes, it stops sending to them and opening their secrets until you accept the new one. Confirm the new key with them over a channel you trust, like a call, then accept it:
+The CLI remembers the key it first saw for each person. If their key changes, it stops sending to them and opening their secrets until you accept the new one. Confirm it with them over a channel you trust, like a call:
 
 ```bash
 secret identity verify alice@example.com                  # shows the key to compare with Alice
@@ -112,7 +191,7 @@ The CLI keeps your login, keys and settings in `~/.deepsecret` (`%USERPROFILE%\.
 
 ## Security
 
-Everything is encrypted on your computer with hybrid post-quantum encryption and signed by the sender. The encryption lives in the open source [DeepSecret Go SDK](https://github.com/deepsecret-io/deepsecret-go), and [PROTOCOL_V4.md](https://github.com/deepsecret-io/deepsecret-go/blob/main/PROTOCOL_V4.md) specifies it.
+Everything is encrypted on your computer with hybrid post-quantum encryption and signed by the sender. The encryption lives in the open source [DeepSecret Go SDK](https://github.com/deepsecret-io/deepsecret-go), and [PROTOCOL_V4.md](https://github.com/deepsecret-io/deepsecret-go/blob/main/PROTOCOL_V4.md) specifies it. The [documentation](https://deepsecret.io/docs.html) explains the whole security model.
 
 To report a vulnerability, please follow [SECURITY.md](SECURITY.md).
 
