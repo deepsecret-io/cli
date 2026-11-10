@@ -191,7 +191,7 @@ The CLI keeps your login, keys and settings in `~/.deepsecret` (`%USERPROFILE%\.
 
 ## Security
 
-Everything is encrypted on your computer with hybrid post-quantum encryption and signed by the sender. The encryption lives in the open source [DeepSecret Go SDK](https://github.com/deepsecret-io/deepsecret-go), and [PROTOCOL_V4.md](https://github.com/deepsecret-io/deepsecret-go/blob/main/PROTOCOL_V4.md) specifies it. The [documentation](https://deepsecret.io/docs.html) explains the whole security model.
+Everything is encrypted on your computer with hybrid post-quantum encryption and signed by the sender. The encryption lives in the open source [DeepSecret Go SDK](https://github.com/deepsecret-io/deepsecret-go), and [PROTOCOL_V4.md](https://github.com/deepsecret-io/deepsecret-go/blob/main/PROTOCOL_V4.md) specifies it. The [documentation](https://docs.deepsecret.io/) explains the whole security model.
 
 To report a vulnerability, please follow [SECURITY.md](SECURITY.md).
 
