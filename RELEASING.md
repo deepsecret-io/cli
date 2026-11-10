@@ -54,7 +54,7 @@ Every target is pure Go and cross-compiles on a GitHub-hosted Ubuntu runner.
 
 Windows ignores the 0600 and 0700 modes the CLI uses elsewhere, so there the CLI (`internal/safefile`) and the SDK (`internal/disk`) create the config, the login token, key files and decrypted files with an owner-only ACL: owned by the user, a protected DACL, full control for the user and nobody else. They refuse to read a config, token or key file that anyone but the user, SYSTEM and Administrators owns or may open, and say which `icacls` command fixes it. Key files are the SDK's, so a Windows release needs an SDK release with that code. The `test (windows)` job checks it: `internal/identity`'s `TestKeyFilesArePrivate` saves a key through the SDK version go.mod requires and fails when the file is not owner-only.
 
-Each release also has `SHA256SUMS`, `SHA256SUMS.sigstore.json` (its signature), a `.spdx.json` SBOM per archive, `install.sh` and `security-reports.tar.gz`.
+Each release also has `SHA256SUMS`, `SHA256SUMS.sigstore.json` (its signature), a `.spdx.json` SBOM per archive, the installers `install.sh` (macOS and Linux) and `install.ps1` (Windows), and `security-reports.tar.gz`.
 
 ## Verify a download
 
@@ -110,7 +110,7 @@ Set these once, before the first tag:
 
 - **The change:** the pull request that brought each commit to `main`, its review and its checks; the tag, with who pushed it and when (and its signature, if signed).
 - **The run:** logs of every job, including the checks, the test results, each scan's report, SHA256SUMS and `go version -m` of every binary; the `release` environment's deployment, with who approved it and when. GitHub keeps run logs and artifacts for the repository's retention period (90 days by default), so save the run logs to the evidence store within that time.
-- **The release:** the archives, SBOMs, SHA256SUMS, its Sigstore bundle, `install.sh` and `security-reports.tar.gz`, kept as long as the release, and unchangeable with immutable releases on.
+- **The release:** the archives, SBOMs, SHA256SUMS, its Sigstore bundle, `install.sh`, `install.ps1` and `security-reports.tar.gz`, kept as long as the release, and unchangeable with immutable releases on.
 - **Public logs:** the signature and the provenance attestation are recorded in Sigstore's Rekor transparency log, and the attestation is listed under the repository's Attestations.
 
 These cover change management and release integrity for SOC 2 (CC8.1) and ISO 27001 (A.8.25, A.8.32): every release is a reviewed commit, built and signed by an automated, logged process with a recorded approval, and traceable from the binary back to the source.

@@ -98,7 +98,7 @@ jobs:
           cache: false
       - run: go install "$TASK"
       - run: task release-build VERSION="$VERSION"
-      # The landing page, install.sh and RELEASING.md link to these names.
+      # The landing page, the installers and RELEASING.md link to these names.
       - name: Check the published names
         working-directory: dist
         run: |
@@ -108,7 +108,7 @@ jobs:
             secret_windows_amd64.zip secret_windows_arm64.zip; do
             test -f "$name" && test -f "$name.spdx.json" || { echo "missing $name"; exit 1; }
           done
-          test -f install.sh && test -f SHA256SUMS
+          test -f install.sh && test -f install.ps1 && test -f SHA256SUMS
       - name: Record what was built
         working-directory: dist
         run: |
@@ -122,6 +122,7 @@ jobs:
             dist/*.zip
             dist/*.spdx.json
             dist/install.sh
+            dist/install.ps1
             dist/SHA256SUMS
           if-no-files-found: error
           retention-days: 30 # the release environment may wait for approval

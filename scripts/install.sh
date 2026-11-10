@@ -5,10 +5,10 @@
 # Install the DeepSecret CLI.
 #
 # Usage:
-#   curl -fsSL https://github.com/deepsecret-io/cli/releases/download/<version>/install.sh | bash -s -- <version>
+#   curl -fsSL https://github.com/deepsecret-io/cli/releases/latest/download/install.sh | bash
 #
-# Examples:
-#   curl -fsSL https://github.com/deepsecret-io/cli/releases/download/v0.1.0/install.sh | bash -s -- v0.1.0
+# installs the latest release. To install a given version:
+#   curl -fsSL https://github.com/deepsecret-io/cli/releases/latest/download/install.sh | bash -s -- v0.1.0
 #
 # Detects OS (darwin/linux) and arch (amd64/arm64), downloads the matching
 # archive from the version's GitHub release, checks it against the release's
@@ -31,9 +31,13 @@ set -euo pipefail
 
 VERSION="${1:-}"
 if [ -z "$VERSION" ]; then
-  echo "error: version is required" >&2
-  echo "usage: curl -fsSL https://github.com/deepsecret-io/cli/releases/download/<version>/install.sh | bash -s -- <version>" >&2
-  exit 1
+  # No version given: the latest release. GitHub redirects releases/latest
+  # to that release's page, whose address ends in its tag.
+  if ! latest=$(curl -fsSLI --proto '=https' --tlsv1.2 -o /dev/null -w '%{url_effective}' https://github.com/deepsecret-io/cli/releases/latest); then
+    echo "error: could not find the latest release" >&2
+    exit 1
+  fi
+  VERSION="${latest##*/}"
 fi
 # Releases are vMAJOR.MINOR.PATCH, and the version goes into the download
 # URL, so nothing else is accepted.

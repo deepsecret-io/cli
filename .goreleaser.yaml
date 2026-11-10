@@ -113,13 +113,14 @@ sboms:
     artifacts: archive
     documents: ['{{ .ArtifactName }}.spdx.json']
 
-# SHA256SUMS lists every archive, every SBOM and the installer. The Release
-# workflow signs it with Sigstore and attests each file it lists.
+# SHA256SUMS lists every archive, every SBOM and the two installers. The
+# Release workflow signs it with Sigstore and attests each file it lists.
 checksum:
   name_template: SHA256SUMS
   algorithm: sha256
   extra_files:
     - glob: ./scripts/install.sh
+    - glob: ./scripts/install.ps1
 
 # Publishing is the Release workflow's job, after signing and attesting. This
 # keeps a goreleaser run anywhere else from publishing unsigned files.
