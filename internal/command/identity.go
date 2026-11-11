@@ -47,6 +47,8 @@ func newIdentityCmd() *cobra.Command {
 		newIdentityAcceptCmd(),
 		newIdentityForgetCmd(),
 		newIdentitySecurityKeyCmd(),
+		newIdentityKMSCmd(),
+		newIdentityImportCmd(),
 	)
 
 	return cmd
@@ -57,6 +59,7 @@ func newIdentityGenerateCmd() *cobra.Command {
 	var local bool
 	var useSecurityKey, backup, recoveryCode, single bool
 	var label string
+	var kmsARNs []string
 
 	cmd := &cobra.Command{
 		Use:     "generate",
@@ -67,6 +70,17 @@ func newIdentityGenerateCmd() *cobra.Command {
 			"register it later with: secret identity sync",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			useKMS := len(kmsARNs) > 0
+			switch {
+			case useKMS && useSecurityKey:
+				return errors.New("--kms-arn and --security-key do not go together: a key file holds KMS keys or security keys, never both")
+			case useKMS && usePassword:
+				return errors.New("--kms-arn and --password do not go together: the KMS key replaces the password")
+			case useKMS && backup:
+				return errors.New("--backup enrolls a second security key; for a second KMS key, repeat --kms-arn")
+			case !useKMS && !useSecurityKey && (label != "" || backup || recoveryCode || single):
+				return errors.New("--label, --backup, --recovery-code and --single go with --security-key or --kms-arn")
+			}
 			if useSecurityKey {
 				if usePassword {
 					return errors.New("--security-key and --password do not go together: the security key replaces the password")
@@ -78,16 +92,39 @@ func newIdentityGenerateCmd() *cobra.Command {
 					return err
 				}
 			}
+			if useKMS {
+				if err := checkKMSWays(kmsARNs, recoveryCode, single); err != nil {
+					return err
+				}
+				if err := checkKMSLabel(label); err != nil {
+					return err
+				}
+				if recoveryCode {
+					if err := requireCodeTerminal(); err != nil {
+						return err
+					}
+				}
+			}
 			// A new key pair is registered unless --local: check the account
 			// first, with a request, so a missing or revoked login fails
 			// before any PIN or touch and does not leave a key pair saved but
-			// not registered.
+			// not registered. A KMS key binds the key pair to the account, so
+			// it needs the account even with --local.
 			var c *deepsecret.Client
+			var account string
+			if useKMS {
+				var err error
+				if c, account, err = kmsAccount(cmd.Context()); err != nil {
+					return err
+				}
+			}
 			if !local {
 				const localHint = "To keep the key pair on this device only, without registering it:\n  secret identity generate --local"
 				var err error
-				if c, err = auth.NewAuthenticatedClient(); err != nil {
-					return errs.WithDetail(err, strings.TrimSpace(errs.JoinDetail("", err)+"\n\n"+localHint))
+				if c == nil {
+					if c, err = auth.NewAuthenticatedClient(); err != nil {
+						return errs.WithDetail(err, strings.TrimSpace(errs.JoinDetail("", err)+"\n\n"+localHint))
+					}
 				}
 				if _, err := c.Identity.ListKeys(cmd.Context()); err != nil {
 					err = fmt.Errorf("could not reach your account to register the key pair: %w", errs.APICause(err))
@@ -156,17 +193,23 @@ func newIdentityGenerateCmd() *cobra.Command {
 
 			run := steps
 			var after []ui.Step
-			if useSecurityKey {
-				// The key pair goes straight into a security-key file after an
-				// enrollment that asks for touches, in place of the saving
-				// step; registering it runs after that.
+			if useSecurityKey || useKMS {
+				// The key pair goes straight into a security-key or KMS file,
+				// after an enrollment that asks for touches or calls AWS, in
+				// place of the saving step; registering it runs after that.
 				run, after = steps[:1], steps[2:]
 			}
 			if err := ui.RunPipeline(cmd.Context(), "identity", run); err != nil {
 				return err
 			}
-			if useSecurityKey {
-				if err := saveWithSecurityKey(cmd.Context(), kp, label, backup, recoveryCode, single); err != nil {
+			if useSecurityKey || useKMS {
+				var err error
+				if useSecurityKey {
+					err = saveWithSecurityKey(cmd.Context(), kp, label, backup, recoveryCode, single)
+				} else {
+					err = saveWithKMS(cmd.Context(), kp, kmsARNs, label, account, recoveryCode, single)
+				}
+				if err != nil {
 					return err
 				}
 				if len(after) > 0 {
@@ -192,6 +235,9 @@ func newIdentityGenerateCmd() *cobra.Command {
 			if useSecurityKey {
 				ui.KeyValue("Protected", "yes, by your security key")
 			}
+			if useKMS {
+				ui.KeyValue("Protected", "yes, by AWS KMS")
+			}
 			if !local {
 				ui.KeyValue("Registered", "yes, as your primary key")
 			}
@@ -201,6 +247,11 @@ func newIdentityGenerateCmd() *cobra.Command {
 				ui.Dimmed("  secret identity sync -i " + fp)
 				fmt.Fprintln(os.Stderr)
 			}
+			if useKMS {
+				printKMSPolicy(fp, account)
+				ui.Dimmed("Copy the key file to that machine: secret identity import --stdin < " + console.Safe(filepath.Join(config.KeysDir(), fp+".json")))
+				fmt.Fprintln(os.Stderr)
+			}
 			return nil
 		},
 	}
@@ -208,11 +259,12 @@ func newIdentityGenerateCmd() *cobra.Command {
 	cmd.Flags().BoolVarP(&usePassword, "password", "p", false, "Encrypt the private keys with a password")
 	cmd.Flags().BoolVar(&local, "local", false, "Keep the key pair on this device only, without registering it (by default it is registered and becomes your primary key)")
 	cmd.Flags().BoolVar(&useSecurityKey, "security-key", false, "Protect the private keys with a security key such as a YubiKey, in place of a password")
-	cmd.Flags().StringVar(&label, "label", "", "With --security-key: a name for the security key (default: its product name)")
+	cmd.Flags().StringArrayVar(&kmsARNs, "kms-arn", nil, "Protect the private keys with the AWS KMS key of this full `ARN` (arn:aws:kms:<region>:<account>:key/<id>), for automation: repeat for a second key, up to 4")
+	cmd.Flags().StringVar(&label, "label", "", "With --security-key or --kms-arn: a name for the (first) key")
 	cmd.Flags().BoolVar(&backup, "backup", false, "With --security-key: also enroll a backup security key")
-	cmd.Flags().BoolVar(&recoveryCode, "recovery-code", false, "With --security-key: also create a printed recovery code")
-	cmd.Flags().BoolVar(&single, "single", false, "With --security-key: allow one security key with no backup and no recovery code")
-	flags.SetGroup(cmd.Flags(), flags.GroupOptions, "password", "local", "security-key", "label", "backup", "recovery-code", "single")
+	cmd.Flags().BoolVar(&recoveryCode, "recovery-code", false, "With --security-key or --kms-arn: also create a printed recovery code")
+	cmd.Flags().BoolVar(&single, "single", false, "With --security-key or --kms-arn: allow one key with no backup and no recovery code")
+	flags.SetGroup(cmd.Flags(), flags.GroupOptions, "password", "local", "security-key", "kms-arn", "label", "backup", "recovery-code", "single")
 	return cmd
 }
 
@@ -298,7 +350,7 @@ func listLocalKeys(ctx context.Context) error {
 			unreadable = append(unreadable, fmt.Sprintf("%s.json: %v", console.Safe(n), err))
 			continue
 		}
-		tags := keyTags(identity.Protection(n) == keystore.ProtectionSecurityKey, identity.IsEncrypted(n), identity.Registered(remote, fp), remoteErr == nil)
+		tags := keyTags(identity.Protection(n), identity.Registered(remote, fp), remoteErr == nil)
 		rows = append(rows, row{fp, tags})
 	}
 	logging.Module(logging.Log, "identity").Debug("key pairs listed", "local", len(rows), "unreadable", len(unreadable), "registered", len(remote))
@@ -329,13 +381,10 @@ func listLocalKeys(ctx context.Context) error {
 // encrypted, and whether it is registered, as registered (nil when it is
 // not), and the primary key. checked says the server was asked; without it,
 // whether the key pair is registered is not known.
-func keyTags(securityKey, encrypted bool, registered *sdkidentity.Key, checked bool) []string {
+func keyTags(protection keystore.Protection, registered *sdkidentity.Key, checked bool) []string {
 	var tags []string
-	if securityKey {
-		tags = append(tags, "security-key")
-	}
-	if encrypted {
-		tags = append(tags, "encrypted")
+	if t := identity.ProtectionTag(protection); t != "" {
+		tags = append(tags, t)
 	}
 	switch {
 	case !checked:
@@ -516,11 +565,8 @@ func newIdentityShowCmd() *cobra.Command {
 			}
 
 			var notes []string
-			if identity.IsEncrypted(name) {
-				notes = append(notes, "encrypted")
-			}
-			if identity.Protection(name) == keystore.ProtectionSecurityKey {
-				notes = append(notes, "security-key")
+			if t := identity.ProtectionTag(identity.Protection(name)); t != "" {
+				notes = append(notes, t)
 			}
 			if primary {
 				notes = append(notes, "primary")

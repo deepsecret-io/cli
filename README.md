@@ -51,6 +51,7 @@ secret login
 | A security key such as a YubiKey, plus a backup security key | `secret identity generate --security-key --backup` | touch either key |
 | A security key, plus a printed recovery code | `secret identity generate --security-key --recovery-code` | touch the key, or type the code if it is lost |
 | One security key and nothing else | `secret identity generate --security-key --single` | touch the key. If you lose it, the keys are gone for good |
+| Your AWS KMS key, for servers, containers, CI and AI agents (see [Servers, containers, CI and AI agents](#servers-containers-ci-and-ai-agents)) | `secret identity generate --kms-arn <KMS key ARN> --single` | nothing: the machine's AWS identity unlocks them |
 
 Security keys work on macOS and on Linux (the installer picks the build with security key support when your Linux has it), not on Windows. You can add one to existing keys later with `secret identity security-key`.
 
@@ -177,6 +178,34 @@ secret list --api-key-file ./key.txt
 
 Avoid `--api-key` on the command line: other users of the computer can see it in the process list.
 
+### Servers, containers, CI and AI agents
+
+A machine or container that decrypts on its own needs a key pair that opens with no prompt. Protect it with your own AWS KMS key: it then opens for the AWS identities your KMS key policy and IAM policies allow, on a machine that has its key file. Every unlock is a KMS `Decrypt` in your CloudTrail, and revoking that access stops every copy of the key file. The private keys never go to AWS (KMS only protects the key that opens the file), and DeepSecret never holds your KMS key.
+
+That also means anyone who can change your key policy or IAM can give themselves access. For your own keys, a security key is stronger: use KMS for automation.
+
+1. Give the automation its own DeepSecret account and an API key.
+2. Create a customer managed, symmetric KMS key (`SYMMETRIC_DEFAULT`) used only for DeepSecret key files, and note its full key ARN: the CLI takes only that, never a key id or an alias, since an alias can be re-pointed.
+3. Generate the key pair as that account, with AWS credentials allowed `kms:DescribeKey` and `kms:Encrypt` on the key:
+
+   ```bash
+   DS_API_KEY=... secret identity generate --kms-arn arn:aws:kms:eu-central-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab --single
+   ```
+
+   It prints the `kms:Decrypt` policy statement for the machine that unlocks it, limited to the key file's encryption context (`deepsecret:purpose`, `deepsecret:fingerprint`, `deepsecret:account`, `deepsecret:slot`). Instead of `--single`, a second `--kms-arn` or `--recovery-code` keeps a way in if the KMS key becomes unusable.
+4. Put the key file on the machine, from your CI's secret store, and check it there:
+
+   ```bash
+   printf '%s' "$DEEPSECRET_KEY_FILE" | secret identity import --stdin
+   secret identity kms check
+   ```
+
+5. Decrypt with no prompt: `secret decrypt <secret-id> --output ./deploy.env`
+
+In a container (an ECS task, an EKS pod), the AWS role comes from the platform (a task role, EKS Pod Identity or IRSA), and the key file from a mounted secret: run `secret identity import --file /run/secrets/deepsecret-key.json` when it starts. Import writes a copy readable only by the container's user, so the mount only has to be readable by that user, whatever its owner and mode.
+
+`secret identity kms` lists, adds and removes KMS keys, manages the recovery code, and takes the protection off. AWS credentials come from the AWS default chain, or `--aws-profile`. For KMS the CLI always calls the key's own regional endpoint with the system's trusted certificates, whatever `AWS_ENDPOINT_URL` or a CA bundle says. The [documentation](https://docs.deepsecret.io/#aws-kms) covers key policies, GitHub Actions and revocation.
+
 ## Settings
 
 The CLI keeps your login, keys and settings in `~/.deepsecret` (`%USERPROFILE%\.deepsecret` on Windows), readable only by you. It refuses to use a file there that other accounts on the computer can open, and tells you the command that fixes it.
@@ -184,6 +213,7 @@ The CLI keeps your login, keys and settings in `~/.deepsecret` (`%USERPROFILE%\.
 | Variable | What it does |
 |---|---|
 | `DS_API_KEY` | The API key to use, for CI and scripts |
+| `AWS_PROFILE` | The AWS profile for key pairs protected by AWS KMS (or `--aws-profile`) |
 | `DS_LOG` | Log at this level: `trace`, `debug`, `info`, `warn` or `error`, or `json` |
 | `DS_LOG_PATH` | Write the log to this file instead of the terminal |
 | `DEEPSECRET_TMPDIR` | Where temporary and in-transit files go (must be private to you) |

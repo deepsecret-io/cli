@@ -223,9 +223,7 @@ your account. Recipients open the file with "secret decrypt --local".`,
 				TTL:                  ttl,
 				IPs:                  normalizedIPs,
 				RevokeMissing:        revokeMissing,
-				Password:             unlock.Password,
-				SecurityKey:          unlock.SecurityKey,
-				RecoveryCode:         unlock.RecoveryCode,
+				Unlock:               unlock,
 				Identity:             identityFP,
 				Account:              account,
 				UploadThreads:        uploadThreads,
@@ -381,10 +379,10 @@ your account. Recipients open the file with "secret decrypt --local".`,
 			if result.Compressed && result.OriginalSize > 0 {
 				ui.KeyValue("Compression", fmt.Sprintf("%s (%s)", strings.ToUpper(result.Compression), compressionChange(result.CompressionRatio)))
 			}
-			ui.KeyValue("Sender", keys.ShortFingerprint(result.SenderFingerprint)+identity.SecurityKeyNote(result.SenderFingerprint))
+			ui.KeyValue("Sender", keys.ShortFingerprint(result.SenderFingerprint)+identity.ProtectionNote(result.SenderFingerprint))
 			sentTo := make([]string, len(result.Recipients))
 			for i, r := range result.Recipients {
-				sentTo[i] = fmt.Sprintf("%s  %s%s%s%s", console.Safe(r.Email), console.Dim, console.Safe(keys.ShortFingerprint(r.Fingerprint)), console.Reset, identity.SecurityKeyNote(r.Fingerprint))
+				sentTo[i] = fmt.Sprintf("%s  %s%s%s%s", console.Safe(r.Email), console.Dim, console.Safe(keys.ShortFingerprint(r.Fingerprint)), console.Reset, identity.ProtectionNote(r.Fingerprint))
 			}
 			ui.KeyValues("Recipient"+ui.PluralS(len(sentTo)), sentTo)
 			if len(result.Revoked) > 0 {

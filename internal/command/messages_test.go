@@ -16,6 +16,7 @@ import (
 
 	"github.com/deepsecret-io/deepsecret-go/apierror"
 	sdkidentity "github.com/deepsecret-io/deepsecret-go/identity"
+	"github.com/deepsecret-io/deepsecret-go/keystore"
 	"github.com/deepsecret-io/deepsecret-go/secrets"
 	"github.com/deepsecret-io/deepsecret-go/trust"
 
@@ -229,22 +230,22 @@ func TestAuthChecks(t *testing.T) {
 // asked; without it, it says nothing of registration.
 func TestKeyTags(t *testing.T) {
 	for _, c := range []struct {
-		securityKey bool
-		encrypted   bool
-		registered  *sdkidentity.Key
-		checked     bool
-		want        string
+		protection keystore.Protection
+		registered *sdkidentity.Key
+		checked    bool
+		want       string
 	}{
-		{false, true, nil, false, "encrypted"},
-		{false, false, nil, false, ""},
-		{false, false, nil, true, "local-only"},
-		{false, true, &sdkidentity.Key{IsPrimary: true}, true, "encrypted,primary,registered"},
-		{false, false, &sdkidentity.Key{}, true, "registered"},
-		{true, false, nil, true, "security-key,local-only"},
-		{true, false, &sdkidentity.Key{IsPrimary: true}, true, "security-key,primary,registered"},
+		{keystore.ProtectionPassword, nil, false, "encrypted"},
+		{keystore.ProtectionNone, nil, false, ""},
+		{keystore.ProtectionNone, nil, true, "local-only"},
+		{keystore.ProtectionPassword, &sdkidentity.Key{IsPrimary: true}, true, "encrypted,primary,registered"},
+		{keystore.ProtectionNone, &sdkidentity.Key{}, true, "registered"},
+		{keystore.ProtectionSecurityKey, nil, true, "security-key,local-only"},
+		{keystore.ProtectionSecurityKey, &sdkidentity.Key{IsPrimary: true}, true, "security-key,primary,registered"},
+		{keystore.ProtectionKMS, &sdkidentity.Key{IsPrimary: true}, true, "aws-kms,primary,registered"},
 	} {
-		if got := strings.Join(keyTags(c.securityKey, c.encrypted, c.registered, c.checked), ","); got != c.want {
-			t.Errorf("keyTags(%v, %v, %v, %v) = %q, want %q", c.securityKey, c.encrypted, c.registered, c.checked, got, c.want)
+		if got := strings.Join(keyTags(c.protection, c.registered, c.checked), ","); got != c.want {
+			t.Errorf("keyTags(%v, %v, %v) = %q, want %q", c.protection, c.registered, c.checked, got, c.want)
 		}
 	}
 }

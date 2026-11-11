@@ -784,7 +784,7 @@ func formatFilesCount(count int, archived bool) string {
 // When the fingerprint is empty or the status is unset, returns the
 // fingerprint as-is so the details surface degrades gracefully.
 func fingerprintWithStatus(fp string, status *string) string {
-	note := identity.SecurityKeyNote(fp)
+	note := identity.ProtectionNote(fp)
 	fp = console.Safe(fp)
 	if fp == "" || status == nil || *status == "" {
 		return fp + note

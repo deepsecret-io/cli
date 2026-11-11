@@ -39,27 +39,39 @@ func SaveKeyPair(fingerprint string, kp *keys.Pair, password string) error {
 	return keystore.Save(config.KeysDir(), fingerprint, kp, password)
 }
 
-// LoadKeyPair loads a key pair, prompting for password if encrypted, or
-// asking its security key for the PIN and a touch.
+// LoadKeyPair loads a key pair: as it is when unprotected, after a
+// password prompt, after its security key's PIN and touch, or through AWS
+// KMS with no prompt at all.
 // If the fingerprint doesn't match a file exactly, it tries prefix matching
 // (handles server-side 32-char fingerprints vs local 64-char filenames).
 func LoadKeyPair(ctx context.Context, fingerprint string) (*keys.Pair, error) {
 	resolved := ResolveFile(fingerprint)
-	if Protection(resolved) == keystore.ProtectionSecurityKey {
+	switch Protection(resolved) {
+	case keystore.ProtectionNone:
+		return keystore.Load(config.KeysDir(), resolved, "")
+	case keystore.ProtectionPassword:
+		if err := RequirePasswordTerminal(resolved); err != nil {
+			return nil, err
+		}
+		password, err := prompt.Password(ctx, fmt.Sprintf("Password for key pair %s: ", keys.ShortFingerprint(resolved)))
+		if err != nil {
+			return nil, err
+		}
+		return keystore.Load(config.KeysDir(), resolved, password)
+	case keystore.ProtectionSecurityKey:
 		if err := RequireTerminal(resolved); err != nil {
 			return nil, err
 		}
 		return keystore.Open(ctx, config.KeysDir(), resolved, keystore.Unlock{SecurityKey: SecurityKey()})
-	}
-	kp, err := keystore.Load(config.KeysDir(), resolved, "")
-	if err != nil && IsEncrypted(resolved) {
-		password, perr := prompt.Password(ctx, fmt.Sprintf("Password for key pair %s: ", keys.ShortFingerprint(resolved)))
-		if perr != nil {
-			return nil, perr
+	case keystore.ProtectionKMS:
+		k, err := KMS(ctx)
+		if err != nil {
+			return nil, err
 		}
-		return keystore.Load(config.KeysDir(), resolved, password)
+		return keystore.Open(ctx, config.KeysDir(), resolved, keystore.Unlock{KMS: k})
 	}
-	return kp, err
+	// Unreadable, missing or of a newer version: Load says which.
+	return keystore.Load(config.KeysDir(), resolved, "")
 }
 
 // keyFile returns the key file of fp, a fingerprint or a prefix of one, or

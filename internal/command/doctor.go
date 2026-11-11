@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -45,6 +46,8 @@ Checks:
   - Your plan
   - The key pairs on this device
   - Security key support (libfido2), when a key pair is protected by one
+  - AWS credentials and identity, when a key pair is protected by AWS KMS
+    (it does not unlock it: secret identity kms check does)
   - The keys registered on the server, and which of them this device holds
 
 Examples:
@@ -72,6 +75,9 @@ func runDoctor(ctx context.Context) error {
 	}
 	checks = append(checks, checkLocalKeys()...)
 	if c, ok := checkSecurityKeys(); ok {
+		checks = append(checks, c)
+	}
+	if c, ok := checkKMS(ctx); ok {
 		checks = append(checks, c)
 	}
 	if hasAuth() && hasLocalKeys() {
@@ -246,11 +252,13 @@ func checkLocalKeys() []checkResult {
 			continue
 		}
 		detail := keys.ShortFingerprint(fp)
-		if identity.Protection(n) == keystore.ProtectionPassword {
+		switch identity.Protection(n) {
+		case keystore.ProtectionPassword:
 			detail += " (encrypted)"
-		}
-		if identity.Protection(n) == keystore.ProtectionSecurityKey {
+		case keystore.ProtectionSecurityKey:
 			detail += " (security key)"
+		case keystore.ProtectionKMS:
+			detail += " (AWS KMS)"
 		}
 		results = append(results, checkResult{name: "Key pair", ok: true, detail: detail})
 	}
@@ -291,6 +299,41 @@ func checkSecurityKeys() (checkResult, bool) {
 		detail += "connected: " + strings.Join(names, ", ")
 	}
 	return checkResult{name: "Security keys", ok: true, detail: detail}, true
+}
+
+// checkKMS checks that AWS credentials are found for the key pairs
+// protected by AWS KMS, and names the AWS identity they belong to (STS
+// GetCallerIdentity, which needs no permission). It does not unlock
+// anything: secret identity kms check does. It is reported only when such a
+// key pair exists, so a user without one sees nothing about AWS.
+func checkKMS(ctx context.Context) (checkResult, bool) {
+	names, _ := identity.List()
+	var arns []string
+	for _, n := range names {
+		if identity.Protection(n) != keystore.ProtectionKMS {
+			continue
+		}
+		if info, err := keystore.ReadInfo(config.KeysDir(), n); err == nil {
+			for _, s := range info.Slots {
+				if s.KMSKeyARN != "" && !slices.Contains(arns, s.KMSKeyARN) {
+					arns = append(arns, s.KMSKeyARN)
+				}
+			}
+		}
+	}
+	if len(arns) == 0 {
+		return checkResult{}, false
+	}
+	k, err := identity.KMS(ctx)
+	if err != nil {
+		return checkResult{name: "AWS KMS", detail: console.Safe(err.Error()), fix: "set AWS credentials (AWS_PROFILE or --aws-profile, an SSO login, OIDC, or an instance or task role)"}, true
+	}
+	caller, err := k.CallerARN(ctx, keystore.KMSKeyRegion(arns[0]))
+	if err != nil {
+		return checkResult{name: "AWS KMS", detail: console.Safe(err.Error()), fix: "set AWS credentials (AWS_PROFILE or --aws-profile, an SSO login, OIDC, or an instance or task role)"}, true
+	}
+	return checkResult{name: "AWS KMS", ok: true, detail: "AWS identity " + console.Safe(caller) + "; KMS keys: " + console.Safe(strings.Join(arns, ", ")) +
+		". Check an unlock with: secret identity kms check"}, true
 }
 
 // securityKeyFix is how to make security keys work on goos after

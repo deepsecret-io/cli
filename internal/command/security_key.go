@@ -103,8 +103,9 @@ func saveWithSecurityKey(ctx context.Context, kp *keys.Pair, label string, backu
 // commandUnlock works out how the key pair a command signs or decrypts
 // with is unlocked, and asks only for what its file needs: nothing, its
 // password, or its recovery code when useRecovery is set. A security key is
-// asked for its PIN and a touch by the SDK, once, when the key is used.
-// identityFP empty means the primary key.
+// asked for its PIN and a touch by the SDK, once, when the key is used; an
+// AWS KMS key is asked by the SDK too, with no prompt. identityFP empty
+// means the primary key.
 func commandUnlock(ctx context.Context, c *deepsecret.Client, identityFP string, useRecovery bool) (keystore.Unlock, error) {
 	primary := identityFP == ""
 	name := ""
@@ -124,11 +125,16 @@ func commandUnlock(ctx context.Context, c *deepsecret.Client, identityFP string,
 		}
 		return keystore.Unlock{}, nil // loading the key reports it
 	}
-	if useRecovery && info.Protection != keystore.ProtectionSecurityKey {
-		return keystore.Unlock{}, fmt.Errorf("--recovery-code: key pair %s is not protected by a security key", keys.ShortFingerprint(info.Fingerprint))
+	if useRecovery && info.Protection != keystore.ProtectionSecurityKey && info.Protection != keystore.ProtectionKMS {
+		return keystore.Unlock{}, fmt.Errorf("--recovery-code: key pair %s is not protected by a security key or AWS KMS, so it has no recovery code", keys.ShortFingerprint(info.Fingerprint))
 	}
 	switch info.Protection {
+	case keystore.ProtectionNone:
+		return keystore.Unlock{}, nil
 	case keystore.ProtectionPassword:
+		if err := identity.RequirePasswordTerminal(info.Fingerprint); err != nil {
+			return keystore.Unlock{}, err
+		}
 		if !primary {
 			pw, err := prompt.Password(ctx, fmt.Sprintf("Password for key pair %s: ", keys.ShortFingerprint(name)))
 			return keystore.Unlock{Password: pw}, err
@@ -150,21 +156,39 @@ func commandUnlock(ctx context.Context, c *deepsecret.Client, identityFP string,
 			return keystore.Unlock{RecoveryCode: code}, err
 		}
 		return keystore.Unlock{SecurityKey: identity.SecurityKey()}, nil
+	case keystore.ProtectionKMS:
+		if useRecovery {
+			code, err := prompt.Password(ctx, fmt.Sprintf("Recovery code for key pair %s: ", keys.ShortFingerprint(info.Fingerprint)))
+			return keystore.Unlock{RecoveryCode: code}, err
+		}
+		k, err := identity.KMS(ctx)
+		if err != nil {
+			return keystore.Unlock{}, err
+		}
+		return keystore.Unlock{KMS: k}, nil
 	}
-	return keystore.Unlock{}, nil
+	return keystore.Unlock{}, fmt.Errorf("key pair %s: unknown protection %q", keys.ShortFingerprint(info.Fingerprint), info.Protection)
 }
 
 // showRecoveryCode shows a new recovery code once, on the terminal only,
 // and asks for two of its groups back, so it is known to be written down.
-func showRecoveryCode(ctx context.Context, code string) error {
+// kms says the key pair is protected by AWS KMS, whose code skips IAM and
+// CloudTrail.
+func showRecoveryCode(ctx context.Context, code string, kms bool) error {
 	t, err := prompt.OpenTerminal()
 	if err != nil {
 		return errors.New("a recovery code is shown only on a terminal; run the command in one")
 	}
 	defer func() { _ = t.Close() }()
 	out := t.Out
-	_, _ = fmt.Fprintf(out, "\n  Recovery code (shown once; write it down and keep it apart from your security keys):\n\n      %s\n\n"+
-		"  It unlocks the key pair without a security key. Anyone who has it and a copy of the key file can too.\n\n", code)
+	if kms {
+		_, _ = fmt.Fprintf(out, "\n  Recovery code (shown once; write it down and keep it offline):\n\n      %s\n\n"+
+			"  It unlocks the key pair without AWS: no IAM check and no CloudTrail record. Anyone who has it\n"+
+			"  and a copy of the key file can too. Never store it next to the key file, such as in the same CI secrets.\n\n", code)
+	} else {
+		_, _ = fmt.Fprintf(out, "\n  Recovery code (shown once; write it down and keep it apart from your security keys):\n\n      %s\n\n"+
+			"  It unlocks the key pair without a security key. Anyone who has it and a copy of the key file can too.\n\n", code)
+	}
 	groups := strings.Split(code, "-")
 	first, second := randomIndex(len(groups)), randomIndex(len(groups)-1)
 	if second >= first {
@@ -230,7 +254,12 @@ func unlockForEdit(ctx context.Context, name string, useRecovery bool) (*keystor
 	if err != nil {
 		return nil, fmt.Errorf("could not read key pair %s: %w", keys.ShortFingerprint(name), err)
 	}
-	if info.Protection != keystore.ProtectionSecurityKey {
+	switch info.Protection {
+	case keystore.ProtectionSecurityKey:
+	case keystore.ProtectionKMS:
+		return nil, errs.WithDetail(fmt.Errorf("key pair %s is protected by AWS KMS, not a security key", keys.ShortFingerprint(name)),
+			"Manage it with: secret identity kms")
+	default:
 		return nil, errs.WithDetail(fmt.Errorf("key pair %s is not protected by a security key", keys.ShortFingerprint(name)),
 			"Protect it with: secret identity security-key protect -i "+keys.ShortFingerprint(name))
 	}
@@ -273,7 +302,7 @@ func enrollWays(ctx context.Context, e *keystore.SlotEditor, label string, backu
 		if err != nil {
 			return err
 		}
-		if err := showRecoveryCode(ctx, code); err != nil {
+		if err := showRecoveryCode(ctx, code, false); err != nil {
 			return err
 		}
 	}
@@ -334,9 +363,16 @@ func newSecurityKeyProtectCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("could not read key pair %s: %w", keys.ShortFingerprint(name), err)
 			}
-			if info.Protection == keystore.ProtectionSecurityKey {
+			switch info.Protection {
+			case keystore.ProtectionNone, keystore.ProtectionPassword:
+			case keystore.ProtectionSecurityKey:
 				return errs.WithDetail(fmt.Errorf("key pair %s is already protected by a security key", keys.ShortFingerprint(name)),
 					"Add another with: secret identity security-key add -i "+keys.ShortFingerprint(name))
+			case keystore.ProtectionKMS:
+				return errs.WithDetail(fmt.Errorf("key pair %s is protected by AWS KMS: a key file holds security keys or KMS keys, never both", keys.ShortFingerprint(name)),
+					"A KMS key pair belongs to automation. For yourself, generate one: secret identity generate --security-key --recovery-code")
+			default:
+				return fmt.Errorf("key pair %s: unknown protection %q", keys.ShortFingerprint(name), info.Protection)
 			}
 			if err := identity.RequireTerminal(""); err != nil {
 				return err
@@ -444,7 +480,9 @@ func newSecurityKeyListCmd() *cobra.Command {
 				ui.KeyValue("Protection", "none: the private keys are stored in clear")
 			case keystore.ProtectionPassword:
 				ui.KeyValue("Protection", "password")
-			default:
+			case keystore.ProtectionKMS:
+				ui.KeyValue("Protection", "AWS KMS: list its keys with secret identity kms list -i "+keys.ShortFingerprint(info.Fingerprint))
+			case keystore.ProtectionSecurityKey:
 				ui.KeyValue("Protection", "security key")
 				for _, s := range info.Slots {
 					kind := "security key"
@@ -535,7 +573,7 @@ func newSecurityKeyRecoveryCodeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := showRecoveryCode(cmd.Context(), code); err != nil {
+			if err := showRecoveryCode(cmd.Context(), code, false); err != nil {
 				return err
 			}
 			if err := e.Commit(false); err != nil {
@@ -598,13 +636,16 @@ func newSecurityKeyUnprotectCmd() *cobra.Command {
 // logProtected records a change to a key pair's slots: the slots by type,
 // never anything secret.
 func logProtected(e *keystore.SlotEditor, what string) {
-	keyList, codes := 0, 0
+	keyList, kmsKeys, codes := 0, 0, 0
 	for _, s := range e.Slots() {
-		if s.Type == keystore.SlotSecurityKey {
+		switch s.Type {
+		case keystore.SlotSecurityKey:
 			keyList++
-		} else {
+		case keystore.SlotAWSKMS:
+			kmsKeys++
+		case keystore.SlotRecoveryCode:
 			codes++
 		}
 	}
-	logging.Module(logging.Log, "identity").Info("key pair "+what, "fingerprint", e.Fingerprint(), "security_keys", keyList, "recovery_codes", codes)
+	logging.Module(logging.Log, "identity").Info("key pair "+what, "fingerprint", e.Fingerprint(), "security_keys", keyList, "kms_keys", kmsKeys, "recovery_codes", codes)
 }

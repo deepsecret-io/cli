@@ -145,8 +145,8 @@ func TestSecurityKeyLabel(t *testing.T) {
 	elsewhere := strings.Repeat("ab", 32)
 
 	for fp, want := range map[string]string{protected: " (security key)", plain: "", protected[:16]: "", elsewhere: "", "": ""} {
-		if got := identity.SecurityKeyNote(fp); got != want {
-			t.Errorf("securityKeyNote(%.16s) = %q, want %q", fp, got, want)
+		if got := identity.ProtectionNote(fp); got != want {
+			t.Errorf("ProtectionNote(%.16s) = %q, want %q", fp, got, want)
 		}
 	}
 	cases := []struct {

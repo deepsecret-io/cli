@@ -327,14 +327,17 @@ func printFirstUse(people []secrets.Recipient) {
 // new key and accept it.
 func describeFailure(ctx context.Context, err error) (summary, detail string) {
 	summary, detail = errs.Describe(err)
-	kc := keyChangedDetail(ctx, err)
+	extra := keyChangedDetail(ctx, err)
+	if extra == "" {
+		extra = kmsDetail(err)
+	}
 	switch {
-	case kc == "":
+	case extra == "":
 		return summary, detail
 	case detail == "":
-		return summary, kc
+		return summary, extra
 	}
-	return summary, detail + "\n\n" + kc
+	return summary, detail + "\n\n" + extra
 }
 
 // keyChangedDetail is the detail of the Error block of a send or decrypt

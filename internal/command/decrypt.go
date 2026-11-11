@@ -199,9 +199,7 @@ plan and every change to it.`,
 				Revision:             revisionID,
 				Secret:               fetched,
 				Identity:             identityFP,
-				Password:             unlock.Password,
-				SecurityKey:          unlock.SecurityKey,
-				RecoveryCode:         unlock.RecoveryCode,
+				Unlock:               unlock,
 				DownloadThreads:      downloadThreads,
 				PresignExpiryMinutes: presignExpiry,
 				Logger:               logging.Log,
@@ -375,8 +373,8 @@ plan and every change to it.`,
 				if r.Fingerprint == result.RecipientFingerprint {
 					notes = append(notes, "you")
 				}
-				if identity.SecurityKeyNote(r.Fingerprint) != "" {
-					notes = append(notes, "security key")
+				if n := identity.ProtectionName(r.Fingerprint); n != "" {
+					notes = append(notes, n)
 				}
 				if len(notes) > 0 {
 					line += " (" + strings.Join(notes, ", ") + ")"
@@ -439,8 +437,8 @@ func senderLine(r *secrets.DecryptResult) string {
 	case r.SenderEmail != "":
 		notes = append(notes, "their registered key")
 	}
-	if identity.SecurityKeyNote(r.SenderFingerprint) != "" {
-		notes = append(notes, "security key")
+	if n := identity.ProtectionName(r.SenderFingerprint); n != "" {
+		notes = append(notes, n)
 	}
 	line := keys.ShortFingerprint(r.SenderFingerprint)
 	if r.SenderEmail != "" {

@@ -29,6 +29,7 @@ import (
 	"github.com/deepsecret-io/cli/internal/config"
 	"github.com/deepsecret-io/cli/internal/errs"
 	"github.com/deepsecret-io/cli/internal/flags"
+	"github.com/deepsecret-io/cli/internal/identity"
 	"github.com/deepsecret-io/cli/internal/logging"
 	"github.com/deepsecret-io/cli/internal/ui"
 )
@@ -149,6 +150,7 @@ func sdkNote(deps []*rtdebug.Module) string {
 
 // newRootCmd builds the command tree: every command, its flags and help.
 func newRootCmd(version string) *cobra.Command {
+	identity.AppVersion = version
 	root := &cobra.Command{
 		Use:           "secret",
 		Short:         "DeepSecret CLI: E2E encrypted secrets manager",
@@ -197,7 +199,8 @@ func newRootCmd(version string) *cobra.Command {
 	pf.StringVar(&auth.FlagKey, "api-key", "", "API `key` (visible in process listings; prefer --api-key-file or DS_API_KEY)")
 	pf.BoolVar(&debug, "debug", false, "Write debug logs to stderr, with each transfer's plan (DS_LOG sets the level, or json; DS_LOG_PATH a file instead)")
 	pf.BoolVar(&ui.ShowProgress, "progress", false, "Show a transfer's progress: each connection, redrawn live, on a terminal; a line every 5s when redirected")
-	flags.SetGroup(pf, flags.GroupGlobal, "api-key-file", "api-key-stdin", "api-key", "debug", "progress")
+	pf.StringVar(&identity.AWSProfile, "aws-profile", "", "AWS `profile` for key pairs protected by AWS KMS (default: AWS_PROFILE and the AWS default credential chain)")
+	flags.SetGroup(pf, flags.GroupGlobal, "api-key-file", "api-key-stdin", "api-key", "debug", "progress", "aws-profile")
 	root.MarkFlagsMutuallyExclusive("api-key", "api-key-file", "api-key-stdin")
 	root.SetUsageFunc(flags.Usage)
 
