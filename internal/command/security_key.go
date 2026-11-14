@@ -400,11 +400,7 @@ func newSecurityKeyProtectCmd() *cobra.Command {
 			logProtected(e, "protected")
 			ui.Success("Key pair " + keys.ShortFingerprint(name) + " is protected by a security key")
 			reportProtection(cmd.Context(), name)
-			if info.Protection == keystore.ProtectionPassword {
-				ui.Dimmed("Its password no longer opens it. Copies of the key file made before now (backups) still open with the password alone.")
-			} else {
-				ui.Dimmed("Copies of the key file made before now (backups) are still unprotected.")
-			}
+			earlierCopies(info.Protection, "secret identity generate --security-key --recovery-code")
 			return nil
 		},
 	}
@@ -631,6 +627,21 @@ func newSecurityKeyUnprotectCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&noPassword, "no-password", false, "Store the private keys in clear")
 	flags.SetGroup(cmd.Flags(), flags.GroupOptions, "identity", "recovery-code", "no-password")
 	return cmd
+}
+
+// earlierCopies tells, after a key pair was protected, what still opens the
+// copies of its key file made before: its old password, or nothing, since a
+// key pair with no protection had its private keys in clear. Protecting it
+// cannot reach those copies, so the warning names regenerate, the command
+// that makes a new key pair protected from the start.
+func earlierCopies(prev keystore.Protection, regenerate string) {
+	if prev == keystore.ProtectionPassword {
+		ui.Dimmed("Its password no longer opens it. Copies of the key file made before now (backups) still open with the password alone.")
+		return
+	}
+	ui.Warning("Copies of the key file made before now are still unprotected",
+		"If the key file was ever stored elsewhere (a CI secret, a backup), protecting it now does not undo that:\n"+
+			"generate a new key pair instead: "+regenerate)
 }
 
 // logProtected records a change to a key pair's slots: the slots by type,

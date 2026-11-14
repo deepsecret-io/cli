@@ -400,13 +400,7 @@ func newKMSProtectCmd() *cobra.Command {
 			}
 			logProtected(e, "protected with AWS KMS")
 			ui.Success("Key pair " + keys.ShortFingerprint(name) + " is protected by AWS KMS")
-			if info.Protection == keystore.ProtectionPassword {
-				ui.Dimmed("Its password no longer opens it. Copies of the key file made before now (backups) still open with the password alone.")
-			} else {
-				ui.Warning("Copies of the key file made before now are still unprotected",
-					"If the key file was ever stored elsewhere (a CI secret, a backup), protecting it now does not undo that:\n"+
-						"generate a new key pair instead: secret identity generate --kms-arn <KMS key ARN> --single")
-			}
+			earlierCopies(info.Protection, "secret identity generate --kms-arn <KMS key ARN> --single")
 			printKMSPolicy(e.Fingerprint(), account)
 			return nil
 		},
