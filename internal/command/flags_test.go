@@ -153,7 +153,7 @@ func TestFlagValuesThatParse(t *testing.T) {
 		"-t", "a@example.com,b@example.com", "-t", "c@example.com",
 		"--ip", "10.0.0.0/8, 192.168.1.1;2001:db8::/32", "--ip", "10.0.0.0/8",
 		"--ttl", "24h", "--presign-expiry", "30m", "--threads", "8",
-		"--hide-metadata", "-i", "ABCDEF0123456789",
+		"--hide-metadata", "-i", "ABCDEF0123456789", "--snapshot",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -168,6 +168,7 @@ func TestFlagValuesThatParse(t *testing.T) {
 		"threads":        "8",
 		"archive":        "true",
 		"identity":       "abcdef0123456789",
+		"snapshot":       "true",
 	} {
 		if got := get(name); got != want {
 			t.Errorf("--%s: got %q, want %q", name, got, want)

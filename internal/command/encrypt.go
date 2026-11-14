@@ -12,7 +12,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -46,6 +45,7 @@ func newEncryptCmd() *cobra.Command {
 		allowedIPs      []string
 		skipHidden      bool
 		forceArchive    bool
+		snapshot        bool
 		identityFP      string
 		useRecoveryCode bool
 		uploadThreads   int
@@ -219,6 +219,7 @@ your account. Recipients open the file with "secret decrypt --local".`,
 				Name:                 name,
 				Compress:             secrets.CompressZstd,
 				Archive:              forceArchive,
+				Snapshot:             snapshot,
 				AutoArchive:          true,
 				SkipHidden:           skipHidden,
 				TTL:                  ttl,
@@ -332,9 +333,6 @@ your account. Recipients open the file with "secret decrypt --local".`,
 				if errors.As(err, &interrupted) {
 					return errs.WithDetail(err, resumeDetail(interrupted.Upload.RevisionID))
 				}
-				if errors.Is(err, secrets.ErrFileChanged) {
-					return errs.WithDetail(err, changedInputDetail(inputFiles, runtime.GOOS))
-				}
 				// A send under the name of an existing secret adds a revision
 				// to it. The name may have come from the input's file name,
 				// so say so, and how to send a new secret instead.
@@ -431,7 +429,8 @@ your account. Recipients open the file with "secret decrypt --local".`,
 	f.VarP(flags.NewName(&name), "name", "n", "Secret `name` (default: the first file's name, or a timestamp)")
 	f.BoolVar(&skipHidden, "skip-hidden", false, "Skip hidden files and directories (dotfiles)")
 	f.BoolVarP(&forceArchive, "archive", "a", false, "Bundle files into one compressed archive, so the server sees no file names or sizes (alias: --hide-metadata)")
-	flags.SetGroup(f, flags.GroupInput, "file", "data", "name", "skip-hidden", "archive")
+	f.BoolVar(&snapshot, "snapshot", false, "Send each file as it was when the send started: a log that grows meanwhile goes out up to that size instead of stopping the send. For files that are only appended to: one that shrinks, is replaced or is removed still stops it")
+	flags.SetGroup(f, flags.GroupInput, "file", "data", "name", "skip-hidden", "archive", "snapshot")
 
 	f.Var(flags.NewTTL(&ttl), "ttl", "Expire the secret after this long: 2m to 365d, like 30m, 24h or 7d")
 	f.Var(flags.NewIPList(&allowedIPs), "ip", "Allow access only from these IP addresses or CIDR ranges, repeatable or comma-separated (at most 50)")
