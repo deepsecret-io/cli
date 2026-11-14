@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -330,6 +331,9 @@ your account. Recipients open the file with "secret decrypt --local".`,
 				var interrupted *secrets.UploadInterruptedError
 				if errors.As(err, &interrupted) {
 					return errs.WithDetail(err, resumeDetail(interrupted.Upload.RevisionID))
+				}
+				if errors.Is(err, secrets.ErrFileChanged) {
+					return errs.WithDetail(err, changedInputDetail(inputFiles, runtime.GOOS))
 				}
 				// A send under the name of an existing secret adds a revision
 				// to it. The name may have come from the input's file name,
