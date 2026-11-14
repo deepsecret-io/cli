@@ -4,7 +4,7 @@
 package command
 
 import (
-	"path/filepath"
+	"path"
 	"strings"
 )
 
@@ -18,13 +18,16 @@ func changedInputDetail(inputs []string, goos string) string {
 	if goos == "windows" {
 		return why + "Copy the files into a folder only you can read, send the copy with the same options,\nthen delete the copy: it is not encrypted."
 	}
+	// The commands are for a POSIX shell, so the inputs are POSIX paths:
+	// path, not filepath, which would turn them into Windows paths when the
+	// tests run there.
 	srcs := make([]string, len(inputs))
 	copies := make([]string, len(inputs))
 	for i, in := range inputs {
 		// A trailing slash would copy a folder's contents, not the folder.
-		in = filepath.Clean(in)
+		in = path.Clean(in)
 		srcs[i] = shellWord(in)
-		copies[i] = `"$d"/` + shellWord(filepath.Base(in))
+		copies[i] = `"$d"/` + shellWord(path.Base(in))
 	}
 	return why +
 		"Send a copy instead, with the same options. The copy is not encrypted: it goes into\n" +
