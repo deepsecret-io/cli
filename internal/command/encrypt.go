@@ -6,6 +6,7 @@ package command
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -265,9 +266,9 @@ your account. Recipients open the file with "secret decrypt --local".`,
 						opts.Name = fmt.Sprintf("%s (%d files)", resolved, len(inputFiles))
 					}
 				case len(stdinData) > 0:
-					opts.Name = fmt.Sprintf("message-%s", time.Now().Format("20060102-150405"))
+					opts.Name = defaultName("message", time.Now())
 				default:
-					opts.Name = fmt.Sprintf("secret-%s", time.Now().Format("20060102-150405"))
+					opts.Name = defaultName("secret", time.Now())
 				}
 			}
 
@@ -426,7 +427,7 @@ your account. Recipients open the file with "secret decrypt --local".`,
 
 	f.StringArrayVarP(&inputFiles, "file", "f", nil, "File or directory `path` to encrypt, repeatable (or give them as arguments)")
 	f.VarP(flags.NewKVPairs(&dataPairs), "data", "d", "A KEY=VALUE pair to encrypt, repeatable")
-	f.VarP(flags.NewName(&name), "name", "n", "Secret `name` (default: the first file's name, or a timestamp)")
+	f.VarP(flags.NewName(&name), "name", "n", "Secret `name` (default: the first file's name, or a unique one made from the time)")
 	f.BoolVar(&skipHidden, "skip-hidden", false, "Skip hidden files and directories (dotfiles)")
 	f.BoolVarP(&forceArchive, "archive", "a", false, "Bundle files into one compressed archive, so the server sees no file names or sizes (alias: --hide-metadata)")
 	f.BoolVar(&snapshot, "snapshot", false, "Send each file as it was when the send started: a log that grows meanwhile goes out up to that size instead of stopping the send. For files that are only appended to: one that shrinks, is replaced or is removed still stops it")
@@ -455,6 +456,19 @@ your account. Recipients open the file with "secret decrypt --local".`,
 		cmd.MarkFlagsMutuallyExclusive("local", sendOnly)
 	}
 	return cmd
+}
+
+// defaultName names a send that has no -n and no file to be named after:
+// kind ("message" or "secret"), the time now, and six random hex
+// characters. A send under the name of a secret the sender has adds a
+// revision to that secret, so a name by the second alone would merge two
+// sends made within one second, or have the second refused, or with
+// --revoke-missing revoke the first one's recipients. The suffix makes
+// each send its own secret.
+func defaultName(kind string, now time.Time) string {
+	var suffix [3]byte
+	_, _ = rand.Read(suffix[:]) // never fails: crypto/rand fills the slice or ends the program.
+	return fmt.Sprintf("%s-%s-%x", kind, now.Format("20060102-150405"), suffix)
 }
 
 // localFileName is the default --local output: the -n name, else the first

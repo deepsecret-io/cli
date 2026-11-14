@@ -16,9 +16,10 @@
 # /usr/local/bin). Escalates to sudo only if $INSTALL_DIR (or its nearest
 # existing ancestor) is not writable. When cosign is installed, it also
 # checks that this repository's Release workflow signed SHA256SUMS for the
-# version, and stops if it did not; set REQUIRE_SIGNATURE=1 to stop when
-# cosign is missing too. RELEASING.md shows how to check the build
-# provenance as well.
+# version, and stops if it did not. Without cosign it installs on the
+# checksum alone and says that the signature was not verified; set
+# REQUIRE_SIGNATURE=1 to stop instead. RELEASING.md shows how to check the
+# build provenance as well.
 #
 # Fetching via curl avoids the macOS Gatekeeper quarantine attribute that
 # browser downloads attach, so the binary runs without `xattr` workarounds.
@@ -26,7 +27,7 @@
 # Environment overrides:
 #   INSTALL_DIR  install target directory (default /usr/local/bin)
 #   BASE_URL     override the release base URL (default https://github.com/deepsecret-io/cli/releases/download/<version>)
-#   REQUIRE_SIGNATURE  set to 1 to refuse to install without checking SHA256SUMS's signature
+#   REQUIRE_SIGNATURE  set to 1 to install only when the signature of SHA256SUMS is verified (needs cosign)
 set -euo pipefail
 
 VERSION="${1:-}"
@@ -78,6 +79,27 @@ archive="${name}.tar.gz"
 url="${BASE_URL}/${archive}"
 sha_url="${BASE_URL}/SHA256SUMS"
 
+# A checksum file from the same place as the archive only catches a damaged
+# download. Its signature proves that this repository's Release workflow,
+# run for this version's tag, made it, and cosign checks that. Without
+# cosign only the checksum is checked, unless REQUIRE_SIGNATURE=1 asks for
+# the signature: then nothing is downloaded.
+#
+# Any value of REQUIRE_SIGNATURE but empty, 0, false or no asks for the
+# signature, so "true" or "yes" is never taken for off.
+require_signature=1
+case "${REQUIRE_SIGNATURE:-}" in
+  "" | 0 | false | no) require_signature="" ;;
+esac
+have_cosign=""
+if command -v cosign >/dev/null 2>&1; then
+  have_cosign=1
+elif [ -n "$require_signature" ]; then
+  echo "error: REQUIRE_SIGNATURE=1 needs cosign to verify the release signature, and cosign is not installed" >&2
+  echo "  install it (https://docs.sigstore.dev/cosign/system_config/installation/) and run this again" >&2
+  exit 1
+fi
+
 tmp=$(mktemp -d 2>/dev/null || mktemp -d -t deepsecret)
 trap 'rm -rf "$tmp"' EXIT INT TERM HUP
 
@@ -105,23 +127,19 @@ fi
 echo "verifying SHA-256..."
 fetch "${tmp}/SHA256SUMS" "$sha_url"
 
-# A checksum file from the same place as the archive only catches a damaged
-# download. Its signature proves that this repository's Release workflow,
-# run for this version's tag, made it.
-if command -v cosign >/dev/null 2>&1; then
+# The signature first: the checksums are trusted only once it holds.
+if [ -n "$have_cosign" ]; then
   echo "verifying the signature of SHA256SUMS..."
-  fetch "${tmp}/SHA256SUMS.sigstore.json" "${sha_url}.sigstore.json"
+  if ! fetch "${tmp}/SHA256SUMS.sigstore.json" "${sha_url}.sigstore.json"; then
+    echo "error: could not download the signature of SHA256SUMS" >&2
+    exit 1
+  fi
   if ! cosign verify-blob "${tmp}/SHA256SUMS" --bundle "${tmp}/SHA256SUMS.sigstore.json" \
     --certificate-identity "https://github.com/deepsecret-io/cli/.github/workflows/release.yml@refs/tags/${VERSION}" \
     --certificate-oidc-issuer https://token.actions.githubusercontent.com >/dev/null 2>&1; then
     echo "error: SHA256SUMS is not signed by the DeepSecret CLI release workflow for ${VERSION}" >&2
     exit 1
   fi
-elif [ "${REQUIRE_SIGNATURE:-}" = 1 ]; then
-  echo "error: cosign is needed to check the signature (REQUIRE_SIGNATURE=1)" >&2
-  exit 1
-else
-  echo "note: cosign is not installed, so the signature of SHA256SUMS was not checked (see RELEASING.md)" >&2
 fi
 expected=$(awk -v f="$archive" '$2 == f || $2 == "*"f { print $1; exit }' "${tmp}/SHA256SUMS")
 actual=$($hash_cmd "${tmp}/${archive}" | awk '{ print $1 }')
@@ -130,6 +148,9 @@ if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
   echo "  expected: ${expected:-<not found in SHA256SUMS>}" >&2
   echo "  actual:   ${actual}" >&2
   exit 1
+fi
+if [ -z "$have_cosign" ]; then
+  echo "warning: only the checksum was verified. The release signature was NOT verified, because cosign is not installed. To verify it, see https://github.com/deepsecret-io/cli#check-the-release-signature" >&2
 fi
 
 echo "extracting..."

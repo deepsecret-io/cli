@@ -11,11 +11,15 @@
 # %LOCALAPPDATA%\Programs\DeepSecret (or $env:INSTALL_DIR), adding that
 # folder to your user PATH. It needs no administrator rights.
 #
-# SHA256SUMS comes from the same release, so the check catches a damaged
-# download, not a tampered release: RELEASING.md shows how to check the
-# signature of SHA256SUMS and the build provenance as well. PowerShell
-# downloads carry no mark of the web, so SmartScreen does not stop the
-# unsigned secret.exe.
+# SHA256SUMS comes from the same release, so on its own that check catches
+# a damaged download, not a tampered release. When cosign is installed,
+# this also checks that this repository's Release workflow signed
+# SHA256SUMS for the version, and stops if it did not. Without cosign it
+# installs on the checksum alone and says that the signature was not
+# verified; set $env:REQUIRE_SIGNATURE = '1' to stop instead. RELEASING.md
+# shows how to check the build provenance as well. PowerShell downloads
+# carry no mark of the web, so SmartScreen does not stop the unsigned
+# secret.exe.
 
 # Everything runs in its own scope, and the one session-wide setting it
 # changes (TLS 1.2 for Windows PowerShell 5.1) is put back, so nothing is
@@ -57,6 +61,18 @@
             default { throw "This Windows architecture is not supported: $osArch" }
         }
 
+        # cosign checks the signature of SHA256SUMS. Without it only the
+        # checksum is checked, unless REQUIRE_SIGNATURE=1 asks for the
+        # signature: then nothing is downloaded. Only a program on the
+        # PATH counts, not an alias or a function of this session.
+        $cosign = Get-Command -Name cosign -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        # Any value of REQUIRE_SIGNATURE but empty, 0, false or no asks for
+        # the signature, so "true" or "yes" is never taken for off.
+        $requireSignature = [bool]$env:REQUIRE_SIGNATURE -and ($env:REQUIRE_SIGNATURE -notin @('0', 'false', 'no'))
+        if (-not $cosign -and $requireSignature) {
+            throw 'REQUIRE_SIGNATURE=1 needs cosign to verify the release signature, and cosign is not installed. Install it (https://docs.sigstore.dev/cosign/system_config/installation/) and run this again.'
+        }
+
         $name = "secret_windows_$arch"
         $base = "https://github.com/$repo/releases/download/$version"
         $tmp = Join-Path ([IO.Path]::GetTempPath()) ('deepsecret-' + [guid]::NewGuid())
@@ -68,6 +84,39 @@
         Invoke-WebRequest -UseBasicParsing -Uri "$base/$name.zip" -OutFile $zip
         Invoke-WebRequest -UseBasicParsing -Uri "$base/SHA256SUMS" -OutFile $sums
 
+        # The signature first: the checksums are trusted only once it
+        # holds. It proves that this repository's Release workflow, run for
+        # this version's tag, made SHA256SUMS.
+        if ($cosign) {
+            Write-Host 'Checking the signature of SHA256SUMS...'
+            $bundle = Join-Path $tmp 'SHA256SUMS.sigstore.json'
+            try {
+                Invoke-WebRequest -UseBasicParsing -Uri "$base/SHA256SUMS.sigstore.json" -OutFile $bundle
+            }
+            catch {
+                throw "Could not download the signature of SHA256SUMS: $($_.Exception.Message)"
+            }
+            $cosignArgs = @(
+                'verify-blob', $sums,
+                '--bundle', $bundle,
+                '--certificate-identity', "https://github.com/$repo/.github/workflows/release.yml@refs/tags/$version",
+                '--certificate-oidc-issuer', 'https://token.actions.githubusercontent.com'
+            )
+            # cosign reports on stderr, also when the signature holds, and
+            # with 'Stop' Windows PowerShell throws on what a program
+            # writes there. So this one call runs with 'Continue', its
+            # output is dropped, and its exit code decides. The exit code
+            # starts as a failure, in case cosign does not run at all.
+            $global:LASTEXITCODE = 1
+            & {
+                $ErrorActionPreference = 'Continue'
+                & $cosign.Path @cosignArgs 2>&1 | Out-Null
+            }
+            if ($LASTEXITCODE -ne 0) {
+                throw "SHA256SUMS is not signed by the DeepSecret CLI release workflow for $version. Do not use this download."
+            }
+        }
+
         Write-Host 'Checking it against SHA256SUMS...'
         # A line is "<hash>  <name>", or "<hash> *<name>" in binary mode.
         $line = Select-String -Path $sums -Pattern ('[ *]' + [regex]::Escape("$name.zip") + '$') | Select-Object -First 1
@@ -75,6 +124,9 @@
         $want = $line.Line.Split(' ')[0]
         $got = (Get-FileHash -Path $zip -Algorithm SHA256).Hash
         if ($got -ne $want) { throw "Checksum mismatch for $name.zip: expected $want, got $got. Do not use this download." }
+        if (-not $cosign) {
+            Write-Warning 'Only the checksum was verified. The release signature was NOT verified, because cosign is not installed. To verify it, see https://github.com/deepsecret-io/cli#check-the-release-signature'
+        }
 
         Expand-Archive -Path $zip -DestinationPath $tmp -Force
         $exe = Join-Path $tmp "$name\secret.exe"

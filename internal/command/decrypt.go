@@ -57,8 +57,8 @@ func newDecryptCmd() *cobra.Command {
 		Short:   "Decrypt a secret (alias: dec)",
 		Long: `Decrypt a secret. Where the output goes depends on what it holds:
   - Files are written to a directory named after the revision ID by default,
-    so a decrypt never writes over files in the current directory. --dir
-    chooses another one.
+    so a decrypt never writes over files in the current directory. A link
+    or a file with that name is refused. --dir chooses another directory.
   - A message or key-value data is printed to stdout, or written to the
     file --output names.
 
@@ -289,12 +289,20 @@ plan and every change to it.`,
 							}
 							return "type=" + opened.Result.PayloadType, nil
 						}
-						var err error
-						if outputDir, err = filesDir(outputDir, opened.Result.RevisionID); err != nil {
+						dir, created, err := prepareFilesDir(outputDir, opened.Result.RevisionID)
+						if err != nil {
 							return "", err
 						}
+						outputDir = dir
 						written, err = opened.WriteFiles(cmd.Context(), outputDir, secrets.WriteOptions{Overwrite: forceOverwrite})
 						if err != nil {
+							if created {
+								// The SDK removed what it wrote, so the directory
+								// made for it goes too. Remove takes only an
+								// empty one: anything left in it stays, and the
+								// SDK's error names it.
+								_ = os.Remove(outputDir)
+							}
 							return "", err
 						}
 						if written.Archived {
@@ -499,6 +507,65 @@ func filesDir(dir, revisionID string) (string, error) {
 	return "./" + revisionID, nil
 }
 
+// checkDefaultDir checks the default output directory dir
+// (./<revision-id>): it must be missing or a real directory, and exists
+// says which. The sender chooses the revision ID, so a link by that name,
+// planted where the recipient decrypts, would send the files wherever it
+// points: a symlink is refused, and so is a file or anything else that is
+// not a plain directory, such as a junction or another reparse point on
+// Windows (which Lstat reports as irregular). --overwrite does not allow
+// any of them. A --dir is the caller's own choice and is not checked here.
+// The nothing argument is the sentence a refusal's detail gives for what has
+// not happened yet ("Nothing was downloaded." or "Nothing was written.").
+func checkDefaultDir(dir, nothing string) (exists bool, err error) {
+	info, err := os.Lstat(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("could not check the output directory %s: %w", dir, errs.PathCause(err))
+	}
+	if info.Mode().Type() == os.ModeDir {
+		return true, nil
+	}
+	what := "is not a directory"
+	if info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+		what = "is a link"
+	}
+	return false, errs.WithDetail(fmt.Errorf("%s %s", dir, what),
+		"Without --dir, the files go to a directory with this name, and decrypt never writes through a link or in place of a file. "+nothing+"\n\n"+
+			"Pass --dir to choose the output directory.")
+}
+
+// prepareFilesDir is filesDir right before the write, with the default
+// ./<revision-id>/ made ready: it is created here private to this user
+// (mode 0700, or an owner-only access list on Windows), and created
+// reports that, so the caller can remove it when nothing gets written.
+// safefile.MkdirExclusive fails on anything already at the path, a link
+// included, so what appeared there since the check before the download is
+// never written through; only a real directory that was there already is
+// used as it is. A --dir is left to the SDK.
+func prepareFilesDir(dirFlag, revisionID string) (dir string, created bool, err error) {
+	dir, err = filesDir(dirFlag, revisionID)
+	if err != nil || dirFlag != "" {
+		return dir, false, err
+	}
+	mkdirErr := safefile.MkdirExclusive(dir)
+	if mkdirErr == nil {
+		return dir, true, nil
+	}
+	if errors.Is(mkdirErr, os.ErrExist) {
+		exists, err := checkDefaultDir(dir, "Nothing was written.")
+		if err != nil {
+			return "", false, err
+		}
+		if exists {
+			return dir, false, nil
+		}
+	}
+	return "", false, fmt.Errorf("could not create the output directory %s: %w", dir, errs.PathCause(mkdirErr))
+}
+
 // checkFilesDestination checks, before the download, that the files of p
 // can be written where decrypt writes them (dirFlag is --dir), so a decrypt
 // that cannot finish fails without fetching a possibly large payload.
@@ -509,10 +576,20 @@ func filesDir(dir, revisionID string) (string, error) {
 // already holding files, which only an earlier decrypt of this revision
 // writes there. A --dir the caller chose may well hold other files, so an
 // archive's conflicts there show only once it is extracted.
+//
+// The default directory must be missing or a real directory
+// (checkDefaultDir), whatever the payload and with --overwrite too.
 func checkFilesDestination(dirFlag string, p secrets.UpcomingDownload, overwrite bool) error {
 	dir, err := filesDir(dirFlag, p.RevisionID)
 	if err != nil {
 		return err
+	}
+	// First, so that nothing is tried through a link: CheckDestination
+	// follows one, and creates a file where it points to see if it can.
+	if dirFlag == "" {
+		if _, err := checkDefaultDir(dir, "Nothing was downloaded."); err != nil {
+			return err
+		}
 	}
 	if err := secrets.CheckDestination(dir, p.Files, overwrite); err != nil {
 		detail := "Nothing was downloaded."

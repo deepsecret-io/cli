@@ -137,18 +137,24 @@ func CreateTemp(dir, pattern string) (*os.File, error) {
 	return nil, &os.PathError{Op: "createtemp", Path: filepath.Join(dir, prefix+"*"+suffix), Err: os.ErrExist}
 }
 
-// mkdir creates the folder path, private to this user.
-func mkdir(path string) error {
+// MkdirExclusive creates the folder dir, private to this user, and fails
+// when anything is at that path already, a link or a junction included:
+// the error then matches os.ErrExist. So a caller that needs a folder
+// nobody else prepared never writes into one that was planted, or through
+// a link. CreateDirectory takes the security descriptor as it creates the
+// folder, which os.Mkdir cannot: its folder takes the access list of the
+// one above. It makes no parents.
+func MkdirExclusive(dir string) error {
 	sa, err := privateAttrs(true)
 	if err != nil {
-		return &os.PathError{Op: "mkdir", Path: path, Err: err}
+		return &os.PathError{Op: "mkdir", Path: dir, Err: err}
 	}
-	p, err := windows.UTF16PtrFromString(path)
+	p, err := windows.UTF16PtrFromString(dir)
 	if err != nil {
-		return &os.PathError{Op: "mkdir", Path: path, Err: err}
+		return &os.PathError{Op: "mkdir", Path: dir, Err: err}
 	}
 	if err := windows.CreateDirectory(p, sa); err != nil {
-		return &os.PathError{Op: "mkdir", Path: path, Err: err}
+		return &os.PathError{Op: "mkdir", Path: dir, Err: err}
 	}
 	return nil
 }
@@ -167,7 +173,7 @@ func MkdirPrivate(dir string) error {
 			return err
 		}
 	}
-	if err := mkdir(dir); err != nil {
+	if err := MkdirExclusive(dir); err != nil {
 		// Made in the meantime: fine when it is a folder.
 		if info, lerr := os.Lstat(dir); lerr == nil && info.IsDir() {
 			return nil

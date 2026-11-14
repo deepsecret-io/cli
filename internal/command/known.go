@@ -324,10 +324,14 @@ func printFirstUse(people []secrets.Recipient) {
 
 // describeFailure is errs.Describe for a command's failure: a send or
 // decrypt refused because someone's key changed also says how to check the
-// new key and accept it.
+// new key and accept it, and one refused because a key was relabelled, what
+// to confirm before forgetting its old record.
 func describeFailure(ctx context.Context, err error) (summary, detail string) {
 	summary, detail = errs.Describe(err)
 	extra := keyChangedDetail(ctx, err)
+	if extra == "" {
+		extra = keyRelabelledDetail(err)
+	}
 	if extra == "" {
 		extra = kmsDetail(err)
 	}
@@ -367,4 +371,32 @@ func keyChangedDetail(ctx context.Context, err error) string {
 		"%s\n\n"+
 		"Key fingerprint:\n\n  %s\n  %s\n\n%s",
 		email, strings.Join(rows, "\n  "), sameNumberHint(email), fp[0], fp[1], accept)
+}
+
+// keyRelabelledDetail is the detail of the Error block of a send, a
+// decrypt or an accept refused because the server presents, for one
+// address, a key this device recorded for another: the server may be
+// passing one person's key off as someone else's. Only the person the key
+// is recorded for can say they changed address, and then forgetting that
+// one record lets the key pass for the new address.
+//
+// A send refused because the server lists one key for two of its
+// recipients, both new to this device (SameSend), has no record to forget:
+// the detail says so, and to check both addresses first. It is "" for any
+// other error.
+func keyRelabelledDetail(err error) string {
+	var relabelled *trust.KeyRelabelledError
+	if !errors.As(err, &relabelled) {
+		return ""
+	}
+	email, recorded := console.Safe(relabelled.Email), console.Safe(relabelled.RecordedEmail)
+	if relabelled.SameSend {
+		return fmt.Sprintf("The server listed the same key for %s and %s. A key belongs to one address, so the send was refused. "+
+			"Nothing was recorded on this device, so there is nothing to forget.\n\n"+
+			"Check both addresses with those people over a channel you trust, or with the operator of the server, before sending again.", recorded, email)
+	}
+	return fmt.Sprintf("The server presents, for %[1]s, a key this device knows as %[2]s's. A key belongs to one address, so the server may be relabelling it.\n\n"+
+		"Do not continue unless %[2]s confirms, over a channel you trust, that they changed their address to %[1]s. "+
+		"If they did, forget the old record and try again:\n\n"+
+		"  secret identity forget %[2]s %[3]s", email, recorded, console.Safe(relabelled.Fingerprint))
 }

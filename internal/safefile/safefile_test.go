@@ -4,6 +4,7 @@
 package safefile
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -96,5 +97,37 @@ func TestSafeWriteFileOverwriteReplaces(t *testing.T) {
 	testutil.AssertPrivate(t, dest)
 	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
 		t.Errorf("the output folder holds %d entries; a temporary file was left", len(entries))
+	}
+}
+
+// MkdirExclusive makes a new folder private to this user (0700, or an
+// owner-only ACL on Windows) and never uses what is at the path already:
+// a folder or a file there is refused as existing, and left as it is. It
+// makes no parents.
+func TestMkdirExclusive(t *testing.T) {
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "out")
+	if err := MkdirExclusive(dir); err != nil {
+		t.Fatal(err)
+	}
+	testutil.AssertPrivate(t, dir)
+
+	if err := MkdirExclusive(dir); !errors.Is(err, os.ErrExist) {
+		t.Errorf("a folder already there: %v, want os.ErrExist", err)
+	}
+
+	file := filepath.Join(parent, "file")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := MkdirExclusive(file); !errors.Is(err, os.ErrExist) {
+		t.Errorf("a file already there: %v, want os.ErrExist", err)
+	}
+	if data, err := os.ReadFile(file); err != nil || string(data) != "x" {
+		t.Errorf("the file already there: %q, %v", data, err)
+	}
+
+	if err := MkdirExclusive(filepath.Join(parent, "missing", "out")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a missing parent: %v, want os.ErrNotExist", err)
 	}
 }

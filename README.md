@@ -29,10 +29,16 @@ secret --version
 
 - **A specific version:** `curl -fsSL https://github.com/deepsecret-io/cli/releases/latest/download/install.sh | bash -s -- v0.1.0`, or on Windows set `$env:DEEPSECRET_VERSION = 'v0.1.0'` before the command.
 - **Another folder:** put `INSTALL_DIR=~/.local/bin` before `bash`, or set `$env:INSTALL_DIR` on Windows.
-- **With the signature checked:** on macOS and Linux, the installer also checks that the release workflow signed the checksums when [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) is installed. Otherwise, or by hand, download your platform's archive and `SHA256SUMS` from the [releases page](https://github.com/deepsecret-io/cli/releases) and check them as [Verify a download](RELEASING.md#verify-a-download) shows.
+- **Only with the signature verified:** see [Check the release signature](#check-the-release-signature).
 - **From source:** see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 </details>
+
+### Check the release signature
+
+The checksums catch a damaged download. When [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) v3 is installed, both installers also check that this repository's release workflow signed the checksums, and stop if it did not. Without cosign they install on the checksum alone and warn that the signature was not verified.
+
+To install only when the signature is verified, set `REQUIRE_SIGNATURE=1`: the installer then stops when cosign is missing. Put it before `bash` (`curl -fsSL ... | REQUIRE_SIGNATURE=1 bash`), or on Windows run `$env:REQUIRE_SIGNATURE = '1'` before the command. To check a download by hand, see [Verify a download](RELEASING.md#verify-a-download).
 
 ## Set up, once per computer
 
@@ -95,7 +101,7 @@ secret encrypt key.pem -t alice@example.com --ip 10.0.0.0/8      # opens from th
 secret encrypt . -t alice@example.com --archive                  # hides file names and sizes from the server
 ```
 
-Sending again under the same name adds a new revision of that secret. List everyone who should keep access, or add `--revoke-missing` to take it from anyone you leave out.
+Sending again under the same name adds a new revision of that secret. List everyone who should keep access, or add `--revoke-missing` to take it from anyone you leave out. Text or key-value pairs sent without a name get a unique one, like `message-20261114-101500-3fa9c1`, so each send is a secret of its own.
 
 ## Open a secret
 
@@ -119,7 +125,7 @@ secret decrypt <secret-id> --dir ./out      # or to a folder you choose
 secret decrypt <secret-id> -o db.env        # key-value pairs to a file instead of the screen
 ```
 
-Decrypting never overwrites files in your current folder. Key-value pairs are printed on the screen unless you give `-o`.
+Decrypting never overwrites files in your current folder. The folder it creates is private to your account, on Windows too. If `./<revision-id>` is already there as a link or a file, it stops rather than write through it, and asks you to choose a folder with `--dir`. Key-value pairs are printed on the screen unless you give `-o`.
 
 ## Manage what you sent
 
@@ -131,6 +137,8 @@ Decrypting never overwrites files in your current folder. Key-value pairs are pr
 | Take back someone's access | `secret revoke <secret-id> --to bob@example.com` |
 | Delete it for everyone | `secret delete <secret-id>` |
 | Finish an interrupted upload | `secret resume` |
+
+When your organization enforces a network rule, `secret describe` and `secret policy` show the IP lock as set by the organization, without its addresses.
 
 ## Watch progress and debug
 
@@ -166,6 +174,8 @@ The CLI remembers the key it first saw for each person. If their key changes, it
 secret identity verify alice@example.com                  # shows the key to compare with Alice
 secret identity accept alice@example.com <fingerprint>    # accept it once she confirms
 ```
+
+The CLI also stops when the server presents, for one address, a key it already knows under another. Go on only if that person confirms they changed their address: then forget the old record with `secret identity forget <old-email> <fingerprint>`, as the error shows, and try again.
 
 ## Scripts and CI
 

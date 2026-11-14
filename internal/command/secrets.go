@@ -195,7 +195,7 @@ Examples:
 				_, _ = fmt.Fprintf(w, "  %s\t%s\t%s\t%s\t%d\t%s\t%s\n",
 					console.Safe(s.ID),
 					contact,
-					ui.Ellipsis(s.Name, 25),
+					ui.Ellipsis(s.Name, listNameWidth),
 					filesStr,
 					s.RevisionCount,
 					ui.FormatBytes(s.TotalSize),
@@ -231,6 +231,11 @@ Examples:
 	cmd.MarkFlagsMutuallyExclusive("no-pagination", "limit")
 	return cmd
 }
+
+// listNameWidth is how much of a secret's name list shows: enough for a
+// default name (defaultName) with its random suffix, which alone tells
+// two sends without a name apart.
+const listNameWidth = 30
 
 // inboxSecrets merges the inbox, newest first: the secrets received,
 // and the ones the caller sent only to themself. Those come from the
@@ -375,9 +380,7 @@ Examples:
 			if s.ExpiresAt != "" {
 				kv("Expires At", s.ExpiresAt)
 			}
-			if len(s.AllowedIPs) > 0 {
-				kv("Allowed IPs", strings.Join(s.AllowedIPs, ", "))
-			}
+			writeIPLock(w, s)
 
 			// Revisions: same fields as JSON revisions[]
 			if len(detail.Revisions) > 0 {
@@ -466,14 +469,7 @@ Examples:
 					}
 					ikv("Checksum SHA256", r.Integrity.ChecksumSHA256)
 					ikv("Etag", r.Integrity.Etag)
-					if len(r.FilesMeta) > 0 {
-						fmt.Fprintf(w, "  Files Meta:\n")
-						for _, f := range r.FilesMeta {
-							fmt.Fprintf(w, "    - %-28s%s\n", "Name:", console.Safe(f.Name))
-							fmt.Fprintf(w, "      %-28s%d\n", "Size:", f.Size)
-							fmt.Fprintf(w, "      %-28s%s\n", "SHA256:", console.Safe(f.SHA256))
-						}
-					}
+					writeFilesMeta(w, r.FilesMeta)
 				}
 			}
 
@@ -679,16 +675,7 @@ Examples:
 
 			ui.Success(fmt.Sprintf("Updated the policies of secret %s (%s).", ui.ShortID(updated.ID), console.Safe(updated.Name)))
 			fmt.Fprintln(os.Stderr)
-			if updated.ExpiresAt != nil {
-				ui.KeyValue("TTL", "expires "+console.Safe(*updated.ExpiresAt))
-			} else {
-				ui.KeyValue("TTL", "none")
-			}
-			if len(updated.AllowedIPs) > 0 {
-				ui.KeyValue("IP Lock", console.Safe(strings.Join(updated.AllowedIPs, ", ")))
-			} else {
-				ui.KeyValue("IP Lock", "none")
-			}
+			printPolicies(updated)
 			fmt.Fprintln(os.Stderr)
 
 			return nil
@@ -734,6 +721,61 @@ func recipientsSummary(rs []secrets.SecretRecipient) string {
 		return ui.Ellipsis(rs[0].Email, 25)
 	default:
 		return fmt.Sprintf("%s +%d", ui.Ellipsis(rs[0].Email, 20), len(rs)-1)
+	}
+}
+
+// ipLockOrgEnforced is the API's ip_lock_source for an IP lock that the
+// secret's organization enforces.
+const ipLockOrgEnforced = "org-enforced"
+
+// ipLockSummary is how a secret's IP lock reads, or "" when it has none:
+// the addresses its sender allowed, or, for a lock its organization
+// enforces (source is the API's ip_lock_source), that there is one. The
+// API shows the organization's addresses to its admins only, so allowed
+// is then empty, and would read as no lock.
+func ipLockSummary(source string, allowed []string) string {
+	if source == ipLockOrgEnforced {
+		return "set by the organization (addresses not shown)"
+	}
+	return strings.Join(allowed, ", ")
+}
+
+// writeIPLock adds a secret's IP lock to describe, when it has one, under
+// the name a send and policy give it.
+func writeIPLock(w *strings.Builder, s secrets.Info) {
+	if lock := ipLockSummary(s.IPLockSource, s.AllowedIPs); lock != "" {
+		fmt.Fprintf(w, "%-30s%s\n", "IP Lock:", console.Safe(lock))
+	}
+}
+
+// printPolicies shows a secret's policies after policy updated them: when
+// it expires, and its IP lock, which is "none" only when no lock is in
+// force.
+func printPolicies(updated *secrets.PolicyResult) {
+	if updated.ExpiresAt != nil {
+		ui.KeyValue("TTL", "expires "+console.Safe(*updated.ExpiresAt))
+	} else {
+		ui.KeyValue("TTL", "none")
+	}
+	if lock := ipLockSummary(updated.IPLockSource, updated.AllowedIPs); lock != "" {
+		ui.KeyValue("IP Lock", console.Safe(lock))
+	} else {
+		ui.KeyValue("IP Lock", "none")
+	}
+}
+
+// writeFilesMeta lists, under a revision in describe, the files the server
+// lists for it: their names and sizes. The server keeps no hash of a
+// file's content; the hashes a decrypt shows come from the encrypted
+// payload, once it is verified.
+func writeFilesMeta(w *strings.Builder, files []secrets.FileMeta) {
+	if len(files) == 0 {
+		return
+	}
+	fmt.Fprintf(w, "  Files Meta:\n")
+	for _, f := range files {
+		fmt.Fprintf(w, "    - %-28s%s\n", "Name:", console.Safe(f.Name))
+		fmt.Fprintf(w, "      %-28s%d\n", "Size:", f.Size)
 	}
 }
 

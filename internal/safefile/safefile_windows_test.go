@@ -8,6 +8,7 @@ package safefile
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -122,6 +123,43 @@ func TestCreatedFilesArePrivate(t *testing.T) {
 	}
 	if _, err := ReadPrivate(plain); err != nil {
 		t.Errorf("ReadPrivate refused a file that inherits a private folder's entry: %v", err)
+	}
+}
+
+// A junction at the path is refused like anything else there: it needs no
+// privilege to create, and the folder is never made where it points. What
+// plain code creates in a folder MkdirExclusive made is private too.
+func TestMkdirExclusiveRefusesAJunction(t *testing.T) {
+	parent, target := t.TempDir(), t.TempDir()
+	link := filepath.Join(parent, "linked")
+	if out, err := exec.Command("cmd", "/c", "mklink", "/J", link, target).CombinedOutput(); err != nil {
+		t.Fatalf("mklink /J: %v: %s", err, out)
+	}
+	if err := MkdirExclusive(link); !errors.Is(err, os.ErrExist) {
+		t.Errorf("a junction at the path: %v, want os.ErrExist", err)
+	}
+	if info, err := os.Lstat(link); err != nil || info.Mode().Type() == os.ModeDir {
+		t.Errorf("the junction is no longer one: %v", err)
+	}
+	entries, err := os.ReadDir(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) > 0 {
+		t.Errorf("the junction's target holds %s", entries[0].Name())
+	}
+
+	dir := filepath.Join(parent, "out")
+	if err := MkdirExclusive(dir); err != nil {
+		t.Fatal(err)
+	}
+	testutil.AssertPrivate(t, dir)
+	plain := filepath.Join(dir, "plain.txt")
+	if err := os.WriteFile(plain, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadPrivate(plain); err != nil {
+		t.Errorf("a file made in the folder is not private: %v", err)
 	}
 }
 

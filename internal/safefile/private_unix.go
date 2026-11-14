@@ -45,6 +45,15 @@ func MkdirPrivate(dir string) error {
 	return os.MkdirAll(dir, 0o700)
 }
 
+// MkdirExclusive creates the folder dir, private to this user (0700), and
+// fails when anything is at that path already, a link included: the error
+// then matches os.ErrExist. So a caller that needs a folder nobody else
+// prepared never writes into one that was planted, or through a link. It
+// is os.Mkdir, and makes no parents.
+func MkdirExclusive(dir string) error {
+	return os.Mkdir(dir, 0o700)
+}
+
 // ReadPrivate reads the file path, and refuses one that another user owns
 // or that anyone but its owner may open (ErrNotPrivate), as the Windows
 // build does: a key or a credential in it is no longer private, and

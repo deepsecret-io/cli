@@ -164,6 +164,71 @@ func TestKeyChangedDetail(t *testing.T) {
 	}
 }
 
+// A send or decrypt refused because the server presents, for one address,
+// a key this device knows under another says, in its Error block, not to
+// go on unless that person confirms they changed address, and how to
+// forget the old record then: that key alone, by its full fingerprint.
+// Addresses and the fingerprint come from the server, so they show safe.
+func TestKeyRelabelledDetail(t *testing.T) {
+	for _, sender := range []bool{false, true} {
+		err := fmt.Errorf("check recipients: %w", &trust.KeyRelabelledError{
+			Email: "bob@new.example", RecordedEmail: "bob@example.com", Fingerprint: fullFP, Sender: sender})
+		summary, detail := describeFailure(context.Background(), err)
+		if !strings.Contains(summary, "possible relabelling by the server") {
+			t.Errorf("sender %v: the summary is %q", sender, summary)
+		}
+		for _, want := range []string{
+			"for bob@new.example, a key this device knows as bob@example.com's",
+			"Do not continue unless bob@example.com confirms",
+			"changed their address to bob@new.example",
+			"forget the old record and try again:\n\n  secret identity forget bob@example.com " + fullFP,
+		} {
+			if !strings.Contains(detail, want) {
+				t.Errorf("sender %v: the detail %q does not hold %q", sender, detail, want)
+			}
+		}
+	}
+
+	// One key listed for two recipients of a send, both new to this device:
+	// nothing is recorded, so there is nothing to forget.
+	sameSend := fmt.Errorf("check recipients: %w", &trust.KeyRelabelledError{
+		Email: "carol@example.com", RecordedEmail: "bob@example.com", Fingerprint: fullFP, SameSend: true})
+	summary, detail := describeFailure(context.Background(), sameSend)
+	if !strings.Contains(summary, "possible key substitution by the server") {
+		t.Errorf("same send: the summary is %q", summary)
+	}
+	for _, want := range []string{
+		"The server listed the same key for bob@example.com and carol@example.com",
+		"the send was refused",
+		"Nothing was recorded on this device",
+		"Check both addresses with those people over a channel you trust, or with the operator of the server, before sending again.",
+	} {
+		if !strings.Contains(detail, want) {
+			t.Errorf("same send: the detail %q does not hold %q", detail, want)
+		}
+	}
+	for _, wrong := range []string{"identity forget", "old record", "changed their address", fullFP} {
+		if strings.Contains(detail, wrong) {
+			t.Errorf("same send: the detail %q holds %q", detail, wrong)
+		}
+	}
+	_, detail = describeFailure(context.Background(), &trust.KeyRelabelledError{
+		Email: "eve\x1b[2J@example.com", RecordedEmail: "bob\r@example.com", Fingerprint: fullFP, SameSend: true})
+	if strings.ContainsAny(detail, "\x1b\r") || !strings.Contains(detail, "for bob?@example.com and eve?[2J@example.com") {
+		t.Errorf("same send: the detail prints the server's values as they are: %q", detail)
+	}
+
+	hostile := &trust.KeyRelabelledError{Email: "eve\x1b[2J@example.com", RecordedEmail: "bob\r@example.com", Fingerprint: fullFP + "\x1b"}
+	_, detail = describeFailure(context.Background(), hostile)
+	if strings.ContainsAny(detail, "\x1b\r") || !strings.Contains(detail, "secret identity forget bob?@example.com "+fullFP+"?") {
+		t.Errorf("the detail prints the server's values as they are: %q", detail)
+	}
+
+	if _, detail := describeFailure(context.Background(), errors.New("another failure")); detail != "" {
+		t.Errorf("another error got the detail %q", detail)
+	}
+}
+
 // whoami fails when the registered keys cannot be listed, instead of
 // reporting none, and names the primary key or says why there is none.
 func TestRegisteredKeysStep(t *testing.T) {

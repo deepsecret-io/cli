@@ -43,3 +43,34 @@ func TestReadPrivateRefusesAnExposedFileUnix(t *testing.T) {
 		t.Errorf("a missing file: %v, want not exist", err)
 	}
 }
+
+// A link at the path is refused like anything else there, whether it
+// points at a folder or at nothing: the folder is never made through it,
+// or where it points.
+func TestMkdirExclusiveRefusesALink(t *testing.T) {
+	parent := t.TempDir()
+	target := filepath.Join(parent, "target")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(parent, "missing")
+	toFolder, dangling := filepath.Join(parent, "to-folder"), filepath.Join(parent, "dangling")
+	if err := os.Symlink(target, toFolder); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(missing, dangling); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, link := range []string{toFolder, dangling} {
+		if err := MkdirExclusive(link); !errors.Is(err, os.ErrExist) {
+			t.Errorf("%s: %v, want os.ErrExist", filepath.Base(link), err)
+		}
+		if info, err := os.Lstat(link); err != nil || info.Mode()&os.ModeSymlink == 0 {
+			t.Errorf("%s is no longer a link: %v", filepath.Base(link), err)
+		}
+	}
+	if _, err := os.Lstat(missing); !os.IsNotExist(err) {
+		t.Errorf("the folder was made where the dangling link points: %v", err)
+	}
+}
