@@ -211,3 +211,38 @@ func TestReadPrivateRefusesAFileOpenForWriting(t *testing.T) {
 		t.Errorf("after the writer closed: %q, %v", data, err)
 	}
 }
+
+// A folder MkdirExclusive made is private. One someone else may open is
+// refused (ErrNotPrivate), and so is a junction: its own access list is
+// not the folder's, and it is not a folder.
+func TestCheckPrivateDir(t *testing.T) {
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "out")
+	if err := MkdirExclusive(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckPrivateDir(dir); err != nil {
+		t.Fatalf("a folder MkdirExclusive made: %v", err)
+	}
+
+	link := filepath.Join(parent, "linked")
+	if out, err := exec.Command("cmd", "/c", "mklink", "/J", link, dir).CombinedOutput(); err != nil {
+		t.Fatalf("mklink /J: %v: %s", err, out)
+	}
+	if err := CheckPrivateDir(link); err == nil {
+		t.Error("a junction to a private folder was accepted as one")
+	}
+
+	testutil.Expose(t, dir)
+	err := CheckPrivateDir(dir)
+	if !errors.Is(err, ErrNotPrivate) {
+		t.Fatalf("an exposed folder: %v, want ErrNotPrivate", err)
+	}
+	summary, detail := errs.Describe(err)
+	if !strings.HasSuffix(summary, "out is open to other users") || !strings.Contains(detail, "may open it") {
+		t.Errorf("%q, %q", summary, detail)
+	}
+	if err := CheckPrivateDir(filepath.Join(parent, "missing")); !os.IsNotExist(err) {
+		t.Errorf("a missing folder: %v, want not exist", err)
+	}
+}

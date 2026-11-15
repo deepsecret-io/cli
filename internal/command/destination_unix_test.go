@@ -152,11 +152,11 @@ func TestPrepareFilesDirRefusesALink(t *testing.T) {
 	}
 }
 
-// A directory that was there before keeps its mode: only the one decrypt
-// creates is made private.
+// A private directory that was there before keeps its mode: decrypt
+// only sets the mode of the one it creates.
 func TestPrepareFilesDirKeepsAnExistingMode(t *testing.T) {
 	t.Chdir(t.TempDir())
-	if err := os.Mkdir(linkedRevision, 0o755); err != nil {
+	if err := os.Mkdir(linkedRevision, 0o500); err != nil {
 		t.Fatal(err)
 	}
 	before, err := os.Lstat(linkedRevision)
@@ -172,5 +172,55 @@ func TestPrepareFilesDirKeepsAnExistingMode(t *testing.T) {
 	}
 	if after.Mode() != before.Mode() {
 		t.Fatalf("an existing ./%s went from mode %v to %v", linkedRevision, before.Mode(), after.Mode())
+	}
+}
+
+// A directory at the default ./<revision-id>/ that other accounts may open
+// is refused before the download and before the write, also with
+// --overwrite, and left as it was: the sender chooses the revision ID, so
+// someone else on this computer could have made it, and could change what
+// decrypt writes in it.
+func TestDefaultDirMustBePrivate(t *testing.T) {
+	archive := secrets.UpcomingDownload{RevisionID: linkedRevision, PayloadType: "files"}
+	listed := secrets.UpcomingDownload{RevisionID: linkedRevision, PayloadType: "files", Files: []secrets.FileMeta{{Name: "notes.txt", Size: 5}}}
+
+	t.Chdir(t.TempDir())
+	if err := os.Mkdir(linkedRevision, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	planted := filepath.Join(linkedRevision, "planted.txt")
+	if err := os.WriteFile(planted, []byte("theirs"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	refused := func(what string, err error, nothing string) {
+		t.Helper()
+		if err == nil {
+			t.Fatalf("%s: a ./%s others may open was accepted", what, linkedRevision)
+		}
+		summary, detail := errs.Describe(err)
+		if !strings.Contains(summary, linkedRevision+" is open to other users") || !strings.Contains(detail, "may open it") ||
+			!strings.Contains(detail, nothing) || !strings.Contains(detail, "Pass --dir to choose the output directory") {
+			t.Fatalf("%s: %q, %q", what, summary, detail)
+		}
+	}
+	for _, mode := range []os.FileMode{0o777, 0o755} {
+		if err := os.Chmod(linkedRevision, mode); err != nil {
+			t.Fatal(err)
+		}
+		for _, overwrite := range []bool{false, true} {
+			refused("an archive", checkFilesDestination("", archive, overwrite), "Nothing was downloaded")
+			refused("listed files", checkFilesDestination("", listed, overwrite), "Nothing was downloaded")
+		}
+		_, created, err := prepareFilesDir("", linkedRevision)
+		refused("before the write", err, "Nothing was written")
+		if created {
+			t.Fatal("a refused directory is reported as created")
+		}
+		if info, err := os.Lstat(linkedRevision); err != nil || info.Mode().Perm() != mode {
+			t.Fatalf("./%s changed: %v, %v", linkedRevision, info.Mode(), err)
+		}
+		if got, err := os.ReadFile(planted); err != nil || string(got) != "theirs" {
+			t.Fatalf("the file in ./%s: %q, %v", linkedRevision, got, err)
+		}
 	}
 }

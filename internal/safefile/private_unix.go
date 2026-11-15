@@ -54,6 +54,30 @@ func MkdirExclusive(dir string) error {
 	return os.Mkdir(dir, 0o700)
 }
 
+// CheckPrivateDir refuses the folder dir unless it is private to this
+// user, as MkdirExclusive makes one: this user owns it and nobody else may
+// open it (ErrNotPrivate). Another account that may write in it could
+// replace what is written there, or put a link in it. It checks once, by
+// path: the folder above dir must keep others from renaming it, as the
+// sticky bit on /tmp does. It does not follow a link at dir: anything
+// there that is not a folder is refused too.
+func CheckPrivateDir(dir string) error {
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return &os.PathError{Op: "check", Path: dir, Err: syscall.ENOTDIR}
+	}
+	if st, ok := info.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() {
+		return errs.WithDetail(&notPrivateError{path: dir}, "Another account owns it.")
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		return errs.WithDetail(&notPrivateError{path: dir}, "Other accounts on this computer may open it.")
+	}
+	return nil
+}
+
 // ReadPrivate reads the file path, and refuses one that another user owns
 // or that anyone but its owner may open (ErrNotPrivate), as the Windows
 // build does: a key or a credential in it is no longer private, and

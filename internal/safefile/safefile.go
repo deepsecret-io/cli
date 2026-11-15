@@ -8,8 +8,8 @@
 // Private means the user's own: mode 0600 for a file and 0700 for a folder
 // on Unix (private_unix.go), and on Windows, which ignores those modes, a
 // security descriptor that makes this user the owner and grants nobody
-// else any access (private_windows.go). ReadPrivate refuses, on Windows, a
-// file someone else may open.
+// else any access (private_windows.go). ReadPrivate refuses a file
+// someone else owns or may open, and CheckPrivateDir such a folder.
 package safefile
 
 import (
@@ -22,12 +22,13 @@ import (
 	"github.com/deepsecret-io/cli/internal/errs"
 )
 
-// ErrNotPrivate is a file ReadPrivate refused: someone other than this
-// user, SYSTEM and Administrators owns it or may open it.
+// ErrNotPrivate is a file ReadPrivate refused, or a folder CheckPrivateDir
+// refused: someone other than this user (and on Windows SYSTEM and
+// Administrators) owns it or may open it.
 var ErrNotPrivate = errors.New("the file is open to other users")
 
-// notPrivateError is ReadPrivate refusing the file at path
-// (ErrNotPrivate).
+// notPrivateError is ReadPrivate refusing the file, or CheckPrivateDir
+// the folder, at path (ErrNotPrivate).
 type notPrivateError struct{ path string }
 
 func (e *notPrivateError) Error() string { return e.path + " is open to other users" }

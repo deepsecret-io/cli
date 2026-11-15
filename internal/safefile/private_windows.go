@@ -210,6 +210,46 @@ func ReadPrivate(path string) ([]byte, error) {
 	return io.ReadAll(f)
 }
 
+// CheckPrivateDir refuses the folder dir unless it is private to this
+// user, as MkdirExclusive makes one: only this user, SYSTEM and
+// Administrators own it and may open it (exposure, ErrNotPrivate).
+// Another account that may write in it could replace what is written
+// there, or put a link in it. It checks once, by path: the folder above
+// dir must keep others from renaming it. The handle is opened with
+// FILE_FLAG_OPEN_REPARSE_POINT, so a junction or another link at dir is
+// checked as itself, not as its target, and refused as not a folder.
+func CheckPrivateDir(dir string) error {
+	p, err := windows.UTF16PtrFromString(dir)
+	if err != nil {
+		return &os.PathError{Op: "open", Path: dir, Err: err}
+	}
+	h, err := windows.CreateFile(p, windows.READ_CONTROL, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return &os.PathError{Op: "open", Path: dir, Err: err}
+	}
+	defer func() { _ = windows.CloseHandle(h) }() // read only.
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(h, &info); err != nil {
+		return &os.PathError{Op: "check", Path: dir, Err: err}
+	}
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 || info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return &os.PathError{Op: "check", Path: dir, Err: windows.ERROR_DIRECTORY}
+	}
+	sd, err := windows.GetSecurityInfo(h, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return fmt.Errorf("could not read the access list of %s: %w", dir, err)
+	}
+	user, err := currentUser()
+	if err != nil {
+		return err
+	}
+	if who, _ := exposure(sd, user); who != "" {
+		return errs.WithDetail(&notPrivateError{path: dir}, upperFirst(who)+".")
+	}
+	return nil
+}
+
 // checkPrivate refuses the file open as h at path unless only this user,
 // SYSTEM and Administrators own it and may open it (exposure).
 func checkPrivate(h windows.Handle, path string) error {

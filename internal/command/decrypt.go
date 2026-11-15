@@ -58,7 +58,8 @@ func newDecryptCmd() *cobra.Command {
 		Long: `Decrypt a secret. Where the output goes depends on what it holds:
   - Files are written to a directory named after the revision ID by default,
     so a decrypt never writes over files in the current directory. A link
-    or a file with that name is refused. --dir chooses another directory.
+    or a file with that name is refused, and so is a directory that another
+    account owns or may open. --dir chooses another directory.
   - A message or key-value data is printed to stdout, or written to the
     file --output names.
 
@@ -508,15 +509,21 @@ func filesDir(dir, revisionID string) (string, error) {
 }
 
 // checkDefaultDir checks the default output directory dir
-// (./<revision-id>): it must be missing or a real directory, and exists
-// says which. The sender chooses the revision ID, so a link by that name,
-// planted where the recipient decrypts, would send the files wherever it
-// points: a symlink is refused, and so is a file or anything else that is
-// not a plain directory, such as a junction or another reparse point on
-// Windows (which Lstat reports as irregular). --overwrite does not allow
-// any of them. A --dir is the caller's own choice and is not checked here.
-// The nothing argument is the sentence a refusal's detail gives for what has
-// not happened yet ("Nothing was downloaded." or "Nothing was written.").
+// (./<revision-id>): it must be missing or a real directory private to
+// this user, and exists says which. The sender chooses the revision ID, so
+// a link by that name, planted where the recipient decrypts, would send
+// the files wherever it points: a symlink is refused, and so is a file or
+// anything else that is not a plain directory, such as a junction or
+// another reparse point on Windows (which Lstat reports as irregular). A
+// directory by that name that another account owns or may open is refused
+// too (safefile.CheckPrivateDir): whoever made it there could replace the
+// files decrypt writes in it, or put links in it. Both checks run by path,
+// before the download and again before the write, so they rely on the
+// current directory keeping others from renaming what is in it, as the
+// sticky bit on /tmp does. --overwrite does not allow any of them. A --dir is the caller's
+// own choice and is not checked here. The nothing argument is the sentence
+// a refusal's detail gives for what has not happened yet ("Nothing was
+// downloaded." or "Nothing was written.").
 func checkDefaultDir(dir, nothing string) (exists bool, err error) {
 	info, err := os.Lstat(dir)
 	if errors.Is(err, os.ErrNotExist) {
@@ -526,7 +533,17 @@ func checkDefaultDir(dir, nothing string) (exists bool, err error) {
 		return false, fmt.Errorf("could not check the output directory %s: %w", dir, errs.PathCause(err))
 	}
 	if info.Mode().Type() == os.ModeDir {
-		return true, nil
+		err := safefile.CheckPrivateDir(dir)
+		if err == nil {
+			return true, nil
+		}
+		if !errors.Is(err, safefile.ErrNotPrivate) {
+			return false, fmt.Errorf("could not check the output directory %s: %w", dir, errs.PathCause(err))
+		}
+		_, why := errs.Describe(err)
+		return false, errs.WithDetail(err, why+" Without --dir, the files go to a directory with this name, and decrypt writes only in one that is private to you: "+
+			"whoever made it could change what decrypt writes there. "+nothing+"\n\n"+
+			"Pass --dir to choose the output directory, or remove this one.")
 	}
 	what := "is not a directory"
 	if info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
@@ -543,8 +560,9 @@ func checkDefaultDir(dir, nothing string) (exists bool, err error) {
 // reports that, so the caller can remove it when nothing gets written.
 // safefile.MkdirExclusive fails on anything already at the path, a link
 // included, so what appeared there since the check before the download is
-// never written through; only a real directory that was there already is
-// used as it is. A --dir is left to the SDK.
+// never written through; only a real directory private to this user that
+// was there already is used as it is (checkDefaultDir). A --dir is left
+// to the SDK.
 func prepareFilesDir(dirFlag, revisionID string) (dir string, created bool, err error) {
 	dir, err = filesDir(dirFlag, revisionID)
 	if err != nil || dirFlag != "" {

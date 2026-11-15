@@ -74,3 +74,55 @@ func TestMkdirExclusiveRefusesALink(t *testing.T) {
 		t.Errorf("the folder was made where the dangling link points: %v", err)
 	}
 }
+
+// A folder is private when this user owns it and nobody else may open it,
+// as MkdirExclusive makes one. One that others may open is refused
+// (ErrNotPrivate), and so is anything at the path that is not a folder, a
+// link to a private folder included.
+func TestCheckPrivateDirUnix(t *testing.T) {
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "out")
+	if err := MkdirExclusive(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	if err := CheckPrivateDir(dir); err != nil {
+		t.Fatalf("a folder MkdirExclusive made: %v", err)
+	}
+	for _, mode := range []os.FileMode{0o750, 0o705, 0o770, 0o777, 0o777 | os.ModeSticky} {
+		if err := os.Chmod(dir, mode); err != nil {
+			t.Fatal(err)
+		}
+		err := CheckPrivateDir(dir)
+		if !errors.Is(err, ErrNotPrivate) {
+			t.Fatalf("mode %v: %v, want ErrNotPrivate", mode, err)
+		}
+		summary, detail := errs.Describe(err)
+		if !strings.HasSuffix(summary, "out is open to other users") || !strings.Contains(detail, "may open it") {
+			t.Errorf("mode %v: %q, %q", mode, summary, detail)
+		}
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckPrivateDir(dir); err != nil {
+		t.Errorf("a private folder this user may only read: %v", err)
+	}
+
+	link := filepath.Join(parent, "link")
+	if err := os.Symlink(dir, link); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(parent, "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{link, file} {
+		if err := CheckPrivateDir(path); err == nil {
+			t.Errorf("%s was accepted as a private folder", filepath.Base(path))
+		}
+	}
+	if err := CheckPrivateDir(filepath.Join(parent, "missing")); !os.IsNotExist(err) {
+		t.Errorf("a missing folder: %v, want not exist", err)
+	}
+}
