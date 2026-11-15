@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -34,15 +35,17 @@ func newResumeCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "resume [id]",
-		Short: "Finish or discard an interrupted upload, or list interrupted transfers",
+		Short: "Finish or discard an interrupted upload or download, or list them",
 		Long: `A large send keeps its encrypted payload until its upload finishes. If the
 upload is interrupted (network loss, Ctrl+C, a closed laptop), finish it here:
 the parts already uploaded are kept and the rest are sent. Nothing is
 encrypted again.
 
 A large decrypt keeps what it downloaded the same way, until the payload is
-decrypted. Run the same decrypt again to continue an interrupted download:
-only the missing ranges are fetched.
+decrypted. Resuming an interrupted download decrypts the same secret and
+revision again, with decrypt's defaults: only the missing ranges are fetched,
+files go to ./<revision-id>/ and a message or data is printed. To choose the
+output (--dir, -o) or the key pair (-i), run that decrypt yourself instead.
 
 Without an ID, lists the interrupted uploads and downloads. The server drops an
 upload after a day without activity; discard it then and send again. A
@@ -80,7 +83,22 @@ download unused for a week is removed.`,
 				return err
 			}
 			if d != nil {
-				return pending.DiscardDownload(d, discard)
+				if discard {
+					return pending.DiscardDownload(d)
+				}
+				decryptArgs, err := pending.DownloadDecryptArgs(d)
+				if err != nil {
+					return err
+				}
+				if threads > 0 {
+					decryptArgs = append(decryptArgs, "--threads", strconv.Itoa(threads))
+				}
+				ui.Dimmed("Continuing the download with decrypt's default output: secret decrypt " + strings.Join(decryptArgs, " "))
+				ui.Dimmed("For --dir, -o or -i, stop and run that decrypt with them: it continues the download too.")
+				return runDecrypt(cmd, decryptArgs)
+			}
+			if err := checkUploadThreads(threads); err != nil {
+				return err
 			}
 			c, err := auth.NewAuthenticatedClient()
 			if err != nil {
@@ -133,10 +151,41 @@ download unused for a week is removed.`,
 	f := cmd.Flags()
 	f.BoolVar(&discard, "discard", false, "Discard the interrupted upload or download instead of finishing it, deleting what it kept")
 	flags.SetGroup(f, flags.GroupOptions, "discard")
-	f.Var(flags.NewIntRange(&threads, 0, 0, transfer.MaxUploadThreads, " (0 adapts to the connection, 1 is one at a time)"), "threads", "Parallel part uploads: 0 adapts to the connection, up to 32")
+	f.Var(flags.NewIntRange(&threads, 0, 0, transfer.MaxDownloadConcurrency, " (0 adapts to the connection, 1 is one at a time)"), "threads", "Parallel connections: 0 adapts to the connection, up to 32 for an upload and 64 for a download")
 	flags.SetGroup(f, flags.GroupPerformance, "threads")
 	cmd.MarkFlagsMutuallyExclusive("discard", "threads")
 	return cmd
+}
+
+// runDecrypt runs secret decrypt with args under cmd's context, as if they
+// had been typed after "secret decrypt": its flags are parsed and its
+// arguments checked first.
+func runDecrypt(cmd *cobra.Command, args []string) error {
+	dec := newDecryptCmd()
+	if err := dec.ParseFlags(args); err != nil {
+		return err
+	}
+	if err := dec.ValidateRequiredFlags(); err != nil {
+		return err
+	}
+	if err := dec.ValidateFlagGroups(); err != nil {
+		return err
+	}
+	rest := dec.Flags().Args()
+	if err := dec.Args(dec, rest); err != nil {
+		return err
+	}
+	dec.SetContext(cmd.Context())
+	return dec.RunE(dec, rest)
+}
+
+// checkUploadThreads refuses a --threads an upload cannot take: resume
+// accepts up to the download limit, which it hands to decrypt.
+func checkUploadThreads(threads int) error {
+	if threads > transfer.MaxUploadThreads {
+		return fmt.Errorf("--threads goes up to %d for an upload", transfer.MaxUploadThreads)
+	}
+	return nil
 }
 
 func printPendingTransfers(uploads []secrets.PendingUpload, downloads []secrets.PendingDownload) error {
@@ -175,7 +224,7 @@ func printPendingDownloads(downloads []secrets.PendingDownload) error {
 		return fmt.Errorf("could not write to stdout: %w", err)
 	}
 	fmt.Fprintln(os.Stderr)
-	ui.Dimmed("A download continues when you decrypt it again ('secret resume <id>' shows the command).")
+	ui.Dimmed("Finish one with: secret resume <id>")
 	ui.Dimmed("Discard one with: secret resume <id> --discard")
 	fmt.Fprintln(os.Stderr)
 	return nil
@@ -184,7 +233,7 @@ func printPendingDownloads(downloads []secrets.PendingDownload) error {
 // downloadResumeDetail says how to continue an interrupted download, for
 // its Error block.
 func downloadResumeDetail(d secrets.PendingDownload) string {
-	return fmt.Sprintf("Run the same command again to continue the download, keeping the %s downloaded so far.", ui.FormatBytes(d.Downloaded()))
+	return fmt.Sprintf("Run the same command again to continue the download, keeping the %s downloaded so far. Or run secret resume %s, which continues it with decrypt's default output.", ui.FormatBytes(d.Downloaded()), ui.ShortID(d.RevisionID))
 }
 
 func printPendingUploads(uploads []secrets.PendingUpload) error {

@@ -136,7 +136,7 @@ Decrypting never overwrites files in your current folder. The folder it creates 
 | Change or remove the network rule | `secret policy <secret-id> --ip 10.0.0.0/8`, or `--clear-ips` |
 | Take back someone's access | `secret revoke <secret-id> --to bob@example.com` |
 | Delete it for everyone | `secret delete <secret-id>` |
-| Finish an interrupted upload | `secret resume` |
+| Finish an interrupted upload or download | `secret resume` |
 
 When your organization enforces a network rule, `secret describe` and `secret policy` show the IP lock as set by the organization, without its addresses.
 

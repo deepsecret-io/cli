@@ -6,6 +6,7 @@
 package pending
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/user"
@@ -106,19 +107,24 @@ func Find(uploads []secrets.PendingUpload, downloads []secrets.PendingDownload, 
 	}
 }
 
-// DiscardDownload removes a kept download with --discard. Without it, it
-// says how to continue the download: by decrypting again, which keeps the
-// decrypt's own output choices.
-func DiscardDownload(d *secrets.PendingDownload, discard bool) error {
-	if !discard {
-		detail := "A download continues when you decrypt it again."
-		// The secret ID comes from a local file: it goes into a command
-		// to copy only as the UUID it must be.
-		if id, err := uuid.Parse(d.SecretID); err == nil && id.String() == d.SecretID {
-			detail = "A download continues when you decrypt it again:\n  secret decrypt " + d.SecretID + " --revision " + d.RevisionID
+// DownloadDecryptArgs is the decrypt that continues the kept download d:
+// its secret ID and --revision with its revision ID, so only the missing
+// ranges are fetched. Both IDs come from a local file, so they go into the
+// arguments only as the UUIDs they must be; a record with anything else is
+// refused, and can only be discarded.
+func DownloadDecryptArgs(d *secrets.PendingDownload) ([]string, error) {
+	for _, id := range []string{d.SecretID, d.RevisionID} {
+		if u, err := uuid.Parse(id); err != nil || u.String() != id {
+			return nil, errs.WithDetail(errors.New("the record of this download does not name a valid secret and revision"),
+				"Discard it with --discard, then decrypt the secret again.")
 		}
-		return errs.WithDetail(fmt.Errorf("%s is an interrupted download, which resume does not finish", ui.ShortID(d.RevisionID)), detail)
 	}
+	return []string{d.SecretID, "--revision", d.RevisionID}, nil
+}
+
+// DiscardDownload removes the kept download d (--discard), deleting what it
+// downloaded.
+func DiscardDownload(d *secrets.PendingDownload) error {
 	if err := secrets.DiscardPendingDownload(DownloadsDir(), d.RevisionID); err != nil {
 		return fmt.Errorf("could not discard the download of %q: %w", d.Name, err)
 	}
