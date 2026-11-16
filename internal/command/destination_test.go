@@ -105,6 +105,36 @@ func TestDefaultDirMustBeADirectory(t *testing.T) {
 	}
 }
 
+type modeInfo struct {
+	os.FileInfo
+	mode os.FileMode
+}
+
+func (m modeInfo) Mode() os.FileMode { return m.mode }
+
+// An output directory that is a link is refused, and so is a Windows
+// junction (Lstat: irregular, not a directory); a Windows directory that
+// is another reparse point, such as a OneDrive one (Lstat: a directory and
+// irregular), is a directory, as the SDK takes it. The modes are those
+// Go's Lstat gives on Windows, so the rule holds without a Windows machine.
+func TestIsLink(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mode os.FileMode
+		link bool
+	}{
+		{"a directory", os.ModeDir | 0o700, false},
+		{"a OneDrive directory", os.ModeDir | os.ModeIrregular | 0o777, false},
+		{"a symlink", os.ModeSymlink | 0o777, true},
+		{"a junction", os.ModeIrregular | 0o666, true},
+		{"a file", 0o600, false},
+	} {
+		if got := isLink(modeInfo{mode: tc.mode}); got != tc.link {
+			t.Errorf("%s (%v): isLink %v, want %v", tc.name, tc.mode, got, tc.link)
+		}
+	}
+}
+
 // Right before the write, the default ./<revision-id>/ is created when it
 // is missing, private to this user (also on Windows, where a plain mkdir
 // would take the access list of the directory above), and a directory

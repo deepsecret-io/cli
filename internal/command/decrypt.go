@@ -509,10 +509,9 @@ func filesDir(dir, revisionID string) (string, error) {
 // (./<revision-id>): it must be missing or a real directory private to
 // this user, and exists says which. The sender chooses the revision ID, so
 // a link by that name, planted where the recipient decrypts, would send
-// the files wherever it points: a symlink is refused, and so is a file or
-// anything else that is not a plain directory, such as a junction or
-// another reparse point on Windows (which Lstat reports as irregular). A
-// directory by that name that another account owns or may open is refused
+// the files wherever it points: a link is refused (isLink, a junction on
+// Windows too), and so is a file or anything else that is not a directory.
+// A directory by that name that another account owns or may open is refused
 // too (safefile.CheckPrivateDir): whoever made it there could replace the
 // files decrypt writes in it, or put links in it. Both checks run by path,
 // before the download and again before the write, so they rely on the
@@ -530,26 +529,41 @@ func checkDefaultDir(dir, nothing string) (exists bool, err error) {
 	if err != nil {
 		return false, fmt.Errorf("could not check the output directory %s: %w", dir, errs.PathCause(err))
 	}
-	if info.Mode().Type() == os.ModeDir {
-		err := safefile.CheckPrivateDir(dir)
-		if err == nil {
-			return true, nil
-		}
-		if !errors.Is(err, safefile.ErrNotPrivate) {
-			return false, fmt.Errorf("could not check the output directory %s: %w", dir, errs.PathCause(err))
-		}
-		_, why := errs.Describe(err)
-		return false, errs.WithDetail(err, why+" Without --dir, the files go to a directory with this name, and decrypt writes only in one that is private to you: "+
-			"whoever made it could change what decrypt writes there. "+nothing+"\n\n"+
-			"Pass --dir to choose the output directory, or remove this one.")
-	}
-	what := "is not a directory"
-	if info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+	what := ""
+	switch {
+	case isLink(info):
 		what = "is a link"
+	case !info.IsDir():
+		what = "is not a directory"
 	}
-	return false, errs.WithDetail(fmt.Errorf("%s %s", dir, what),
-		"Without --dir, the files go to a directory with this name, and decrypt never writes through a link or in place of a file. "+nothing+"\n\n"+
-			"Pass --dir to choose the output directory.")
+	if what != "" {
+		return false, errs.WithDetail(fmt.Errorf("%s %s", dir, what),
+			"Without --dir, the files go to a directory with this name, and decrypt never writes through a link or in place of a file. "+nothing+"\n\n"+
+				"Pass --dir to choose the output directory.")
+	}
+	err = safefile.CheckPrivateDir(dir)
+	if err == nil {
+		return true, nil
+	}
+	if !errors.Is(err, safefile.ErrNotPrivate) {
+		return false, fmt.Errorf("could not check the output directory %s: %w", dir, errs.PathCause(err))
+	}
+	_, why := errs.Describe(err)
+	return false, errs.WithDetail(err, why+" Without --dir, the files go to a directory with this name, and decrypt writes only in one that is private to you: "+
+		"whoever made it could change what decrypt writes there. "+nothing+"\n\n"+
+		"Pass --dir to choose the output directory, or remove this one.")
+}
+
+// isLink reports a link at an output directory, as Lstat describes it: a
+// symlink, or on Windows a junction (another name-surrogate reparse point),
+// which Lstat reports as irregular and not a directory. Decrypt never writes
+// through one, and the SDK writes only into what Lstat reports as a
+// directory. A Windows directory that is another kind of reparse point, such
+// as a OneDrive one, is reported as a directory and irregular: it is a
+// directory, as the SDK takes it.
+func isLink(info os.FileInfo) bool {
+	m := info.Mode()
+	return m&os.ModeSymlink != 0 || (m&os.ModeIrregular != 0 && !m.IsDir())
 }
 
 // checkDirFlag checks an explicit --dir before anything is fetched: a
@@ -569,7 +583,7 @@ func checkDirFlag(dir string) error {
 	if err != nil {
 		return fmt.Errorf("could not check the output directory %s: %w", dir, errs.PathCause(err))
 	}
-	if info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+	if isLink(info) {
 		return errs.WithDetail(fmt.Errorf("--dir %s is a link", dir),
 			"Decrypt writes only into a real directory, not into one a link given as --dir points to. Nothing was downloaded.\n\n"+
 				"Pass --dir the directory it points to.")
