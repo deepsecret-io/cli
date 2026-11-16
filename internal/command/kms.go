@@ -43,7 +43,7 @@ func kmsAccount(ctx context.Context) (*deepsecret.Client, string, error) {
 		return nil, "", errs.WithDetail(err, strings.TrimSpace(errs.JoinDetail("", err)+
 			"\n\nAWS KMS protection binds the key pair to your DeepSecret account: sign in (secret login), or give the API key of the account it is for."))
 	}
-	id, err := c.Identity.ResolveActorID(ctx)
+	id, err := c.Identity.ResolveMemberID(ctx)
 	if err != nil {
 		return nil, "", fmt.Errorf("could not reach your account to bind the key pair to it: %w", errs.APICause(err))
 	}

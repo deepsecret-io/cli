@@ -37,7 +37,7 @@ import (
 func newEncryptCmd() *cobra.Command {
 	var (
 		recipientEmails []string
-		groupName       string
+		teamName        string
 		revokeMissing   bool
 		name            string
 		inputFiles      []string
@@ -91,7 +91,7 @@ your account. Recipients open the file with "secret decrypt --local".`,
   secret encrypt -d DB_PASS=secret -d API_KEY=abc -t alice@example.com
   secret encrypt key.pem -t alice@example.com --ttl 24h --ip 10.0.0.0/8
   secret encrypt . --archive -t alice@example.com       # hide file names and sizes
-  secret encrypt db.env -g engineering                  # every other member of a group
+  secret encrypt db.env -T engineering                  # every other member of a team
   secret encrypt db.env -n db.env -t alice@example.com --revoke-missing
   secret encrypt db.env -t alice@example.com --local    # writes ./db.env.cbor, sends nothing`,
 		Args: cobra.ArbitraryArgs,
@@ -107,9 +107,9 @@ your account. Recipients open the file with "secret decrypt --local".`,
 			if err := flags.Require(cmd, "local", "output", "overwrite"); err != nil {
 				return err
 			}
-			if cmd.Flags().Changed("group") {
-				if groupName = strings.TrimSpace(groupName); groupName == "" {
-					return fmt.Errorf("--group needs a group name")
+			if cmd.Flags().Changed("team") {
+				if teamName = strings.TrimSpace(teamName); teamName == "" {
+					return fmt.Errorf("--team needs a team name")
 				}
 			}
 			if localOutput != "" {
@@ -152,7 +152,7 @@ your account. Recipients open the file with "secret decrypt --local".`,
 			}
 
 			// Resolve the recipient list. Sources (in priority order):
-			//   1. -g/--group  : every group member except self
+			//   1. -T/--team   : every team member except self
 			//   2. -t/--to     : the explicit recipients
 			//   3. (none)      : send to self
 			// Whatever the source, it is one send. Its lines say it
@@ -165,19 +165,19 @@ your account. Recipients open the file with "secret decrypt --local".`,
 			recipientsFrom := "--to"
 			// The account, once fetched here, goes to the SDK, which does
 			// not fetch it again.
-			var account *sdkidentity.Actor
+			var account *sdkidentity.Member
 			switch {
-			case groupName != "":
+			case teamName != "":
 				info, err := c.Identity.WhoAmI(cmd.Context())
 				if err != nil {
 					return fmt.Errorf("could not fetch your account: %w", errs.APICause(err))
 				}
 				account = info
-				group, err := findGroup(cmd.Context(), c, info, groupName)
+				team, err := findTeam(cmd.Context(), c, info, teamName)
 				if err != nil {
 					return err
 				}
-				for _, m := range group.Members {
+				for _, m := range team.Members {
 					if m.Email == "" {
 						continue
 					}
@@ -187,11 +187,11 @@ your account. Recipients open the file with "secret decrypt --local".`,
 					recipients = append(recipients, m.Email)
 				}
 				if len(recipients) == 0 {
-					return errs.WithDetail(fmt.Errorf("group %q has no other members to send to", group.Name),
-						"Add another member to the group, or leave out --group to send the secret to yourself.")
+					return errs.WithDetail(fmt.Errorf("team %q has no other members to send to", team.Name),
+						"Add another member to the team, or leave out --team to send the secret to yourself.")
 				}
-				groupName, recipientsFrom = group.Name, "--group"
-				ui.Subject("secret", fmt.Sprintf("%s group %q (%d recipient%s)", verb, group.Name, len(recipients), ui.PluralS(len(recipients))))
+				teamName, recipientsFrom = team.Name, "--team"
+				ui.Subject("secret", fmt.Sprintf("%s team %q (%d recipient%s)", verb, team.Name, len(recipients), ui.PluralS(len(recipients))))
 			case len(recipientEmails) > 0:
 				recipients = recipientEmails
 			default:
@@ -356,8 +356,8 @@ your account. Recipients open the file with "secret decrypt --local".`,
 					ui.KeyValue("Revision", fmt.Sprintf("%d, added to your secret of this name", n))
 				}
 			}
-			if groupName != "" {
-				ui.KeyValue("Group", console.Safe(groupName))
+			if teamName != "" {
+				ui.KeyValue("Team", console.Safe(teamName))
 			}
 			ui.KeyValue("Type", result.PayloadType)
 			if result.Archived && result.ArchiveEntryCount > 0 {
@@ -421,9 +421,9 @@ your account. Recipients open the file with "secret decrypt --local".`,
 		return pflag.NormalizedName(name)
 	})
 	f.VarP(flags.NewEmailList(&recipientEmails), "to", "t", "Recipient `email`, repeatable or comma-separated (default: yourself)")
-	f.StringVarP(&groupName, "group", "g", "", "Send to every other member of this org `group`, in one send")
+	f.StringVarP(&teamName, "team", "T", "", "Send to every other member of this org `team`, in one send")
 	f.BoolVar(&revokeMissing, "revoke-missing", false, "When resending under an existing name, revoke the recipients this send leaves out")
-	flags.SetGroup(f, flags.GroupRecipients, "to", "group", "revoke-missing")
+	flags.SetGroup(f, flags.GroupRecipients, "to", "team", "revoke-missing")
 
 	f.StringArrayVarP(&inputFiles, "file", "f", nil, "File or directory `path` to encrypt, repeatable (or give them as arguments)")
 	f.VarP(flags.NewKVPairs(&dataPairs), "data", "d", "A KEY=VALUE pair to encrypt, repeatable")
@@ -450,7 +450,7 @@ your account. Recipients open the file with "secret decrypt --local".`,
 	f.Var(flags.NewMinutes(&presignExpiry, 15, 1, 30), "presign-expiry", "Lifetime of the presigned URL of a small, single-request upload: 1m to 30m (large uploads renew theirs)")
 	flags.SetGroup(f, flags.GroupPerformance, "threads", "presign-expiry")
 
-	cmd.MarkFlagsMutuallyExclusive("to", "group")
+	cmd.MarkFlagsMutuallyExclusive("to", "team")
 	cmd.MarkFlagsMutuallyExclusive("file", "data")
 	for _, sendOnly := range []string{"ttl", "ip", "revoke-missing", "threads", "presign-expiry"} {
 		cmd.MarkFlagsMutuallyExclusive("local", sendOnly)

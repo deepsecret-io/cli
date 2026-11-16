@@ -406,16 +406,16 @@ func checkPlan(ctx context.Context) checkResult {
 		r.detail = "not checked: " + err.Error()
 		return r
 	}
-	actor, err := c.Identity.WhoAmI(ctx)
+	member, err := c.Identity.WhoAmI(ctx)
 	if err != nil {
 		r.detail = "could not fetch your account: " + errs.APICause(err).Error()
 		return r
 	}
-	if actor.TierName == "" {
+	if member.TierName == "" {
 		r.detail, r.fix = "no active plan", "choose one at https://app.deepsecret.io/tiers"
 		return r
 	}
-	r.ok, r.detail = true, fmt.Sprintf("%s (%s)", actor.TierName, subscriptionStatus(actor.SubscriptionStatus, actor.Subscription.TrialEndsAt, time.Now()))
+	r.ok, r.detail = true, fmt.Sprintf("%s (%s)", member.TierName, subscriptionStatus(member.SubscriptionStatus, member.Subscription.TrialEndsAt, time.Now()))
 	return r
 }
 

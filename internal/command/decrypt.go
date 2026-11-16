@@ -150,12 +150,12 @@ plan and every change to it.`,
 					return secretError(err, secretID)
 				}
 				fetched = detail
-				actorID, err := c.Identity.ResolveActorID(cmd.Context())
+				memberID, err := c.Identity.ResolveMemberID(cmd.Context())
 				if err != nil {
 					idLog.Warn("key selection skipped", "reason", "your account ID could not be fetched", "error", err)
 					break
 				}
-				expected := revisionKey(detail, revisionID, actorID)
+				expected := revisionKey(detail, revisionID, memberID)
 				switch matched := identity.FindLocal(expected); {
 				case matched != "":
 					identityFP, identitySource = matched, "sealed for"
@@ -672,9 +672,9 @@ func checkFilesDestination(dirFlag string, p secrets.UpcomingDownload, overwrite
 }
 
 // revisionKey is the fingerprint of the key the revision revisionID (the
-// latest when it is "") was sealed with for actorID, or "" when the
+// latest when it is "") was sealed with for memberID, or "" when the
 // revision does not list them.
-func revisionKey(detail *secrets.Detail, revisionID, actorID string) string {
+func revisionKey(detail *secrets.Detail, revisionID, memberID string) string {
 	if revisionID == "" {
 		revisionID = detail.Secret.LatestRevisionID
 	}
@@ -683,7 +683,7 @@ func revisionKey(detail *secrets.Detail, revisionID, actorID string) string {
 			continue
 		}
 		for _, r := range rev.Integrity.Recipients {
-			if r.ID == actorID {
+			if r.ID == memberID {
 				return r.KeyFingerprint
 			}
 		}

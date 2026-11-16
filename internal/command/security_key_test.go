@@ -186,8 +186,8 @@ func TestSyncRegisteredKeyRecordsTheAccount(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/v1/identities":
 			data = map[string]any{"keys": []map[string]any{{"id": "k1", "fingerprint": fp, "is_primary": true, "security_key": true}}}
-		case "/api/v1/actors/me":
-			data = map[string]any{"actor": map[string]any{"id": "actor-1", "email": bob},
+		case "/api/v1/members/me":
+			data = map[string]any{"member": map[string]any{"id": "member-1", "email": bob},
 				"membership": map[string]any{"org_id": "org-1", "role": "owner"}}
 		case "/api/v1/orgs":
 			data = []any{}

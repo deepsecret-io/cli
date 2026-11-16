@@ -218,7 +218,7 @@ func newRootCmd(version string) *cobra.Command {
 		newPolicyCmd(),
 		newConfigCmd(),
 		newIdentityCmd(),
-		newGroupsCmd(),
+		newTeamsCmd(),
 		newWhoamiCmd(),
 	)
 	return root

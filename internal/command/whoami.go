@@ -32,7 +32,7 @@ func newWhoamiCmd() *cobra.Command {
 				return err
 			}
 
-			var actor sdkidentity.Actor
+			var member sdkidentity.Member
 			var keys []sdkidentity.Key
 			steps := []ui.Step{
 				{
@@ -43,8 +43,8 @@ func newWhoamiCmd() *cobra.Command {
 						if err != nil {
 							return "", fmt.Errorf("could not fetch your account: %w", errs.APICause(err))
 						}
-						actor = *info
-						return "email=" + actor.Email, nil
+						member = *info
+						return "email=" + member.Email, nil
 					},
 				},
 				registeredKeysStep(listRemoteKeysOf(cmd.Context(), c), &keys),
@@ -54,11 +54,11 @@ func newWhoamiCmd() *cobra.Command {
 			}
 
 			fmt.Fprintln(os.Stderr)
-			ui.KeyValue("ID", console.Safe(actor.ID))
-			ui.KeyValue("Email", console.Safe(actor.Email))
-			ui.KeyValue("Name", console.Safe(orDefault(actor.Name, "not set")))
-			ui.KeyValue("Plan", console.Safe(orDefault(actor.TierName, "none")))
-			ui.KeyValue("Status", console.Safe(subscriptionStatus(actor.SubscriptionStatus, actor.Subscription.TrialEndsAt, time.Now())))
+			ui.KeyValue("ID", console.Safe(member.ID))
+			ui.KeyValue("Email", console.Safe(member.Email))
+			ui.KeyValue("Name", console.Safe(orDefault(member.Name, "not set")))
+			ui.KeyValue("Plan", console.Safe(orDefault(member.TierName, "none")))
+			ui.KeyValue("Status", console.Safe(subscriptionStatus(member.SubscriptionStatus, member.Subscription.TrialEndsAt, time.Now())))
 			ui.KeyValue("Primary key", primaryKeyLabel(keys))
 			fmt.Fprintln(os.Stderr)
 			return nil

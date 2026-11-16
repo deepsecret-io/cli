@@ -486,17 +486,17 @@ Examples:
 	f.Var(flags.NewEnum(&outputFmt, "table", "json", "yaml"), "format", "Output format")
 	flags.SetGroup(f, flags.GroupOutput, "format")
 	cmd.MarkFlagsMutuallyExclusive("all", "revision")
-	cmd.AddCommand(newDescribeGroupCmd())
+	cmd.AddCommand(newDescribeTeamCmd())
 	return cmd
 }
 
-func newDescribeGroupCmd() *cobra.Command {
+func newDescribeTeamCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "group <name>",
-		Short: "Show a group's members (same as: secret groups describe <name>)",
-		Args:  groupNameArg,
+		Use:   "team <name>",
+		Short: "Show a team's members (same as: secret teams describe <name>)",
+		Args:  teamNameArg,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return describeGroup(cmd.Context(), args[0])
+			return describeTeam(cmd.Context(), args[0])
 		},
 	}
 }
@@ -523,7 +523,7 @@ Examples:
 			// skips any other without saying so. Check each first, so the
 			// command deletes all of them or none, and says which.
 			ids := slices.Compact(slices.Sorted(slices.Values(args)))
-			me, err := c.Identity.ResolveActorID(cmd.Context())
+			me, err := c.Identity.ResolveMemberID(cmd.Context())
 			if err != nil {
 				return fmt.Errorf("could not fetch your account: %w", errs.APICause(err))
 			}

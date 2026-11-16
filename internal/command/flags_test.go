@@ -68,7 +68,7 @@ func TestFlagAndArgumentChecks(t *testing.T) {
 		{[]string{"encrypt", "-d", "K=V", "-i", "../../etc/passwd"}, "16 to 64 hex characters"},
 		{[]string{"encrypt", "-d", "K=V", "-i", "abcd"}, "16 to 64 hex characters"},
 		// encrypt: combinations
-		{[]string{"encrypt", "-d", "K=V", "-t", "a@example.com", "-g", "eng"}, "none of the others can be"},
+		{[]string{"encrypt", "-d", "K=V", "-t", "a@example.com", "-T", "eng"}, "none of the others can be"},
 		{[]string{"encrypt", "-f", "x", "-d", "K=V"}, "none of the others can be"},
 		{[]string{"encrypt", "x", "-d", "K=V"}, "give files or --data, not both"},
 		{[]string{"encrypt", "-f", dir + "/missing"}, missing},
@@ -79,7 +79,7 @@ func TestFlagAndArgumentChecks(t *testing.T) {
 		{[]string{"encrypt", "-d", "K=V", "--overwrite"}, "--overwrite only applies with --local"},
 		{[]string{"encrypt", "-d", "K=V", "--local", "-o", dir}, "is a directory"},
 		{[]string{"encrypt", "-d", "K=V", "--local", "-o", dir + "/missing/x.cbor"}, "does not exist"},
-		{[]string{"encrypt", "-d", "K=V", "-g", "  "}, "--group needs a group name"},
+		{[]string{"encrypt", "-d", "K=V", "-T", "  "}, "--team needs a team name"},
 		// decrypt
 		{[]string{"decrypt"}, "accepts 1 arg(s), received 0"},
 		{[]string{"decrypt", "not-an-id"}, `invalid secret ID "not-an-id"`},
@@ -131,7 +131,7 @@ func TestFlagAndArgumentChecks(t *testing.T) {
 		{[]string{"identity", "forget", "a b@example.com"}, "invalid recipient email"},
 		{[]string{"identity", "known", "a@example.com", "b@example.com"}, "accepts at most 1 arg(s), received 2"},
 		{[]string{"identity", "known", "nobody"}, "invalid recipient email"},
-		{[]string{"groups", "describe", " "}, "the group name is blank"},
+		{[]string{"teams", "describe", " "}, "the team name is blank"},
 		{[]string{"whoami", "extra"}, `unknown command "extra"`},
 		{[]string{"config", "--api-key", "a", "--api-key-file", "b"}, "none of the others can be"},
 		{[]string{"config", "extra"}, `unknown command "extra"`},
@@ -279,7 +279,7 @@ func TestHostileFlagValues(t *testing.T) {
 		args []string
 		want string
 	}{
-		{[]string{"encrypt", "-d", "K=V", "-t", "../../actors/me@x.io"}, "invalid recipient email"},
+		{[]string{"encrypt", "-d", "K=V", "-t", "../../members/me@x.io"}, "invalid recipient email"},
 		{[]string{"encrypt", "-d", "K=V", "-t", "a\x1b[31m@example.com"}, "invalid recipient email"},
 		{[]string{"encrypt", "-d", "K=V", "-t", "alice@example.com\r\nX-Injected: 1"}, "invalid recipient email"},
 		{[]string{"list", "--from", "a b@example.com"}, "invalid recipient email"},
