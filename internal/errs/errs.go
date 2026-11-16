@@ -29,6 +29,13 @@ func APICause(err error) error {
 
 // upperFirst is s with its first letter in upper case.
 func upperFirst(s string) string {
+	word, _, _ := strings.Cut(s, " ")
+	for _, r := range word {
+		if !unicode.IsLower(r) {
+			// An email, an ID, a path or a quoted name keeps its case.
+			return s
+		}
+	}
 	r, n := utf8.DecodeRuneInString(s)
 	return string(unicode.ToUpper(r)) + s[n:]
 }

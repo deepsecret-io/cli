@@ -199,7 +199,7 @@ Examples:
 					filesStr,
 					s.RevisionCount,
 					ui.FormatBytes(s.TotalSize),
-					s.UpdatedAt.Format("2006-01-02 15:04"),
+					s.UpdatedAt.Local().Format("2006-01-02 15:04"),
 				)
 			}
 			if err := w.Flush(); err != nil {
@@ -365,20 +365,20 @@ Examples:
 				}
 			}
 			if s.DismissedAt != "" {
-				kv("Dismissed At", s.DismissedAt)
+				kv("Dismissed At", displayTimeString(s.DismissedAt))
 			}
 			kv("Latest Revision ID", s.LatestRevisionID)
 			kv("Revision Count", fmt.Sprintf("%d", s.RevisionCount))
-			kv("Total Size", fmt.Sprintf("%d", s.TotalSize))
+			kv("Total Size", ui.FormatBytes(s.TotalSize))
 			// When the secret was sent with --archive (or auto-archived), the
 			// server stores FilesCount=0 by design: the archive hides
 			// per-file metadata. Render that distinction instead of a bare 0
 			// so the user understands "0" doesn't mean "no files".
 			kv("Files Count", formatFilesCount(s.FilesCount, secretLatestArchived(detail, s.LatestRevisionID)))
-			kv("Created At", s.CreatedAt.Format(time.RFC3339))
-			kv("Updated At", s.UpdatedAt.Format(time.RFC3339))
+			kv("Created At", displayTime(s.CreatedAt))
+			kv("Updated At", displayTime(s.UpdatedAt))
 			if s.ExpiresAt != "" {
-				kv("Expires At", s.ExpiresAt)
+				kv("Expires At", displayTimeString(s.ExpiresAt))
 			}
 			writeIPLock(w, s)
 
@@ -426,12 +426,12 @@ Examples:
 
 					rkv("ID", r.ID)
 					rkv("Revision Number", fmt.Sprintf("%d", r.RevisionNumber))
-					rkv("Size", fmt.Sprintf("%d", r.Size))
+					rkv("Size", ui.FormatBytes(r.Size))
 					rkv("Files Count", formatFilesCount(r.FilesCount, isArchivedRevision(r)))
 					if r.StorageName != "" {
 						rkv("Storage Name", r.StorageName)
 					}
-					rkv("Created At", r.CreatedAt)
+					rkv("Created At", displayTimeString(r.CreatedAt))
 					fmt.Fprintf(w, "  Integrity:\n")
 					ikv("Protocol Version", r.Integrity.ProtocolVersion)
 					ikv("Cipher Suite", r.Integrity.CipherSuite)
@@ -775,7 +775,7 @@ func writeFilesMeta(w *strings.Builder, files []secrets.FileMeta) {
 	fmt.Fprintf(w, "  Files Meta:\n")
 	for _, f := range files {
 		fmt.Fprintf(w, "    - %-28s%s\n", "Name:", console.Safe(f.Name))
-		fmt.Fprintf(w, "      %-28s%d\n", "Size:", f.Size)
+		fmt.Fprintf(w, "      %-28s%s\n", "Size:", ui.FormatBytes(f.Size))
 	}
 }
 
@@ -841,4 +841,19 @@ func fingerprintWithStatus(fp string, status *string) string {
 	default:
 		return fp + note
 	}
+}
+
+// displayTime is t in the local zone, as decrypt shows the signing time.
+func displayTime(t time.Time) string {
+	return t.Local().Format("2006-01-02 15:04:05 MST")
+}
+
+// displayTimeString is displayTime for a time the API sent as text; text
+// that is not a time is shown as it came.
+func displayTimeString(s string) string {
+	t, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		return s
+	}
+	return displayTime(t)
 }

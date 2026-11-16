@@ -8,8 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
+	deepsecret "github.com/deepsecret-io/deepsecret-go"
 	"github.com/deepsecret-io/deepsecret-go/keys"
 	"github.com/deepsecret-io/deepsecret-go/secrets"
 	"github.com/deepsecret-io/deepsecret-go/trust"
@@ -87,25 +89,30 @@ an email, also show the safety number with them for each key sends go to.`,
 
 func newIdentityVerifyCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "verify <email> [fingerprint]",
+		Use:   "verify <email> [fingerprint | safety number]",
 		Short: "Compare someone's key with them, and mark it verified",
-		Long: `Without a fingerprint, show the safety number of your primary key and the
+		Long: `The first secret to or from someone locks this device to the key the
+server gave for them; verifying checks that it is really theirs.
+
+Without a fingerprint, show the safety number of your primary key and the
 key the server lists for <email>, that key's fingerprint in full, and the
 keys this device accepted for them. Compare the number with them over a
 channel you trust: they see the same number with secret identity verify
 and your email.
 
-With the full fingerprint you compared, mark that key verified, accepting it
-if this device did not know it.`,
+With the full fingerprint you compared, or the safety number itself, mark
+that key verified, accepting it if this device did not know it. A key pair
+on this device, for one of your own accounts, is already trusted.`,
 		Args: func(cmd *cobra.Command, args []string) error {
-			if err := cobra.RangeArgs(1, 2)(cmd, args); err != nil {
+			if err := cobra.MinimumNArgs(1)(cmd, args); err != nil {
 				return err
 			}
 			if err := checkEmailArg(args[0]); err != nil {
 				return err
 			}
-			if len(args) == 2 {
-				return checkFullFingerprintArg(args, 1)
+			if len(args) > 1 {
+				_, err := parseVerifyKey(args[1:])
+				return err
 			}
 			return nil
 		},
@@ -115,13 +122,8 @@ if this device did not know it.`,
 				return err
 			}
 			email := args[0]
-			if len(args) == 2 {
-				if err := c.Trust.Verify(cmd.Context(), email, args[1]); err != nil {
-					return err
-				}
-				logging.Module(logging.Log, "identity").Info("key verified", "email", email, "fingerprint", args[1])
-				ui.Success(fmt.Sprintf("Marked key %s of %s as verified.", keys.ShortFingerprint(args[1]), email))
-				return nil
+			if len(args) > 1 {
+				return verifyKeyOf(cmd.Context(), c, email, args[1:])
 			}
 
 			current, err := c.Trust.ServerListedKeys(cmd.Context(), email)
@@ -217,6 +219,98 @@ use again. For one of your own accounts, it forgets that it is yours.`,
 	}
 }
 
+// verifyKeyOf marks email's key verified: the full fingerprint given, or
+// the key the server lists for them when given its safety number, which
+// must be the one this device computes for that key. A key pair on this
+// device for one of the user's own accounts is already trusted.
+func verifyKeyOf(ctx context.Context, c *deepsecret.Client, email string, given []string) error {
+	key, err := parseVerifyKey(given)
+	if err != nil {
+		return err
+	}
+	known, err := c.Trust.List(email)
+	if err != nil {
+		return err
+	}
+	fp := key.fingerprint
+	if key.safety != "" {
+		current, err := c.Trust.ServerListedKeys(ctx, email)
+		if err != nil {
+			return err
+		}
+		fp = current.Fingerprint
+		if !ownKeyOnDevice(known, fp) {
+			own, err := ownSafetyKey(ctx)
+			if err != nil {
+				return errs.WithDetail(fmt.Errorf("no safety number to compare with: %w", err),
+					fmt.Sprintf("Give the full key fingerprint instead, as secret identity verify %s shows it.", email))
+			}
+			rows, err := identity.PairSafetyRows(own, fp)
+			if err != nil {
+				return err
+			}
+			if err := checkSafetyNumber(rows, key.safety, email); err != nil {
+				return err
+			}
+		}
+	}
+	if ownKeyOnDevice(known, fp) {
+		ui.Success(fmt.Sprintf("Nothing to verify: key %s of %s is a key pair on this device, one of your own accounts, so it is already trusted.",
+			keys.ShortFingerprint(fp), email))
+		return nil
+	}
+	if err := c.Trust.Verify(ctx, email, fp); err != nil {
+		return err
+	}
+	logging.Module(logging.Log, "identity").Info("key verified", "email", email, "fingerprint", fp)
+	ui.Success(fmt.Sprintf("Marked key %s of %s as verified.", keys.ShortFingerprint(fp), email))
+	return nil
+}
+
+// verifyKey is the key verify was given: a full fingerprint, or the
+// safety number verify showed, in digits.
+type verifyKey struct {
+	fingerprint string
+	safety      string
+}
+
+// parseVerifyKey reads the arguments after the email: the full key
+// fingerprint, or the safety number, each as one argument or in the groups
+// verify shows it in.
+func parseVerifyKey(args []string) (verifyKey, error) {
+	joined := strings.Join(strings.Fields(strings.Join(args, " ")), "")
+	if fp, err := fingerprint.Check(joined); err == nil && len(fp) == keys.FingerprintLen {
+		return verifyKey{fingerprint: fp}, nil
+	}
+	if joined != "" && strings.Trim(joined, "0123456789") == "" {
+		return verifyKey{safety: joined}, nil
+	}
+	return verifyKey{}, fmt.Errorf("give the full 64-character key fingerprint, or the safety number, as secret identity verify <email> shows them")
+}
+
+// checkSafetyNumber checks given, the digits of a safety number, against
+// rows, the safety number this device computes for the key the server
+// lists for email.
+func checkSafetyNumber(rows []string, given, email string) error {
+	want := strings.Join(strings.Fields(strings.Join(rows, " ")), "")
+	if len(given) != len(want) {
+		return errs.WithDetail(fmt.Errorf("the safety number has %d digits, and %d were given", len(want), len(given)),
+			fmt.Sprintf("Give all %d groups of five digits, as secret identity verify %s shows them, or the full key fingerprint.", len(want)/5, email))
+	}
+	if given != want {
+		return errs.WithDetail(fmt.Errorf("the safety number does not match the key the server lists for %s", email),
+			fmt.Sprintf("Do not verify it. Check that you compared the whole number with %s, and that they read it with: secret identity verify <your email>. "+
+				"If you both did and the numbers differ, someone may be giving one of you a different key.", email))
+	}
+	return nil
+}
+
+// ownKeyOnDevice reports whether fp is a key pair on this device for one
+// of the user's own accounts, which needs no verifying.
+func ownKeyOnDevice(known []trust.KnownKey, fp string) bool {
+	return slices.ContainsFunc(known, func(k trust.KnownKey) bool { return k.State == trust.Own && k.Fingerprint == fp })
+}
+
 // printKeyCheck prints identity verify <email>: the safety number of own,
 // your primary key, and fp, the key the server lists for email, then that
 // key's fingerprint and what this device knows of it. Without own (ownErr
@@ -238,6 +332,11 @@ func printKeyCheck(email, fp string, known []trust.KnownKey, own string, ownErr 
 	ui.KeyValues("Key fingerprint", fingerprint.Group(fp))
 	ui.KeyValue("This device", knownKeyStatus(fp, known))
 	fmt.Fprintln(os.Stderr)
+	if ownKeyOnDevice(known, fp) {
+		ui.Dimmed("This key pair is on this device, for one of your own accounts: it is already trusted, and there is nothing to compare.")
+		fmt.Fprintln(os.Stderr)
+		return
+	}
 	if err == nil {
 		ui.Dimmed(fmt.Sprintf("Compare the number with %s over a channel you trust.", email))
 		ui.Dimmed(sameNumberHint(email))

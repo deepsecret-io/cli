@@ -185,3 +185,25 @@ func TestListShowsADefaultNameWhole(t *testing.T) {
 		}
 	}
 }
+
+// list and describe show times in the local zone, as decrypt shows the
+// signing time; text that is not a time is shown as it came.
+func TestDisplayTime(t *testing.T) {
+	saved := time.Local
+	time.Local = time.FixedZone("+03", 3*3600)
+	t.Cleanup(func() { time.Local = saved })
+	at := time.Date(2026, 11, 16, 21, 10, 21, 502079000, time.UTC)
+	if got := displayTime(at); got != "2026-11-17 00:10:21 +03" {
+		t.Errorf("displayTime = %q", got)
+	}
+	for in, want := range map[string]string{
+		"2026-11-16T21:10:21.502079Z": "2026-11-17 00:10:21 +03",
+		"2026-11-16T21:10:21Z":        "2026-11-17 00:10:21 +03",
+		"soon":                        "soon",
+		"":                            "",
+	} {
+		if got := displayTimeString(in); got != want {
+			t.Errorf("displayTimeString(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

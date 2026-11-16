@@ -13,6 +13,7 @@ import (
 
 	"github.com/deepsecret-io/deepsecret-go/trust"
 
+	"github.com/deepsecret-io/cli/internal/errs"
 	"github.com/deepsecret-io/cli/internal/testutil"
 )
 
@@ -116,4 +117,60 @@ func TestPrintKnownSafetyNumbers(t *testing.T) {
 	if !strings.Contains(out, "No safety number with bob@example.com: your primary key is not on this device") {
 		t.Errorf("without your key: %q", out)
 	}
+}
+
+// verify takes the full key fingerprint, as one argument or in the groups
+// it is shown in, or the safety number, as one argument or its groups.
+func TestParseVerifyKey(t *testing.T) {
+	fp := strings.Repeat("ab", 32)
+	for _, args := range [][]string{{strings.ToUpper(fp)}, strings.Fields("abab abab abab abab abab abab abab abab abab abab abab abab abab abab abab abab")} {
+		got, err := parseVerifyKey(args)
+		if err != nil || got.fingerprint != fp || got.safety != "" {
+			t.Fatalf("parseVerifyKey(%q) = %+v, %v", args, got, err)
+		}
+	}
+	for _, args := range [][]string{strings.Fields(zeroFFRows[0]), {zeroFFRows[0]}} {
+		got, err := parseVerifyKey(args)
+		if err != nil || got.safety != "16409375323422926549" || got.fingerprint != "" {
+			t.Fatalf("parseVerifyKey(%q) = %+v, %v", args, got, err)
+		}
+	}
+	for _, args := range [][]string{{"abc"}, {fp, "x"}, {"12345", "abcde"}} {
+		if _, err := parseVerifyKey(args); err == nil || !strings.Contains(err.Error(), "safety number") {
+			t.Fatalf("parseVerifyKey(%q) = %v, want a refusal naming both forms", args, err)
+		}
+	}
+}
+
+// The safety number given must be the whole number, and the one this
+// device computes for the key the server lists now.
+func TestCheckSafetyNumber(t *testing.T) {
+	all := strings.ReplaceAll(strings.Join(zeroFFRows, ""), " ", "")
+	if err := checkSafetyNumber(zeroFFRows, all, "bob@example.com"); err != nil {
+		t.Fatalf("the whole number: %v", err)
+	}
+	summary, detail := describeErr(checkSafetyNumber(zeroFFRows, all[:30], "bob@example.com"))
+	if !strings.Contains(summary, "60 digits") || !strings.Contains(summary, "30 were given") || !strings.Contains(detail, "12 groups") {
+		t.Fatalf("half the number: %q, %q", summary, detail)
+	}
+	summary, detail = describeErr(checkSafetyNumber(zeroFFRows, "2"+all[1:], "bob@example.com"))
+	if !strings.Contains(summary, "does not match") || !strings.Contains(detail, "Do not verify it") {
+		t.Fatalf("a different number: %q, %q", summary, detail)
+	}
+}
+
+// A key pair on this device for one of the user's own accounts needs no
+// verifying; a key accepted for someone else does.
+func TestOwnKeyOnDevice(t *testing.T) {
+	known := []trust.KnownKey{{Fingerprint: zeroFP, State: trust.Own}, {Fingerprint: ffFP, State: trust.Accepted}}
+	if !ownKeyOnDevice(known, zeroFP) || ownKeyOnDevice(known, ffFP) || ownKeyOnDevice(nil, zeroFP) {
+		t.Fatal("ownKeyOnDevice")
+	}
+}
+
+func describeErr(err error) (string, string) {
+	if err == nil {
+		return "", ""
+	}
+	return errs.Describe(err)
 }

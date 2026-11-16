@@ -21,3 +21,21 @@ func TestDescribeError(t *testing.T) {
 		t.Errorf("detail %q", detail)
 	}
 }
+
+// The summary starts with a capital only when its first word is a word:
+// an email, an ID, a path or a quoted name keeps the case it was given.
+func TestDescribeKeepsIdentifiersAsWritten(t *testing.T) {
+	for in, want := range map[string]string{
+		"team \"sre\" has no members to send to":        "Team \"sre\" has no members to send to",
+		"alaa.q@example.com is your own account":        "alaa.q@example.com is your own account",
+		"b3a846a0 has no pending upload":                "b3a846a0 has no pending upload",
+		"./04a0b4f6 is a link":                          "./04a0b4f6 is a link",
+		"--dir out is a link":                           "--dir out is a link",
+		"\"empty\" has no members":                      "\"empty\" has no members",
+		"could not fetch your account: connection lost": "Could not fetch your account: connection lost",
+	} {
+		if got, _ := Describe(errors.New(in)); got != want {
+			t.Errorf("Describe(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
