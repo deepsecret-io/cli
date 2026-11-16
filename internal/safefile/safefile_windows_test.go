@@ -246,3 +246,31 @@ func TestCheckPrivateDir(t *testing.T) {
 		t.Errorf("a missing folder: %v, want not exist", err)
 	}
 }
+
+// A folder that is a reparse point is a folder unless its tag is a name
+// surrogate, a link such as a junction or a symlink: a OneDrive folder is
+// checked as the folder it is, as Go's Lstat and the SDK take it.
+func TestIsFolder(t *testing.T) {
+	const (
+		dir     = windows.FILE_ATTRIBUTE_DIRECTORY
+		reparse = windows.FILE_ATTRIBUTE_REPARSE_POINT
+		cloud   = 0x9000001A // IO_REPARSE_TAG_CLOUD, a cloud files placeholder such as OneDrive's
+	)
+	for _, c := range []struct {
+		name   string
+		attrs  uint32
+		tag    uint32
+		folder bool
+	}{
+		{"a folder", dir, 0, true},
+		{"a OneDrive folder", dir | reparse, cloud, true},
+		{"a junction", dir | reparse, windows.IO_REPARSE_TAG_MOUNT_POINT, false},
+		{"a symlink to a folder", dir | reparse, windows.IO_REPARSE_TAG_SYMLINK, false},
+		{"a file", windows.FILE_ATTRIBUTE_NORMAL, 0, false},
+		{"a OneDrive file", reparse, cloud, false},
+	} {
+		if got := isFolder(c.attrs, c.tag); got != c.folder {
+			t.Errorf("%s (attributes %#x, tag %#x): isFolder %v, want %v", c.name, c.attrs, c.tag, got, c.folder)
+		}
+	}
+}

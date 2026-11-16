@@ -217,7 +217,10 @@ func ReadPrivate(path string) ([]byte, error) {
 // there, or put a link in it. It checks once, by path: the folder above
 // dir must keep others from renaming it. The handle is opened with
 // FILE_FLAG_OPEN_REPARSE_POINT, so a junction or another link at dir is
-// checked as itself, not as its target, and refused as not a folder.
+// checked as itself, not as its target, and refused as not a folder
+// (isFolder). A folder that is another kind of reparse point, such as a
+// OneDrive one, names no other file: its own owner and access list are
+// checked, as for any folder.
 func CheckPrivateDir(dir string) error {
 	p, err := windows.UTF16PtrFromString(dir)
 	if err != nil {
@@ -233,7 +236,15 @@ func CheckPrivateDir(dir string) error {
 	if err := windows.GetFileInformationByHandle(h, &info); err != nil {
 		return &os.PathError{Op: "check", Path: dir, Err: err}
 	}
-	if info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 || info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+	// Only a reparse point has a tag; a drive without them (FAT) may not
+	// answer the query at all.
+	var tag fileAttributeTagInfo
+	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		if err := windows.GetFileInformationByHandleEx(h, windows.FileAttributeTagInfo, (*byte)(unsafe.Pointer(&tag)), uint32(unsafe.Sizeof(tag))); err != nil {
+			return &os.PathError{Op: "check", Path: dir, Err: err}
+		}
+	}
+	if !isFolder(info.FileAttributes, tag.ReparseTag) {
 		return &os.PathError{Op: "check", Path: dir, Err: windows.ERROR_DIRECTORY}
 	}
 	sd, err := windows.GetSecurityInfo(h, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
@@ -248,6 +259,30 @@ func CheckPrivateDir(dir string) error {
 		return errs.WithDetail(&notPrivateError{path: dir}, upperFirst(who)+".")
 	}
 	return nil
+}
+
+// fileAttributeTagInfo is FILE_ATTRIBUTE_TAG_INFO, which
+// golang.org/x/sys/windows does not define.
+type fileAttributeTagInfo struct {
+	FileAttributes uint32
+	ReparseTag     uint32
+}
+
+// reparseTagNameSurrogate is the bit of a reparse tag that marks a name
+// surrogate (IsReparseTagNameSurrogate in winnt.h): a link to another file
+// or folder, such as a symlink or a junction.
+const reparseTagNameSurrogate = 0x20000000
+
+// isFolder reports whether a file with the attributes attrs, and with tag
+// when it is a reparse point, is a folder itself and not a link to one,
+// the rule Go's os.Lstat follows: a name surrogate is a link, and a folder
+// that is another kind of reparse point, such as a OneDrive one, is a
+// folder.
+func isFolder(attrs, tag uint32) bool {
+	if attrs&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
+		return false
+	}
+	return attrs&windows.FILE_ATTRIBUTE_REPARSE_POINT == 0 || tag&reparseTagNameSurrogate == 0
 }
 
 // checkPrivate refuses the file open as h at path unless only this user,
