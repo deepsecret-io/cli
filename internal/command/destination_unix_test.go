@@ -58,8 +58,9 @@ func assertLinkRefused(t *testing.T, err error) {
 }
 
 // Before a download, decrypt refuses a link at the default
-// ./<revision-id>/: the files would land wherever it points. --overwrite
-// does not allow it, and nothing is created where it points.
+// ./<revision-id>/, or given as --dir: the files would land wherever it
+// points. --overwrite does not allow it, and nothing is created where it
+// points.
 func TestCheckFilesDestinationRefusesALink(t *testing.T) {
 	archive := secrets.UpcomingDownload{RevisionID: linkedRevision, PayloadType: "files"}
 	listed := secrets.UpcomingDownload{RevisionID: linkedRevision, PayloadType: "files", Files: []secrets.FileMeta{{Name: ".ssh/authorized_keys2", Size: 5}}}
@@ -106,12 +107,63 @@ func TestCheckFilesDestinationRefusesALink(t *testing.T) {
 		}
 	})
 
-	// A link the caller names with --dir is their own choice.
+	// A link given as --dir is refused too, by the SDK, before anything is
+	// downloaded (checkDirFlag refuses it even earlier).
 	t.Run("--dir", func(t *testing.T) {
-		if err := checkFilesDestination(linkedRevision, listed, false); err != nil {
-			t.Fatalf("the link as --dir: %v", err)
+		target := t.TempDir()
+		plantLink(t, target)
+		err := checkFilesDestination(linkedRevision, listed, false)
+		if err == nil || !strings.Contains(err.Error(), "a link to one is refused") {
+			t.Fatalf("the link as --dir: %v, want it refused", err)
 		}
+		assertEmptyDir(t, target)
 	})
+}
+
+// An explicit --dir that is a link is refused before anything is fetched,
+// with a trailing slash too (which would make Lstat follow it), a link to
+// nothing too, and nothing is created where it points. A missing --dir is created
+// private to this user, and a real one is used as it is.
+func TestCheckDirFlag(t *testing.T) {
+	t.Chdir(t.TempDir())
+	target := t.TempDir()
+	if err := os.Symlink(target, "link"); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(t.TempDir(), "missing")
+	if err := os.Symlink(missing, "dangling"); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{"link", "link/", "dangling"} {
+		err := checkDirFlag(dir)
+		if err == nil {
+			t.Errorf("--dir %s was accepted", dir)
+			continue
+		}
+		summary, detail := errs.Describe(err)
+		if !strings.Contains(summary, "--dir "+dir+" is a link") || !strings.Contains(detail, "the directory it points to") {
+			t.Errorf("--dir %s: %q, %q", dir, summary, detail)
+		}
+	}
+	assertEmptyDir(t, target)
+	if _, err := os.Lstat(missing); !os.IsNotExist(err) {
+		t.Errorf("the dangling link's target: %v, want it not created", err)
+	}
+
+	if err := os.WriteFile("file", nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkDirFlag("file"); err == nil || !strings.Contains(err.Error(), "--dir file is not a directory") {
+		t.Errorf("--dir naming a file: %v", err)
+	}
+
+	if err := checkDirFlag("new"); err != nil {
+		t.Fatalf("a --dir that does not exist yet: %v", err)
+	}
+	testutil.AssertPrivate(t, "new")
+	if err := checkDirFlag("new"); err != nil {
+		t.Fatalf("an existing directory: %v", err)
+	}
 }
 
 // Right before the write, the default ./<revision-id>/ is created new and

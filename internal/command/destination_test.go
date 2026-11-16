@@ -108,8 +108,8 @@ func TestDefaultDirMustBeADirectory(t *testing.T) {
 // Right before the write, the default ./<revision-id>/ is created when it
 // is missing, private to this user (also on Windows, where a plain mkdir
 // would take the access list of the directory above), and a directory
-// already there is used as it is. A --dir is the caller's, and is left to
-// the SDK.
+// already there is used as it is. A --dir is checked before the download
+// (checkDirFlag), and is left to the SDK here.
 func TestPrepareFilesDir(t *testing.T) {
 	const rev = "04a0b4f6-4d7b-4d14-b212-f2c0b1f97a2f"
 	t.Chdir(t.TempDir())

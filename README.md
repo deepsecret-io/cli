@@ -125,7 +125,7 @@ secret decrypt <secret-id> --dir ./out      # or to a folder you choose
 secret decrypt <secret-id> -o db.env        # key-value pairs to a file instead of the screen
 ```
 
-Decrypting never overwrites files in your current folder. The folder it creates is private to your account, on Windows too. If `./<revision-id>` is already there as a link or a file, or as a folder another account owns or may open, it stops rather than write there, and asks you to choose a folder with `--dir`. Key-value pairs are printed on the screen unless you give `-o`.
+Decrypting never overwrites files in your current folder. The folder it creates is private to your account, on Windows too. If `./<revision-id>` is already there as a link or a file, or as a folder another account owns or may open, it stops rather than write there, and asks you to choose a folder with `--dir`. Give `--dir` the folder itself: a link to a folder is refused there. Key-value pairs are printed on the screen unless you give `-o`.
 
 ## Manage what you sent
 

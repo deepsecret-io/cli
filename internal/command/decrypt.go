@@ -59,7 +59,8 @@ func newDecryptCmd() *cobra.Command {
   - Files are written to a directory named after the revision ID by default,
     so a decrypt never writes over files in the current directory. A link
     or a file with that name is refused, and so is a directory that another
-    account owns or may open. --dir chooses another directory.
+    account owns or may open. --dir chooses another directory: the
+    directory itself, as a link to one is refused.
   - A message or key-value data is printed to stdout, or written to the
     file --output names.
 
@@ -103,12 +104,8 @@ plan and every change to it.`,
 			// we cannot create that directory now because we don't know the
 			// revision ID yet.
 			if outputDir != "" {
-				if info, err := os.Stat(outputDir); err != nil {
-					if err := safefile.MkdirPrivate(outputDir); err != nil {
-						return fmt.Errorf("could not create the output directory %s: %w", outputDir, errs.PathCause(err))
-					}
-				} else if !info.IsDir() {
-					return fmt.Errorf("--dir %s is not a directory", outputDir)
+				if err := checkDirFlag(outputDir); err != nil {
+					return err
 				}
 			}
 			if outputFile != "" {
@@ -520,10 +517,11 @@ func filesDir(dir, revisionID string) (string, error) {
 // files decrypt writes in it, or put links in it. Both checks run by path,
 // before the download and again before the write, so they rely on the
 // current directory keeping others from renaming what is in it, as the
-// sticky bit on /tmp does. --overwrite does not allow any of them. A --dir is the caller's
-// own choice and is not checked here. The nothing argument is the sentence
-// a refusal's detail gives for what has not happened yet ("Nothing was
-// downloaded." or "Nothing was written.").
+// sticky bit on /tmp does. --overwrite does not allow any of them. A --dir
+// is the caller's own choice: it is refused only as a link or a file
+// (checkDirFlag), not for who owns it, and is not checked here. The
+// nothing argument is the sentence a refusal's detail gives for what has
+// not happened yet ("Nothing was downloaded." or "Nothing was written.").
 func checkDefaultDir(dir, nothing string) (exists bool, err error) {
 	info, err := os.Lstat(dir)
 	if errors.Is(err, os.ErrNotExist) {
@@ -552,6 +550,34 @@ func checkDefaultDir(dir, nothing string) (exists bool, err error) {
 	return false, errs.WithDetail(fmt.Errorf("%s %s", dir, what),
 		"Without --dir, the files go to a directory with this name, and decrypt never writes through a link or in place of a file. "+nothing+"\n\n"+
 			"Pass --dir to choose the output directory.")
+}
+
+// checkDirFlag checks an explicit --dir before anything is fetched: a
+// missing one is created private to this user, and a link or a file at it
+// is refused. A link at --dir itself, even one the caller chose, is never
+// followed (folders above it may be links): the SDK refuses one too,
+// before the download and again when it opens the directory to write.
+func checkDirFlag(dir string) error {
+	// Clean, so a trailing slash does not make Lstat follow a link.
+	info, err := os.Lstat(filepath.Clean(dir))
+	if errors.Is(err, os.ErrNotExist) {
+		if err := safefile.MkdirPrivate(dir); err != nil {
+			return fmt.Errorf("could not create the output directory %s: %w", dir, errs.PathCause(err))
+		}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("could not check the output directory %s: %w", dir, errs.PathCause(err))
+	}
+	if info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+		return errs.WithDetail(fmt.Errorf("--dir %s is a link", dir),
+			"Decrypt writes only into a real directory, not into one a link given as --dir points to. Nothing was downloaded.\n\n"+
+				"Pass --dir the directory it points to.")
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("--dir %s is not a directory", dir)
+	}
+	return nil
 }
 
 // prepareFilesDir is filesDir right before the write, with the default
@@ -602,8 +628,8 @@ func checkFilesDestination(dirFlag string, p secrets.UpcomingDownload, overwrite
 	if err != nil {
 		return err
 	}
-	// First, so that nothing is tried through a link: CheckDestination
-	// follows one, and creates a file where it points to see if it can.
+	// First, for the privacy check and its own message: CheckDestination
+	// refuses a link at dir too, but knows nothing of --dir.
 	if dirFlag == "" {
 		if _, err := checkDefaultDir(dir, "Nothing was downloaded."); err != nil {
 			return err
