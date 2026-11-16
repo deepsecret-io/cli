@@ -83,7 +83,7 @@ secret encrypt db.env -t alice@example.com
 # To several people, yourself included
 secret encrypt db.env -t alice@example.com,bob@example.com,me@example.com
 
-# To a team in your organization: every other member of the team
+# To a team in your organization: every member, you included if you are in it
 secret encrypt db.env -T engineering
 
 # Several files and a folder, under a name of your choice

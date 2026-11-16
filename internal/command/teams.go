@@ -171,6 +171,24 @@ func orgTeams(ctx context.Context, c *deepsecret.Client, info *sdkidentity.Membe
 	return teams, false, nil
 }
 
+// teamRecipients is who a team send goes to: everyone in the team, the
+// sender included when they are in it, so a team of one sends to its only
+// member. An entry with no address is skipped, and a team with nobody to
+// send to is refused.
+func teamRecipients(team *sdkidentity.Team) ([]string, error) {
+	var recipients []string
+	for _, m := range team.Members {
+		if m.Email != "" {
+			recipients = append(recipients, m.Email)
+		}
+	}
+	if len(recipients) == 0 {
+		return nil, errs.WithDetail(fmt.Errorf("team %q has no members to send to", team.Name),
+			"Add a member to the team, or leave out --team to send the secret to yourself.")
+	}
+	return recipients, nil
+}
+
 // findTeam finds the team named name, in any case, among the teams the
 // account info describes can send to. For a member, a team they are not
 // in is not found, like one that does not exist.

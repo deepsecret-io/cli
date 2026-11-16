@@ -91,7 +91,7 @@ your account. Recipients open the file with "secret decrypt --local".`,
   secret encrypt -d DB_PASS=secret -d API_KEY=abc -t alice@example.com
   secret encrypt key.pem -t alice@example.com --ttl 24h --ip 10.0.0.0/8
   secret encrypt . --archive -t alice@example.com       # hide file names and sizes
-  secret encrypt db.env -T engineering                  # every other member of a team
+  secret encrypt db.env -T engineering                  # every member of a team, you included
   secret encrypt db.env -n db.env -t alice@example.com --revoke-missing
   secret encrypt db.env -t alice@example.com --local    # writes ./db.env.cbor, sends nothing`,
 		Args: cobra.ArbitraryArgs,
@@ -152,7 +152,7 @@ your account. Recipients open the file with "secret decrypt --local".`,
 			}
 
 			// Resolve the recipient list. Sources (in priority order):
-			//   1. -T/--team   : every team member except self
+			//   1. -T/--team   : every team member, the sender included
 			//   2. -t/--to     : the explicit recipients
 			//   3. (none)      : send to self
 			// Whatever the source, it is one send. Its lines say it
@@ -177,18 +177,8 @@ your account. Recipients open the file with "secret decrypt --local".`,
 				if err != nil {
 					return err
 				}
-				for _, m := range team.Members {
-					if m.Email == "" {
-						continue
-					}
-					if strings.EqualFold(m.Email, info.Email) {
-						continue // exclude self
-					}
-					recipients = append(recipients, m.Email)
-				}
-				if len(recipients) == 0 {
-					return errs.WithDetail(fmt.Errorf("team %q has no other members to send to", team.Name),
-						"Add another member to the team, or leave out --team to send the secret to yourself.")
+				if recipients, err = teamRecipients(team); err != nil {
+					return err
 				}
 				teamName, recipientsFrom = team.Name, "--team"
 				ui.Subject("secret", fmt.Sprintf("%s team %q (%d recipient%s)", verb, team.Name, len(recipients), ui.PluralS(len(recipients))))
@@ -421,7 +411,7 @@ your account. Recipients open the file with "secret decrypt --local".`,
 		return pflag.NormalizedName(name)
 	})
 	f.VarP(flags.NewEmailList(&recipientEmails), "to", "t", "Recipient `email`, repeatable or comma-separated (default: yourself)")
-	f.StringVarP(&teamName, "team", "T", "", "Send to every other member of this org `team`, in one send")
+	f.StringVarP(&teamName, "team", "T", "", "Send to every member of this org `team`, you included if you are in it, in one send")
 	f.BoolVar(&revokeMissing, "revoke-missing", false, "When resending under an existing name, revoke the recipients this send leaves out")
 	flags.SetGroup(f, flags.GroupRecipients, "to", "team", "revoke-missing")
 

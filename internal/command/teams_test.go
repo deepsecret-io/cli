@@ -72,3 +72,28 @@ func TestFindTeam_ListsWhatTheTeamsPermissionAllows(t *testing.T) {
 		t.Errorf("admin request: %s", got)
 	}
 }
+
+// A team send goes to everyone in the team, the sender included, so a
+// team whose only member is the sender sends to the sender alone. A team
+// with nobody to send to is refused, naming the way out.
+func TestTeamRecipients(t *testing.T) {
+	alone := &sdkidentity.Team{Name: "sre", Members: []sdkidentity.TeamMember{{Email: "me@example.com"}}}
+	got, err := teamRecipients(alone)
+	if err != nil || strings.Join(got, ",") != "me@example.com" {
+		t.Fatalf("a team of one: %q, %v", got, err)
+	}
+
+	team := &sdkidentity.Team{Name: "eng", Members: []sdkidentity.TeamMember{
+		{Email: "me@example.com"}, {Email: ""}, {Email: "alice@example.com"},
+	}}
+	got, err = teamRecipients(team)
+	if err != nil || strings.Join(got, ",") != "me@example.com,alice@example.com" {
+		t.Fatalf("a team of two with an empty address: %q, %v", got, err)
+	}
+
+	_, err = teamRecipients(&sdkidentity.Team{Name: "empty"})
+	summary, detail := errs.Describe(err)
+	if err == nil || !strings.Contains(summary, `"empty" has no members to send to`) || !strings.Contains(detail, "leave out --team") {
+		t.Fatalf("an empty team: %q, %q", summary, detail)
+	}
+}
