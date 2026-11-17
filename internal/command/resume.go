@@ -116,17 +116,24 @@ download unused for a week is removed.`,
 				return ui.RunPipeline(cmd.Context(), "upload", []ui.Step{discardStep})
 			}
 
+			// The interrupted send recorded none of its recipients' keys.
+			// The resume does, and names the ones that were new to this
+			// device, so they are shown here as a finished send shows them.
+			var firstUse []secrets.Recipient
 			progress := ui.NewUploadProgress()
 			uploadStep := ui.Step{
 				Label: "Uploading " + p.Name,
 				Done:  "Upload complete",
 				Live:  progress,
 				Action: func() (string, error) {
-					_, err := c.Secrets.ResumeUpload(cmd.Context(), dir, p.RevisionID, secrets.ResumeOptions{
+					done, err := c.Secrets.ResumeUpload(cmd.Context(), dir, p.RevisionID, secrets.ResumeOptions{
 						UploadThreads: threads,
 						UploadStatus:  &progress.Transfer,
 						Logger:        logging.Log,
 					})
+					if done != nil {
+						firstUse = done.FirstUse
+					}
 					if err != nil {
 						return "", err
 					}
@@ -145,6 +152,7 @@ download unused for a week is removed.`,
 			ui.KeyValue("Name", console.Safe(p.Name))
 			ui.KeyValue("Size", ui.FormatBytes(p.Size)+" encrypted")
 			fmt.Fprintln(os.Stderr)
+			printFirstUse(firstUse)
 			return nil
 		},
 	}

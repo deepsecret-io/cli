@@ -101,3 +101,23 @@ func TestDownloadResumeDetail(t *testing.T) {
 		t.Fatalf("%q", detail)
 	}
 }
+
+// A resumed upload names the recipients whose key was new to this device,
+// as a finished send does: the interrupted send recorded none of them, so
+// this is the first time they are shown. Each gets one line with the
+// address, the key and how to compare it, and nothing is printed when
+// there are none.
+func TestFirstUseAfterAResumeIsShown(t *testing.T) {
+	fp := strings.Repeat("ab", 32)
+	out := testutil.AnsiEscape.ReplaceAllString(testutil.StderrOf(t, func() {
+		printFirstUse([]secrets.Recipient{{Email: "bob@example.com", Fingerprint: fp}})
+	}), "")
+	for _, want := range []string{"bob@example.com", "secret identity verify bob@example.com", "First secret with"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the first-use note lacks %q: %q", want, out)
+		}
+	}
+	if none := testutil.StderrOf(t, func() { printFirstUse(nil) }); none != "" {
+		t.Errorf("with no first-use key it printed %q", none)
+	}
+}
