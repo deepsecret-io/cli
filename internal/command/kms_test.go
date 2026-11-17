@@ -18,6 +18,7 @@ import (
 	"github.com/deepsecret-io/deepsecret-go/keys"
 	"github.com/deepsecret-io/deepsecret-go/keystore"
 
+	"github.com/deepsecret-io/cli/internal/auth"
 	"github.com/deepsecret-io/cli/internal/config"
 	"github.com/deepsecret-io/cli/internal/errs"
 	"github.com/deepsecret-io/cli/internal/identity"
@@ -214,6 +215,13 @@ func TestGenerateKMSFlagChecks(t *testing.T) {
 
 func TestImportCommand(t *testing.T) {
 	testutil.SetHome(t, t.TempDir())
+	// A successful import reports the key pair's protection when the CLI is
+	// signed in. With no credential at all it makes no request, so the
+	// production API is never reached.
+	t.Setenv("DS_API_KEY", "")
+	savedKey, savedOrigin := auth.FlagKey, auth.FlagKeyOrigin
+	t.Cleanup(func() { auth.FlagKey, auth.FlagKeyOrigin = savedKey, savedOrigin })
+	auth.FlagKey = ""
 	src := t.TempDir()
 	// A KMS key file made "elsewhere": in its own keys directory.
 	_, fp := kmsKeyPair(t)

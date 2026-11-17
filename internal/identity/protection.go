@@ -138,22 +138,47 @@ func ProtectionTag(p keystore.Protection) string {
 
 // RemoteLabel is how the registered key k is protected, for key lists:
 // "security-key" or "aws-kms" from its key file when it is on this device,
-// "security-key (reported)" from the label one of the user's devices set
-// when it is not, else "". The server does not check the label.
+// "security-key (reported)" or "aws-kms (reported)" from the label one of
+// the user's devices set when it is not, else "". The server does not check
+// the label.
 func RemoteLabel(k sdkidentity.Key) string {
 	if len(k.Fingerprint) == 64 {
 		if p := Protection(k.Fingerprint); p != "" {
-			switch p {
-			case keystore.ProtectionSecurityKey:
-				return "security-key"
-			case keystore.ProtectionKMS:
-				return "aws-kms"
-			}
-			return ""
+			return remoteTag(p)
 		}
 	}
-	if k.SecurityKey {
-		return "security-key (reported)"
+	if t := remoteTag(k.Protection); t != "" {
+		return t + " (reported)"
+	}
+	return ""
+}
+
+// remoteTag is the tag of a protection in the registered key lists:
+// "security-key", "aws-kms", or "" for a password or none.
+func remoteTag(p keystore.Protection) string {
+	switch p {
+	case keystore.ProtectionSecurityKey:
+		return "security-key"
+	case keystore.ProtectionKMS:
+		return "aws-kms"
+	}
+	return ""
+}
+
+// LabelPhrase is how a registered key is labelled for the protection p of
+// its key file, for success lines: "labelled as protected by a password",
+// "... by a security key", "... by AWS KMS", "labelled as not protected", or
+// "" when p is not one of those (a key file that cannot be read).
+func LabelPhrase(p keystore.Protection) string {
+	switch p {
+	case keystore.ProtectionNone:
+		return "labelled as not protected"
+	case keystore.ProtectionPassword:
+		return "labelled as protected by a password"
+	case keystore.ProtectionSecurityKey:
+		return "labelled as protected by a security key"
+	case keystore.ProtectionKMS:
+		return "labelled as protected by AWS KMS"
 	}
 	return ""
 }

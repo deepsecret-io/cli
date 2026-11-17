@@ -400,6 +400,7 @@ func newKMSProtectCmd() *cobra.Command {
 			}
 			logProtected(e, "protected with AWS KMS")
 			ui.Success("Key pair " + keys.ShortFingerprint(name) + " is protected by AWS KMS")
+			reportProtection(cmd.Context(), name)
 			earlierCopies(info.Protection, "secret identity generate --kms-arn <KMS key ARN> --single")
 			printKMSPolicy(e.Fingerprint(), account)
 			return nil
@@ -451,6 +452,7 @@ func newKMSAddCmd() *cobra.Command {
 			}
 			logProtected(e, "KMS key added")
 			ui.Success("Key pair " + keys.ShortFingerprint(name) + " now opens with the new KMS key too")
+			reportProtection(cmd.Context(), name)
 			ui.Dimmed("Copy the new key file to the machines that use it: secret identity import --replace")
 			printKMSPolicy(e.Fingerprint(), account)
 			return nil
@@ -556,6 +558,7 @@ func newKMSRemoveCmd() *cobra.Command {
 			}
 			logProtected(e, "slot removed")
 			ui.Success("Removed " + console.Safe(target.Label) + " from key pair " + keys.ShortFingerprint(name))
+			reportProtection(cmd.Context(), name)
 			if target.Type == keystore.SlotAWSKMS {
 				ui.Dimmed("Copies of the key file made before now still open with that KMS key while its policies allow it.")
 				ui.Dimmed("To stop them, revoke the access in AWS (the key policy, the IAM policy or a grant).")
@@ -604,6 +607,7 @@ func newKMSRecoveryCodeCmd() *cobra.Command {
 			}
 			logProtected(e, "recovery code set")
 			ui.Success("New recovery code saved for key pair " + keys.ShortFingerprint(name) + "; the old one no longer opens it")
+			reportProtection(cmd.Context(), name)
 			ui.Dimmed("Copies of the key file made before now still open with the old code.")
 			return nil
 		},
@@ -652,8 +656,9 @@ func newKMSUnprotectCmd() *cobra.Command {
 				return fmt.Errorf("could not save the key pair: %w", err)
 			}
 			logging.Module(logging.Log, "identity").Info("AWS KMS protection removed", "fingerprint", e.Fingerprint(), "password", !noPassword)
-			ui.Success("Key pair " + keys.ShortFingerprint(name) + " no longer opens through AWS KMS")
-			ui.Warning("A copy of the key file can be guessed at offline again", "Its KMS keys and recovery code no longer open it; its password does.")
+			ui.Success("Key pair " + keys.ShortFingerprint(name) + " no longer opens through AWS KMS; " + unprotectedNow(noPassword))
+			ui.Warning("A copy of the key file can be guessed at offline again", "Its KMS keys and recovery code no longer open it; "+opensNow(noPassword))
+			reportProtection(cmd.Context(), name)
 			return nil
 		},
 	}
@@ -728,7 +733,7 @@ func newIdentityImportCmd() *cobra.Command {
 			"  printf '%s' \"$DEEPSECRET_KEY_FILE\" | secret identity import --stdin\n" +
 			"  secret identity import --file ./1f2e3d.json",
 		Args: cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			var r io.Reader
 			switch {
 			case stdin == (file != ""):
@@ -757,6 +762,7 @@ func newIdentityImportCmd() *cobra.Command {
 			}
 			logging.Module(logging.Log, "identity").Info("key file imported", "fingerprint", fp, "replace", replace)
 			ui.Success("Key pair " + keys.ShortFingerprint(fp) + identity.ProtectionNote(fp) + " is on this device")
+			reportProtection(cmd.Context(), fp)
 			return nil
 		},
 	}

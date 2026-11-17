@@ -30,20 +30,21 @@ import (
 	"github.com/deepsecret-io/cli/internal/ui"
 )
 
-// refreshSecurityKeyLabel brings the security key label of the registered
-// key k up to date with the key pair name on this device, for identity
-// sync on a key that is registered already.
-func refreshSecurityKeyLabel(ctx context.Context, c *deepsecret.Client, k *sdkidentity.Key, name string) error {
-	want := identity.Protection(name) == keystore.ProtectionSecurityKey
+// refreshProtectionLabel brings the protection label of the registered key
+// k up to date with the key file of the key pair name on this device, for
+// identity sync on a key that is registered already. A key file that cannot
+// be read leaves the label as it is.
+func refreshProtectionLabel(ctx context.Context, c *deepsecret.Client, k *sdkidentity.Key, name string) error {
+	want := identity.Protection(name)
 	short := keys.ShortFingerprint(name)
-	if k.SecurityKey != want {
-		if err := c.Identity.SetKeySecurityKey(ctx, k.ID, want); err != nil {
+	if want != "" && k.Protection != want {
+		if err := c.Identity.SetKeyProtection(ctx, k.ID, want); err != nil {
 			return fmt.Errorf("could not update the label of key %s: %w", short, errs.APICause(err))
 		}
-		logging.Module(logging.Log, "identity").Info("security key label updated", "fingerprint", name, "security_key", want)
+		logging.Module(logging.Log, "identity").Info("protection label updated", "fingerprint", name, "protection", string(want))
 	}
-	if want {
-		ui.Success("Key " + short + " is registered, labelled as protected by a security key")
+	if l := identity.LabelPhrase(want); l != "" {
+		ui.Success("Key " + short + " is registered, " + l)
 	} else {
 		ui.Success("Key " + short + " is registered")
 	}
@@ -53,8 +54,8 @@ func refreshSecurityKeyLabel(ctx context.Context, c *deepsecret.Client, k *sdkid
 	return nil
 }
 
-// reportProtection updates the security key label of the key pair name on
-// the server after its protection changed here, when it is registered and
+// reportProtection updates the protection label of the key pair name on
+// the server after its key file changed here, when it is registered and
 // the CLI is signed in, so the user's key lists (the web app's among them)
 // show it. The local change stands either way: a failure is only told.
 func reportProtection(ctx context.Context, name string) {
@@ -62,20 +63,33 @@ func reportProtection(ctx context.Context, name string) {
 	if err != nil {
 		return // not signed in: nothing registered can be updated from here
 	}
-	want := identity.Protection(name) == keystore.ProtectionSecurityKey
-	keyList, err := c.Identity.ListKeys(ctx)
-	var k *sdkidentity.Key
-	if err == nil {
-		if k = identity.Registered(keyList, name); k == nil || k.SecurityKey == want {
-			return
-		}
-		err = c.Identity.SetKeySecurityKey(ctx, k.ID, want)
-	}
-	if err != nil {
+	if err := reportProtectionTo(ctx, c, name); err != nil {
 		ui.Dimmed("Your key lists could not be told about the change (" + console.Safe(errs.APICause(err).Error()) + "). Later: secret identity sync -i " + name)
-		return
 	}
-	logging.Module(logging.Log, "identity").Info("security key label updated", "fingerprint", name, "security_key", want)
+}
+
+// reportProtectionTo sets the protection label of the key pair name on the
+// server c to its key file's protection here, when the key is registered
+// and the label differs, and says so.
+func reportProtectionTo(ctx context.Context, c *deepsecret.Client, name string) error {
+	want := identity.Protection(name)
+	if want == "" {
+		return nil
+	}
+	keyList, err := c.Identity.ListKeys(ctx)
+	if err != nil {
+		return err
+	}
+	k := identity.Registered(keyList, name)
+	if k == nil || k.Protection == want {
+		return nil
+	}
+	if err := c.Identity.SetKeyProtection(ctx, k.ID, want); err != nil {
+		return err
+	}
+	logging.Module(logging.Log, "identity").Info("protection label updated", "fingerprint", name, "protection", string(want))
+	ui.Dimmed("Key " + keys.ShortFingerprint(name) + " is now " + identity.LabelPhrase(want) + " in your key lists")
+	return nil
 }
 
 // saveWithSecurityKey writes a new key pair straight to a security-key
@@ -444,6 +458,7 @@ func newSecurityKeyAddCmd() *cobra.Command {
 			}
 			logProtected(e, "security key added")
 			ui.Success("Enrolled " + console.Safe(slot.Label) + " for key pair " + keys.ShortFingerprint(name))
+			reportProtection(cmd.Context(), name)
 			return nil
 		},
 	}
@@ -536,6 +551,7 @@ func newSecurityKeyRemoveCmd() *cobra.Command {
 			}
 			logProtected(e, "slot removed")
 			ui.Success("Removed " + console.Safe(target.Label) + " from key pair " + keys.ShortFingerprint(name))
+			reportProtection(cmd.Context(), name)
 			ui.Dimmed("Copies of the key file made before now still open with it. If it was lost or seen by someone else,")
 			ui.Dimmed("generate a new key pair and make it your primary key: secret identity generate --security-key --recovery-code")
 			return nil
@@ -577,6 +593,7 @@ func newSecurityKeyRecoveryCodeCmd() *cobra.Command {
 			}
 			logProtected(e, "recovery code set")
 			ui.Success("New recovery code saved for key pair " + keys.ShortFingerprint(name) + "; the old one no longer opens it")
+			reportProtection(cmd.Context(), name)
 			return nil
 		},
 	}
@@ -616,8 +633,8 @@ func newSecurityKeyUnprotectCmd() *cobra.Command {
 				return fmt.Errorf("could not save the key pair: %w", err)
 			}
 			logging.Module(logging.Log, "identity").Info("security key protection removed", "fingerprint", e.Fingerprint(), "password", !noPassword)
-			ui.Success("Key pair " + keys.ShortFingerprint(name) + " no longer needs a security key")
-			ui.Warning("A copy of the key file can be guessed at offline again", "Its security keys and recovery code no longer open it; its password does.")
+			ui.Success("Key pair " + keys.ShortFingerprint(name) + " no longer needs a security key; " + unprotectedNow(noPassword))
+			ui.Warning("A copy of the key file can be guessed at offline again", "Its security keys and recovery code no longer open it; "+opensNow(noPassword))
 			reportProtection(cmd.Context(), name)
 			return nil
 		},
@@ -627,6 +644,24 @@ func newSecurityKeyUnprotectCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&noPassword, "no-password", false, "Store the private keys in clear")
 	flags.SetGroup(cmd.Flags(), flags.GroupOptions, "identity", "recovery-code", "no-password")
 	return cmd
+}
+
+// unprotectedNow says what protects a key pair after its security key or
+// AWS KMS protection came off: its new password, or nothing.
+func unprotectedNow(noPassword bool) string {
+	if noPassword {
+		return "it is not protected"
+	}
+	return "its password protects it"
+}
+
+// opensNow says what opens a key pair after its security key or AWS KMS
+// protection came off: its new password, or anyone, as it is in clear.
+func opensNow(noPassword bool) string {
+	if noPassword {
+		return "its private keys are stored in clear."
+	}
+	return "its password does."
 }
 
 // earlierCopies tells, after a key pair was protected, what still opens the

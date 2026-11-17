@@ -132,9 +132,9 @@ func TestCheckSecondWay(t *testing.T) {
 	}
 }
 
-// The security key label: read from the key file on this device, for a
-// full fingerprint only, and from the server's label for a key elsewhere.
-func TestSecurityKeyLabel(t *testing.T) {
+// The protection label: read from the key file on this device, for a full
+// fingerprint only, and from the server's label for a key elsewhere.
+func TestProtectionLabel(t *testing.T) {
 	testutil.SetHome(t, t.TempDir())
 	_, protected := protectedKeyPair(t)
 	kp, _ := keys.Generate()
@@ -154,13 +154,29 @@ func TestSecurityKeyLabel(t *testing.T) {
 		want string
 	}{
 		{sdkidentity.Key{Fingerprint: protected}, "security-key"},
-		{sdkidentity.Key{Fingerprint: plain, SecurityKey: true}, ""}, // the key file here wins
-		{sdkidentity.Key{Fingerprint: elsewhere, SecurityKey: true}, "security-key (reported)"},
+		{sdkidentity.Key{Fingerprint: protected, Protection: keystore.ProtectionKMS}, "security-key"}, // the key file here wins
+		{sdkidentity.Key{Fingerprint: plain, Protection: keystore.ProtectionSecurityKey}, ""},
+		{sdkidentity.Key{Fingerprint: elsewhere, Protection: keystore.ProtectionSecurityKey}, "security-key (reported)"},
+		{sdkidentity.Key{Fingerprint: elsewhere, Protection: keystore.ProtectionKMS}, "aws-kms (reported)"},
+		{sdkidentity.Key{Fingerprint: elsewhere, Protection: keystore.ProtectionPassword}, ""},
+		{sdkidentity.Key{Fingerprint: elsewhere, Protection: keystore.ProtectionNone}, ""},
 		{sdkidentity.Key{Fingerprint: elsewhere}, ""},
 	}
 	for _, c := range cases {
 		if got := identity.RemoteLabel(c.k); got != c.want {
-			t.Errorf("remoteKeyLabel(%.16s, label %v) = %q, want %q", c.k.Fingerprint, c.k.SecurityKey, got, c.want)
+			t.Errorf("RemoteLabel(%.16s, label %q) = %q, want %q", c.k.Fingerprint, c.k.Protection, got, c.want)
+		}
+	}
+	for p, want := range map[keystore.Protection]string{
+		keystore.ProtectionNone:        "labelled as not protected",
+		keystore.ProtectionPassword:    "labelled as protected by a password",
+		keystore.ProtectionSecurityKey: "labelled as protected by a security key",
+		keystore.ProtectionKMS:         "labelled as protected by AWS KMS",
+		"":                             "",
+		"bogus":                        "",
+	} {
+		if got := identity.LabelPhrase(p); got != want {
+			t.Errorf("LabelPhrase(%q) = %q, want %q", p, got, want)
 		}
 	}
 }
@@ -185,7 +201,7 @@ func TestSyncRegisteredKeyRecordsTheAccount(t *testing.T) {
 		var data any = map[string]any{}
 		switch r.URL.Path {
 		case "/api/v1/identities":
-			data = map[string]any{"keys": []map[string]any{{"id": "k1", "fingerprint": fp, "is_primary": true, "security_key": true}}}
+			data = map[string]any{"keys": []map[string]any{{"id": "k1", "fingerprint": fp, "is_primary": true, "protection": "security_key"}}}
 		case "/api/v1/members/me":
 			data = map[string]any{"member": map[string]any{"id": "member-1", "email": bob},
 				"membership": map[string]any{"org_id": "org-1", "role": "owner"}}
@@ -202,11 +218,11 @@ func TestSyncRegisteredKeyRecordsTheAccount(t *testing.T) {
 	}
 
 	out := testutil.StderrOf(t, func() {
-		if err := syncRegisteredKey(context.Background(), c, &sdkidentity.Key{ID: "k1", Fingerprint: fp, IsPrimary: true, SecurityKey: true}, fp); err != nil {
+		if err := syncRegisteredKey(context.Background(), c, &sdkidentity.Key{ID: "k1", Fingerprint: fp, IsPrimary: true, Protection: keystore.ProtectionSecurityKey}, fp); err != nil {
 			t.Error(err)
 		}
 	})
-	if !strings.Contains(out, "Key "+keys.ShortFingerprint(fp)+" is registered") {
+	if !strings.Contains(out, "Key "+keys.ShortFingerprint(fp)+" is registered, labelled as protected by a security key") {
 		t.Errorf("%q does not say the key is registered", out)
 	}
 	known, err := c.Trust.List(bob)
@@ -221,11 +237,23 @@ func TestSyncRegisteredKeyRecordsTheAccount(t *testing.T) {
 	}
 }
 
-// identity sync on a registered key sets its label from the key file,
-// and sends nothing when the label is already right.
-func TestRefreshSecurityKeyLabel(t *testing.T) {
+// identity sync on a registered key sets its label from the key file, to
+// each protection, sends nothing when the label is already right, and says
+// how the key is labelled.
+func TestRefreshProtectionLabel(t *testing.T) {
 	testutil.SetHome(t, t.TempDir())
-	_, fp := protectedKeyPair(t)
+	_, sk := protectedKeyPair(t)
+	_, kms := kmsKeyPair(t)
+	kp, _ := keys.Generate()
+	pw, _ := keys.Fingerprint(kp)
+	if err := identity.SaveKeyPair(pw, kp, "correct horse"); err != nil {
+		t.Fatal(err)
+	}
+	kp, _ = keys.Generate()
+	none, _ := keys.Fingerprint(kp)
+	if err := identity.SaveKeyPair(none, kp, ""); err != nil {
+		t.Fatal(err)
+	}
 	var mu sync.Mutex
 	var puts []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -242,14 +270,98 @@ func TestRefreshSecurityKeyLabel(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := refreshSecurityKeyLabel(context.Background(), c, &sdkidentity.Key{ID: "k1", Fingerprint: fp, IsPrimary: true}, fp); err != nil {
+	for _, tc := range []struct {
+		name, phrase string
+		protection   keystore.Protection
+	}{
+		{sk, "labelled as protected by a security key", keystore.ProtectionSecurityKey},
+		{kms, "labelled as protected by AWS KMS", keystore.ProtectionKMS},
+		{pw, "labelled as protected by a password", keystore.ProtectionPassword},
+		{none, "labelled as not protected", keystore.ProtectionNone},
+	} {
+		mu.Lock()
+		puts = nil
+		mu.Unlock()
+		out := testutil.StderrOf(t, func() {
+			if err := refreshProtectionLabel(context.Background(), c, &sdkidentity.Key{ID: "k1", Fingerprint: tc.name, IsPrimary: true}, tc.name); err != nil {
+				t.Error(err)
+			}
+		})
+		want := `PUT /api/v1/identities/k1/protection {"protection":"` + string(tc.protection) + `"}`
+		if len(puts) != 1 || puts[0] != want {
+			t.Errorf("%s: requests = %q, want one: %s", tc.protection, puts, want)
+		}
+		if !strings.Contains(out, "is registered, "+tc.phrase) {
+			t.Errorf("%s: %q does not say %q", tc.protection, out, tc.phrase)
+		}
+
+		mu.Lock()
+		puts = nil
+		mu.Unlock()
+		if err := refreshProtectionLabel(context.Background(), c, &sdkidentity.Key{ID: "k1", Fingerprint: tc.name, IsPrimary: true, Protection: tc.protection}, tc.name); err != nil {
+			t.Fatal(err)
+		}
+		if len(puts) != 0 {
+			t.Errorf("%s: a label already right sent %q", tc.protection, puts)
+		}
+	}
+}
+
+// After a key file changed, its registered key's label is set to the new
+// protection when it differs, and nothing is sent when it matches or when
+// the key is not registered.
+func TestReportProtectionTo(t *testing.T) {
+	testutil.SetHome(t, t.TempDir())
+	_, kms := kmsKeyPair(t)
+	var mu sync.Mutex
+	var writes []string
+	listed := "password"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/identities" {
+			mu.Lock()
+			p := listed
+			mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "data": map[string]any{
+				"keys": []map[string]any{{"id": "k1", "fingerprint": kms, "protection": p}},
+			}})
+			return
+		}
+		mu.Lock()
+		writes = append(writes, r.Method+" "+r.URL.Path+" "+strings.TrimSpace(string(body)))
+		mu.Unlock()
+		_, _ = io.WriteString(w, `{"success":true,"data":{"message":"Key pair updated"}}`)
+	}))
+	defer srv.Close()
+	c, err := auth.NewClient(srv.URL, "test-key")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := refreshSecurityKeyLabel(context.Background(), c, &sdkidentity.Key{ID: "k1", Fingerprint: fp, IsPrimary: true, SecurityKey: true}, fp); err != nil {
+
+	out := testutil.StderrOf(t, func() {
+		if err := reportProtectionTo(context.Background(), c, kms); err != nil {
+			t.Error(err)
+		}
+	})
+	want := `PUT /api/v1/identities/k1/protection {"protection":"aws_kms"}`
+	if len(writes) != 1 || writes[0] != want {
+		t.Errorf("requests = %q, want one: %s", writes, want)
+	}
+	if !strings.Contains(out, "labelled as protected by AWS KMS in your key lists") {
+		t.Errorf("%q does not name the new label", out)
+	}
+
+	mu.Lock()
+	writes, listed = nil, "aws_kms"
+	mu.Unlock()
+	if err := reportProtectionTo(context.Background(), c, kms); err != nil {
 		t.Fatal(err)
 	}
-	want := `PUT /api/v1/identities/k1/security-key {"security_key":true}`
-	if len(puts) != 1 || puts[0] != want {
-		t.Errorf("requests = %q, want one: %s", puts, want)
+	if err := reportProtectionTo(context.Background(), c, strings.Repeat("ab", 32)); err != nil {
+		t.Fatal(err)
+	}
+	if len(writes) != 0 {
+		t.Errorf("a matching label or an unregistered key sent %q", writes)
 	}
 }

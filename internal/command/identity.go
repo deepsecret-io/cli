@@ -239,7 +239,7 @@ func newIdentityGenerateCmd() *cobra.Command {
 				ui.KeyValue("Protected", "yes, by AWS KMS")
 			}
 			if !local {
-				ui.KeyValue("Registered", "yes, as your primary key")
+				ui.KeyValue("Registered", "yes, as your primary key"+registeredAs(fp))
 			}
 			fmt.Fprintln(os.Stderr)
 			if local {
@@ -269,14 +269,25 @@ func newIdentityGenerateCmd() *cobra.Command {
 }
 
 // registerKeyPair signs the public keys of kp, whose fingerprint is fp,
-// and registers them on the server, as a step does, labelled as protected
-// by a security key when its key file on this device is.
+// and registers them on the server, as a step does, labelled with how its
+// key file on this device is protected.
 func registerKeyPair(ctx context.Context, c *deepsecret.Client, kp *keys.Pair, fp string) (string, error) {
-	if err := c.Identity.Sync(ctx, kp, identity.Protection(fp) == keystore.ProtectionSecurityKey); err != nil {
+	protection := identity.Protection(fp)
+	if err := c.Identity.Sync(ctx, kp, protection); err != nil {
 		return "", fmt.Errorf("could not upload the public keys: %w", errs.APICause(err))
 	}
-	logging.Module(logging.Log, "identity").Info("key registered", "fingerprint", fp)
+	logging.Module(logging.Log, "identity").Info("key registered", "fingerprint", fp, "protection", string(protection))
 	return "fingerprint=" + keys.ShortFingerprint(fp), nil
+}
+
+// registeredAs is ", labelled as protected by ..." for the key pair fp,
+// for the lines that say it was registered, or "" when its key file
+// cannot be read.
+func registeredAs(fp string) string {
+	if l := identity.LabelPhrase(identity.Protection(fp)); l != "" {
+		return ", " + l
+	}
+	return ""
 }
 
 // setPrimaryStep makes the registered key whose fingerprint is *fp the
@@ -436,7 +447,7 @@ func newIdentitySyncCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "sync",
 		Aliases: []string{"push"},
-		Short:   "Register a key pair's public keys and make it your primary key, or, for a registered key, record this account as yours on this device and refresh its security key label (alias: push)",
+		Short:   "Register a key pair's public keys and make it your primary key, or, for a registered key, record this account as yours on this device and refresh its protection label (alias: push)",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			c, err := auth.NewAuthenticatedClient()
@@ -456,7 +467,7 @@ func newIdentitySyncCmd() *cobra.Command {
 				return err
 			}
 			// A registered key is not uploaded again, nor unlocked: the
-			// account is recorded as yours with it, and its security key
+			// account is recorded as yours with it, and its protection
 			// label is brought up to date.
 			if k := identity.Registered(remote, name); k != nil {
 				return syncRegisteredKey(cmd.Context(), c, k, name)
@@ -488,7 +499,7 @@ func newIdentitySyncCmd() *cobra.Command {
 				return err
 			}
 
-			ui.Success(fmt.Sprintf("Key %s is registered and is now your primary key.", fp))
+			ui.Success(fmt.Sprintf("Key %s is registered and is now your primary key%s.", fp, registeredAs(fp)))
 			return nil
 		},
 	}
@@ -500,7 +511,7 @@ func newIdentitySyncCmd() *cobra.Command {
 
 // syncRegisteredKey records the account signed in as one of the user's own
 // on this device, used with the key pair name, which k says is registered for
-// it already (as from another device), then brings k's security key label up
+// it already (as from another device), then brings k's protection label up
 // to date. Nothing is uploaded or unlocked. A secret this device refused as
 // from an account it does not know as the user's opens once that account is
 // recorded with the key that signed it.
@@ -509,7 +520,7 @@ func syncRegisteredKey(ctx context.Context, c *deepsecret.Client, k *sdkidentity
 		return fmt.Errorf("could not record this account as yours on this device: %w", errs.APICause(err))
 	}
 	logging.Module(logging.Log, "identity").Info("own account recorded", "fingerprint", name)
-	return refreshSecurityKeyLabel(ctx, c, k, name)
+	return refreshProtectionLabel(ctx, c, k, name)
 }
 
 // keyToSync picks the key pair identity sync registers: the one
