@@ -56,15 +56,17 @@ func Warning(summary, detail string) { Diagnostic(sevWarning, summary, detail) }
 
 // ── Simple Output Helpers ───────────────────────────────────────────────────
 
-// Success, Dimmed and Header print text that can hold values
-// from outside the CLI, so they print it through console.SafeLines. KeyValue
-// takes values that may carry the CLI's own styles: callers pass outside
-// values through console.Safe.
+// Success, Dimmed and Header print one line of text that can hold values
+// from outside the CLI, so they print it through console.Safe: a newline in
+// such a value cannot start a line of its own that reads as the CLI's.
+// Subject's text may span lines, so it keeps newlines (console.SafeLines),
+// and KeyValue takes values that may carry the CLI's own styles: callers of
+// both pass outside values through console.Safe.
 
 // Success prints a command's closing result as one green sentence,
 // as Terraform prints "Apply complete!".
 func Success(msg string) {
-	fmt.Fprintf(os.Stderr, "%s%s%s%s\n", console.Bold, console.Green, console.SafeLines(msg), console.Reset)
+	fmt.Fprintf(os.Stderr, "%s%s%s%s\n", console.Bold, console.Green, console.Safe(msg), console.Reset)
 }
 
 // KeyValue prints one line: the key, dimmed, then its value.
@@ -93,7 +95,7 @@ func Header(title string) {
 
 // Dimmed prints a dimmed, indented line.
 func Dimmed(msg string) {
-	fmt.Fprintf(os.Stderr, "  %s%s%s\n", console.Dim, console.SafeLines(msg), console.Reset)
+	fmt.Fprintf(os.Stderr, "  %s%s%s\n", console.Dim, console.Safe(msg), console.Reset)
 }
 
 // Subject prints a line of subject's, as RunPipeline does: the

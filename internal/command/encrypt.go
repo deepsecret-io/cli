@@ -73,6 +73,11 @@ and must list everyone who has access now, or add --revoke-missing.
 
 --archive bundles the files into one zstd-compressed tar before encrypting,
 so the server sees one opaque payload: no file names, sizes or structure.
+The secret's name, which the server does see, is then not taken from the
+first file either: without -n it is a unique one made from the time.
+
+Text from stdin, or the --data pairs together, can be at most 16 MiB, the
+most a recipient can decrypt in one piece. Send anything larger as a file.
 
 Large files stream from disk, so memory stays flat at any size. The
 encrypted copy is kept in ~/.deepsecret/uploads (DEEPSECRET_TMPDIR moves it)
@@ -128,6 +133,9 @@ your account. Recipients open the file with "secret decrypt --local".`,
 				}
 			}
 			logInputs(inputFiles)
+			if err := checkDataSize(dataPairs); err != nil {
+				return err
+			}
 
 			// Read stdin early if no -f or -d (before network calls, needs raw terminal)
 			var stdinData []byte
@@ -136,9 +144,9 @@ your account. Recipients open the file with "secret decrypt --local".`,
 					fmt.Fprintf(os.Stderr, "Enter the text to encrypt, then press %s to finish:\n", console.StdinEOFKeys)
 				}
 				var err error
-				stdinData, err = io.ReadAll(os.Stdin)
+				stdinData, err = readMessage(os.Stdin)
 				if err != nil {
-					return fmt.Errorf("could not read stdin: %w", err)
+					return err
 				}
 				if len(bytes.TrimSpace(stdinData)) == 0 {
 					return errs.WithDetail(errors.New("nothing to encrypt: the input is empty"),
@@ -181,7 +189,7 @@ your account. Recipients open the file with "secret decrypt --local".`,
 					return err
 				}
 				teamName, recipientsFrom = team.Name, "--team"
-				ui.Subject("secret", fmt.Sprintf("%s team %q (%d recipient%s)", verb, team.Name, len(recipients), ui.PluralS(len(recipients))))
+				ui.Subject("secret", fmt.Sprintf("%s team %q (%d recipient%s)", verb, console.Safe(team.Name), len(recipients), ui.PluralS(len(recipients))))
 			case len(recipientEmails) > 0:
 				recipients = recipientEmails
 			default:
@@ -191,7 +199,7 @@ your account. Recipients open the file with "secret decrypt --local".`,
 				}
 				account = info
 				recipients, recipientsFrom = []string{info.Email}, "yourself"
-				ui.Subject("secret", fmt.Sprintf("%s yourself (%s)", verb, info.Email))
+				ui.Subject("secret", fmt.Sprintf("%s yourself (%s)", verb, console.Safe(info.Email)))
 			}
 
 			// Normalize list flags: support both repeating (--ip a --ip b) and
@@ -245,21 +253,7 @@ your account. Recipients open the file with "secret decrypt --local".`,
 
 			// Determine name if not provided
 			if opts.Name == "" {
-				switch {
-				case len(inputFiles) > 0:
-					resolved := inputFiles[0]
-					if abs, err := filepath.Abs(resolved); err == nil {
-						resolved = filepath.Base(abs)
-					}
-					opts.Name = resolved
-					if len(inputFiles) > 1 {
-						opts.Name = fmt.Sprintf("%s (%d files)", resolved, len(inputFiles))
-					}
-				case len(stdinData) > 0:
-					opts.Name = defaultName("message", time.Now())
-				default:
-					opts.Name = defaultName("secret", time.Now())
-				}
+				opts.Name = sendName(inputFiles, forceArchive, len(stdinData) > 0, time.Now())
 			}
 
 			// A local file is named after the input unless -o says where.
@@ -417,7 +411,7 @@ your account. Recipients open the file with "secret decrypt --local".`,
 
 	f.StringArrayVarP(&inputFiles, "file", "f", nil, "File or directory `path` to encrypt, repeatable (or give them as arguments)")
 	f.VarP(flags.NewKVPairs(&dataPairs), "data", "d", "A KEY=VALUE pair to encrypt, repeatable")
-	f.VarP(flags.NewName(&name), "name", "n", "Secret `name` (default: the first file's name, or a unique one made from the time)")
+	f.VarP(flags.NewName(&name), "name", "n", "Secret `name` (default: the first file's name; with --archive, or without files, a unique one made from the time)")
 	f.BoolVar(&skipHidden, "skip-hidden", false, "Skip hidden files and directories (dotfiles)")
 	f.BoolVarP(&forceArchive, "archive", "a", false, "Bundle files into one compressed archive, so the server sees no file names or sizes (alias: --hide-metadata)")
 	f.BoolVar(&snapshot, "snapshot", false, "Send each file as it was when the send started: a log that grows meanwhile goes out up to that size instead of stopping the send. For files that are only appended to: one that shrinks, is replaced or is removed still stops it")
@@ -446,6 +440,76 @@ your account. Recipients open the file with "secret decrypt --local".`,
 		cmd.MarkFlagsMutuallyExclusive("local", sendOnly)
 	}
 	return cmd
+}
+
+// maxSmallPayload bounds a message or key-value payload, as the SDK encodes
+// it. It is the SDK's limit on decrypting one (maxSmallPlaintext in
+// secrets/decrypt.go, 16 MiB, which the SDK does not export): the SDK sends
+// a larger one, and then nobody can open it.
+const maxSmallPayload = 16 << 20
+
+// The bytes the SDK's encoding adds to a message or to key-value data: at
+// most payloadEnvelope around the whole payload, and pairOverhead around
+// each key-value pair. Both are rounded up.
+const (
+	payloadEnvelope = 64
+	pairOverhead    = 32
+)
+
+// errTooLarge is a message or key-value data over maxSmallPayload, named
+// by what.
+func errTooLarge(what string) error {
+	return errs.WithDetail(fmt.Errorf("%s is over %s, the most a recipient can decrypt", what, ui.FormatBytes(maxSmallPayload)),
+		"Send it as a file instead: save it to a file and give its path, as in\n  secret encrypt message.txt")
+}
+
+// readMessage reads the text to send from r, and refuses more than a
+// message can hold (maxSmallPayload). It reads one byte past the limit and
+// no more, so input of any size cannot exhaust memory.
+func readMessage(r io.Reader) ([]byte, error) {
+	const limit = maxSmallPayload - payloadEnvelope
+	data, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return nil, fmt.Errorf("could not read stdin: %w", err)
+	}
+	if len(data) > limit {
+		return nil, errTooLarge("the text on stdin")
+	}
+	return data, nil
+}
+
+// checkDataSize refuses --data pairs that together are more than key-value
+// data can hold (maxSmallPayload).
+func checkDataSize(pairs []string) error {
+	size := payloadEnvelope
+	for _, kv := range pairs {
+		size += len(kv) + pairOverhead
+		if size > maxSmallPayload {
+			return errTooLarge("the --data")
+		}
+	}
+	return nil
+}
+
+// sendName names a send that has no -n: the first input's file name, with
+// the count when there are more. With --archive the server is to see no
+// file names, and it sees the secret's name, so the name is a generic one,
+// as it is without files: a message from stdin (message) or key-value data.
+func sendName(inputs []string, archive, message bool, now time.Time) string {
+	switch {
+	case len(inputs) > 0 && !archive:
+		resolved := inputs[0]
+		if abs, err := filepath.Abs(resolved); err == nil {
+			resolved = filepath.Base(abs)
+		}
+		if len(inputs) > 1 {
+			return fmt.Sprintf("%s (%d files)", resolved, len(inputs))
+		}
+		return resolved
+	case message:
+		return defaultName("message", now)
+	}
+	return defaultName("secret", now)
 }
 
 // defaultName names a send that has no -n and no file to be named after:

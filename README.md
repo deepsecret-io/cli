@@ -6,6 +6,8 @@ You need a [DeepSecret account](https://app.deepsecret.io). Every plan starts wi
 
 ## Install
 
+The installers verify the release signature with [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) v3, so install cosign first (`brew install cosign` on macOS; on Linux and Windows, the binary from [cosign's releases](https://github.com/sigstore/cosign/releases/latest)). Without cosign they stop before downloading anything and say what to do.
+
 **macOS and Linux:**
 
 ```bash
@@ -18,10 +20,21 @@ curl -fsSL https://github.com/deepsecret-io/cli/releases/latest/download/install
 irm https://github.com/deepsecret-io/cli/releases/latest/download/install.ps1 | iex
 ```
 
-Both pick the right build for your computer, check that it downloaded intact against the release's checksums, and install `secret`: in `/usr/local/bin` on macOS and Linux (asking for your password only if that folder needs it), and in `%LOCALAPPDATA%\Programs\DeepSecret` on Windows, added to your `PATH`, with no administrator rights needed. Open a new terminal, then check it worked:
+Both pick the right build for your computer, check that this repository's release workflow signed the release's checksums, check the download against them, and install `secret`: in `/usr/local/bin` on macOS and Linux (asking for your password only if that folder needs it), and in `%LOCALAPPDATA%\Programs\DeepSecret` on Windows, added to your `PATH`, with no administrator rights needed. Open a new terminal, then check it worked:
 
 ```bash
 secret --version
+```
+
+**Without cosign.** You can accept checksum-only verification instead. The checksum file comes from the same place as the binary, so it catches a damaged download but cannot prove who built it:
+
+```bash
+curl -fsSL https://github.com/deepsecret-io/cli/releases/latest/download/install.sh | ALLOW_CHECKSUM_ONLY=1 bash
+```
+
+```powershell
+$env:ALLOW_CHECKSUM_ONLY = '1'
+irm https://github.com/deepsecret-io/cli/releases/latest/download/install.ps1 | iex
 ```
 
 <details>
@@ -29,16 +42,16 @@ secret --version
 
 - **A specific version:** `curl -fsSL https://github.com/deepsecret-io/cli/releases/latest/download/install.sh | bash -s -- v0.1.0`, or on Windows set `$env:DEEPSECRET_VERSION = 'v0.1.0'` before the command.
 - **Another folder:** put `INSTALL_DIR=~/.local/bin` before `bash`, or set `$env:INSTALL_DIR` on Windows.
-- **Only with the signature verified:** see [Check the release signature](#check-the-release-signature).
+- **Without cosign:** see [Check the release signature](#check-the-release-signature).
 - **From source:** see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 </details>
 
 ### Check the release signature
 
-The checksums catch a damaged download. When [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) v3 is installed, both installers also check that this repository's release workflow signed the checksums, and stop if it did not. Without cosign they install on the checksum alone and warn that the signature was not verified.
+The checksums come from the same release as the binary, so on their own they catch a damaged download, not a replaced release: whoever can replace the binary can replace the checksums with it. So both installers check, with [cosign](https://docs.sigstore.dev/cosign/system_config/installation/) v3, that this repository's release workflow signed the checksums for that version, and stop if it did not. Without cosign they stop before downloading anything.
 
-To install only when the signature is verified, set `REQUIRE_SIGNATURE=1`: the installer then stops when cosign is missing. Put it before `bash` (`curl -fsSL ... | REQUIRE_SIGNATURE=1 bash`), or on Windows run `$env:REQUIRE_SIGNATURE = '1'` before the command. To check a download by hand, see [Verify a download](RELEASING.md#verify-a-download).
+To install without cosign, on the checksum alone, set `ALLOW_CHECKSUM_ONLY=1`: put it before `bash` (`curl -fsSL ... | ALLOW_CHECKSUM_ONLY=1 bash`), or on Windows run `$env:ALLOW_CHECKSUM_ONLY = '1'` before the command. The installer then warns that the signature was not verified. When cosign is installed the signature is always checked. To check a download by hand, see [Verify a download](RELEASING.md#verify-a-download).
 
 ## Set up, once per computer
 
@@ -52,12 +65,14 @@ secret login
 
 | Protection | Command | To decrypt, you |
 |---|---|---|
-| None: the keys are stored unencrypted, readable only by your user account | `secret identity generate` | do nothing |
-| A password | `secret identity generate --password` | type the password |
+| A password (the default): you are asked for a new one, twice | `secret identity generate` | type the password |
 | A security key such as a YubiKey, plus a backup security key | `secret identity generate --security-key --backup` | touch either key |
 | A security key, plus a printed recovery code | `secret identity generate --security-key --recovery-code` | touch the key, or type the code if it is lost |
 | One security key and nothing else | `secret identity generate --security-key --single` | touch the key. If you lose it, the keys are gone for good |
 | Your AWS KMS key, for servers, containers, CI and AI agents (see [Servers, containers, CI and AI agents](#servers-containers-ci-and-ai-agents)) | `secret identity generate --kms-arn <KMS key ARN> --single` | nothing: the machine's AWS identity unlocks them |
+| None: the keys are stored unencrypted, readable only by your user account | `secret identity generate --no-password` | do nothing. Anyone who can read the key file can open every secret sent to you |
+
+The password is typed on the terminal, never taken from a flag, the environment or a pipe. Where there is no terminal (a script, CI), `secret identity generate` stops instead of storing the keys unencrypted: choose `--kms-arn` or `--no-password` there. An organization that requires protected keys refuses a key pair made with `--no-password`.
 
 Security keys work on macOS and on Linux (the installer picks the build with security key support when your Linux has it), not on Windows. You can add one to existing keys later with `secret identity security-key`.
 
@@ -101,7 +116,9 @@ secret encrypt key.pem -t alice@example.com --ip 10.0.0.0/8      # opens from th
 secret encrypt . -t alice@example.com --archive                  # hides file names and sizes from the server
 ```
 
-Sending again under the same name adds a new revision of that secret. List everyone who should keep access, or add `--revoke-missing` to take it from anyone you leave out. Text or key-value pairs sent without a name get a unique one, like `message-20261114-101500-3fa9c1`, so each send is a secret of its own.
+Sending again under the same name adds a new revision of that secret. List everyone who should keep access, or add `--revoke-missing` to take it from anyone you leave out. Text or key-value pairs sent without a name get a unique one, like `message-20261114-101500-3fa9c1`, so each send is a secret of its own. So does a send with `--archive`: the server sees a secret's name, so it is not taken from the first file's name unless you give one with `-n`.
+
+Text on stdin or key-value pairs can be at most 16 MiB. Send anything larger as a file.
 
 ## Open a secret
 
@@ -186,7 +203,7 @@ DS_API_KEY=... secret list
 secret list --api-key-file ./key.txt
 ```
 
-Avoid `--api-key` on the command line: other users of the computer can see it in the process list.
+The key file must be readable only by you (`chmod 600 key.txt`): the CLI refuses one that other accounts on the computer can open. Avoid `--api-key` on the command line: other users of the computer can see it in the process list.
 
 ### Servers, containers, CI and AI agents
 
@@ -218,7 +235,7 @@ In a container (an ECS task, an EKS pod), the AWS role comes from the platform (
 
 ## Settings
 
-The CLI keeps your login, keys and settings in `~/.deepsecret` (`%USERPROFILE%\.deepsecret` on Windows), readable only by you. It refuses to use a file there that other accounts on the computer can open, and tells you the command that fixes it.
+The CLI keeps your login, keys and settings in `~/.deepsecret` (`%USERPROFILE%\.deepsecret` on Windows), readable only by you. It refuses to use that folder, or a file there, when other accounts on the computer can open it, and tells you the command that fixes it.
 
 | Variable | What it does |
 |---|---|

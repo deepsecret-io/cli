@@ -7,7 +7,6 @@
 package command
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -31,6 +30,7 @@ import (
 	"github.com/deepsecret-io/cli/internal/flags"
 	"github.com/deepsecret-io/cli/internal/identity"
 	"github.com/deepsecret-io/cli/internal/logging"
+	"github.com/deepsecret-io/cli/internal/safefile"
 	"github.com/deepsecret-io/cli/internal/ui"
 )
 
@@ -187,6 +187,9 @@ func newRootCmd(version string) *cobra.Command {
 				if err := config.CheckHome(); err != nil {
 					return err
 				}
+				if err := config.CheckDir(); err != nil {
+					return err
+				}
 			}
 			logging.Log.Info("command started", "command", cmd.CommandPath(), "version", version, "go", runtime.Version(), "platform", runtime.GOOS+"/"+runtime.GOARCH)
 			return nil
@@ -246,20 +249,13 @@ const maxAPIKeyLen = 4096
 // is provided so the caller can fall back to --api-key / DS_API_KEY.
 func resolveAPIKey() (string, error) {
 	if apiKeyFile != "" {
-		f, err := os.Open(apiKeyFile) // #nosec G304 -- the user's own --api-key-file; the CLI runs with their permissions.
-		if err != nil {
+		b, err := readAPIKeyFile(apiKeyFile)
+		switch {
+		case errors.Is(err, safefile.ErrNotPrivate):
+			return "", fmt.Errorf("--api-key-file: %w", err)
+		case err != nil:
 			return "", fmt.Errorf("could not read --api-key-file %s: %w", apiKeyFile, errs.PathCause(err))
-		}
-		// Opened to read only: once the key is read, a close error loses
-		// nothing.
-		defer func() { _ = f.Close() }()
-		// A key is short; read a bounded amount, so a device or a huge
-		// file cannot exhaust memory.
-		b, err := io.ReadAll(io.LimitReader(f, maxAPIKeyLen+1))
-		if err != nil {
-			return "", fmt.Errorf("could not read --api-key-file %s: %w", apiKeyFile, errs.PathCause(err))
-		}
-		if len(b) > maxAPIKeyLen {
+		case len(b) > maxAPIKeyLen:
 			return "", fmt.Errorf("--api-key-file is over %d bytes; it should hold only the key", maxAPIKeyLen)
 		}
 		key := strings.TrimSpace(string(b))
@@ -269,13 +265,12 @@ func resolveAPIKey() (string, error) {
 		return key, nil
 	}
 	if apiKeyStdin {
-		r := bufio.NewReader(io.LimitReader(os.Stdin, maxAPIKeyLen+1))
-		line, err := r.ReadString('\n')
-		if err != nil && line == "" {
-			return "", fmt.Errorf("could not read the API key from stdin: %w", err)
-		}
-		if len(line) > maxAPIKeyLen {
+		line, err := readLine(os.Stdin, maxAPIKeyLen)
+		if errors.Is(err, errLineTooLong) {
 			return "", fmt.Errorf("--api-key-stdin read over %d bytes without a line end; send only the key", maxAPIKeyLen)
+		}
+		if err != nil {
+			return "", fmt.Errorf("could not read the API key from stdin: %w", err)
 		}
 		key := strings.TrimSpace(line)
 		if key == "" {
@@ -284,4 +279,62 @@ func resolveAPIKey() (string, error) {
 		return key, nil
 	}
 	return "", nil
+}
+
+// errLineTooLong is a line readLine gave up on: longer than its bound.
+var errLineTooLong = errors.New("the line is too long")
+
+// readLine reads r up to its first newline, or to its end, and returns the
+// line without the newline. It reads one byte at a time, so nothing after
+// the newline is taken from r: what follows the key on stdin, such as the
+// text to encrypt, is still there for the command. A line of more than limit
+// bytes is refused (errLineTooLong).
+func readLine(r io.Reader, limit int) (string, error) {
+	var line []byte
+	b := make([]byte, 1)
+	for {
+		n, err := r.Read(b)
+		if n == 1 {
+			if b[0] == '\n' {
+				return string(line), nil
+			}
+			if len(line) == limit {
+				return "", errLineTooLong
+			}
+			line = append(line, b[0])
+		}
+		if err == io.EOF && len(line) > 0 {
+			return string(line), nil
+		}
+		if err != nil {
+			return "", err
+		}
+	}
+}
+
+// readAPIKeyFile reads the --api-key-file at path: at most one byte over
+// maxAPIKeyLen, so a device or a huge file cannot exhaust memory. A file
+// another account owns or may open is refused (safefile.ErrNotPrivate), as
+// the token and config files are: the key in it is no longer private, and
+// the error carries the command that fixes it. Anything that is not a
+// regular file, such as the pipe of a shell's <(command), keeps nothing on
+// disk for others to open, and is read as it is.
+func readAPIKeyFile(path string) ([]byte, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode().IsRegular() && info.Size() <= maxAPIKeyLen {
+		return safefile.ReadPrivate(path)
+	}
+	// A regular file this long is refused for its length by the caller,
+	// once one byte over the bound is read.
+	f, err := os.Open(path) // #nosec G304 -- the user's own --api-key-file; the CLI runs with their permissions.
+	if err != nil {
+		return nil, err
+	}
+	// Opened to read only: once the key is read, a close error loses
+	// nothing.
+	defer func() { _ = f.Close() }()
+	return io.ReadAll(io.LimitReader(f, maxAPIKeyLen+1))
 }

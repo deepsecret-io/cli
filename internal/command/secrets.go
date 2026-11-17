@@ -4,6 +4,8 @@
 package command
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +16,9 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+	"unicode"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/deepsecret-io/deepsecret-go/apierror"
 	"github.com/deepsecret-io/deepsecret-go/secrets"
@@ -31,27 +36,136 @@ import (
 
 // outputFormatted prints data as JSON or YAML to stdout. Returns true if it handled output.
 func outputFormatted(format string, data any) (bool, error) {
+	out, err := formatStructured(format, data, console.StdoutIsTerminal)
+	if out == nil || err != nil {
+		return false, err
+	}
+	if _, err := os.Stdout.Write(out); err != nil {
+		return true, fmt.Errorf("could not write to stdout: %w", err)
+	}
+	return true, nil
+}
+
+// formatStructured is data as JSON or YAML, and nil for any other format.
+// Redirected to a file or a pipe it is what the encoder wrote, byte for
+// byte. On a terminal, the characters in it that would act on the terminal
+// or reorder what is read (actsOnTerminal) are written as \u escapes, which
+// JSON and YAML read back as the same characters: the values come from the
+// server and from senders, and neither encoder escapes them all.
+func formatStructured(format string, data any, terminal bool) ([]byte, error) {
 	switch format {
 	case "json":
 		out, err := json.MarshalIndent(data, "", "  ")
 		if err != nil {
-			return false, err
+			return nil, err
 		}
-		fmt.Println(string(out))
-		return true, nil
+		out = append(out, '\n')
+		// JSON holds such a character only inside a string, where an
+		// escape stands for it.
+		if terminal && bytes.ContainsFunc(out, actsOnTerminal) {
+			out = escapeRunes(out, func(r rune) string {
+				if r > 0xFFFF {
+					hi, lo := utf16.EncodeRune(r)
+					return fmt.Sprintf("\\u%04x\\u%04x", hi, lo)
+				}
+				return fmt.Sprintf("\\u%04x", r)
+			})
+		}
+		return out, nil
 	case "yaml":
 		out, err := yaml.Marshal(data)
 		if err != nil {
-			return false, err
+			return nil, err
 		}
-		fmt.Print(string(out))
-		return true, nil
+		if !terminal || !bytes.ContainsFunc(out, actsOnTerminal) {
+			return out, nil
+		}
+		// YAML reads an escape only in a double-quoted scalar, so every
+		// scalar that holds such a character is written as one first.
+		var doc yaml.Node
+		if err := doc.Encode(data); err != nil {
+			return nil, err
+		}
+		quoteUnsafeScalars(&doc)
+		if out, err = yaml.Marshal(&doc); err != nil {
+			return nil, err
+		}
+		return escapeRunes(out, func(r rune) string {
+			if r > 0xFFFF {
+				return fmt.Sprintf("\\U%08x", r)
+			}
+			return fmt.Sprintf("\\u%04x", r)
+		}), nil
 	default:
-		return false, nil
+		return nil, nil
+	}
+}
+
+// actsOnTerminal reports a character that JSON or YAML output can hold raw
+// and that a terminal acts on or that reorders what is read: DEL, a C1
+// control such as U+009B, which starts a terminal command as ESC [ does,
+// and an invisible formatting mark such as a right-to-left override. It is
+// what console.Safe replaces, less the controls below U+0080 that both
+// encoders escape themselves or use to lay the output out.
+func actsOnTerminal(r rune) bool {
+	return (r >= 0x7f && unicode.IsControl(r)) || (unicode.Is(unicode.Cf, r) && r != '\u200d')
+}
+
+// escapeRunes is b with every actsOnTerminal character replaced by what
+// escape gives for it.
+func escapeRunes(b []byte, escape func(rune) string) []byte {
+	var out bytes.Buffer
+	for len(b) > 0 {
+		r, n := utf8.DecodeRune(b)
+		if actsOnTerminal(r) {
+			out.WriteString(escape(r))
+		} else {
+			out.Write(b[:n])
+		}
+		b = b[n:]
+	}
+	return out.Bytes()
+}
+
+// quoteUnsafeScalars makes every scalar under n that holds an
+// actsOnTerminal character a double-quoted one, map keys included.
+func quoteUnsafeScalars(n *yaml.Node) {
+	if n.Kind == yaml.ScalarNode && strings.ContainsFunc(n.Value, actsOnTerminal) {
+		n.Style = yaml.DoubleQuotedStyle
+	}
+	for _, c := range n.Content {
+		quoteUnsafeScalars(c)
 	}
 }
 
 // --- list ---
+
+// The server gives a list a page at a time, at most listPageSize secrets a
+// page. listAll asks for pages until it has them all, and stops at
+// listMaxSecrets so a list of any length cannot exhaust memory.
+const (
+	listPageSize   = 100
+	listMaxSecrets = 10000
+)
+
+// listAll returns every secret of a list, sent or received (fetch), with
+// the email filter given, by asking for its pages in turn. It stops when
+// the server's total is reached or a page comes back empty, so it ends
+// whatever page size the server applies.
+func listAll(ctx context.Context, fetch func(context.Context, ...secrets.ListOptions) ([]secrets.Info, int, error), email string) ([]secrets.Info, error) {
+	var all []secrets.Info
+	for len(all) < listMaxSecrets {
+		page, total, err := fetch(ctx, secrets.ListOptions{Limit: listPageSize, Offset: len(all), Email: email})
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, page...)
+		if len(page) == 0 || len(all) >= total {
+			break
+		}
+	}
+	return all, nil
+}
 
 func newListCmd() *cobra.Command {
 	var (
@@ -111,21 +225,20 @@ Examples:
 
 			// The inbox merges two lists and Sent leaves out the secrets
 			// sent only to oneself, so server-side pagination would over-
-			// or under-count: fetch large and slice locally.
-			const fetchLimit = 10000
+			// or under-count: fetch every page and slice locally.
 			var secretsList []secrets.Info
 			if sent {
-				all, _, err := c.Secrets.ListSent(cmd.Context(), secrets.ListOptions{Limit: fetchLimit, Email: toEmail})
+				all, err := listAll(cmd.Context(), c.Secrets.ListSent, toEmail)
 				if err != nil {
 					return fmt.Errorf("could not list your sent secrets: %w", errs.APICause(err))
 				}
 				secretsList = sentSecrets(all)
 			} else {
-				received, _, err := c.Secrets.ListReceived(cmd.Context(), secrets.ListOptions{Limit: fetchLimit, Email: fromEmail})
+				received, err := listAll(cmd.Context(), c.Secrets.ListReceived, fromEmail)
 				if err != nil {
 					return fmt.Errorf("could not list your inbox: %w", errs.APICause(err))
 				}
-				own, _, err := c.Secrets.ListSent(cmd.Context(), secrets.ListOptions{Limit: fetchLimit})
+				own, err := listAll(cmd.Context(), c.Secrets.ListSent, "")
 				if err != nil {
 					return fmt.Errorf("could not list your inbox: %w", errs.APICause(err))
 				}

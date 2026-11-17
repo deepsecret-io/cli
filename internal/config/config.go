@@ -10,7 +10,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
+	"runtime"
 
 	"github.com/deepsecret-io/cli/internal/errs"
 	"github.com/deepsecret-io/cli/internal/safefile"
@@ -67,6 +69,50 @@ func KeysDir() string {
 	return filepath.Join(Dir(), "keys")
 }
 
+// CheckDir refuses to go on when ~/.deepsecret is there and is not private
+// to the user (safefile.ErrNotPrivate): another account that may write in
+// it could replace the keys this device trusts, the key pairs or the login,
+// and one that may read it could list them. The root command checks it
+// before a command runs, after CheckHome. A folder that is not there yet is
+// fine: what makes it makes it private. A link at ~/.deepsecret is the
+// user's own, in their home directory, so the folder it leads to is the one
+// checked.
+func CheckDir() error {
+	dir, err := filepath.EvalSymlinks(Dir())
+	if err == nil {
+		err = safefile.CheckPrivateDir(dir)
+	}
+	switch {
+	case err == nil || errors.Is(err, os.ErrNotExist):
+		return nil
+	case errors.Is(err, safefile.ErrNotPrivate):
+		return errs.WithDetail(err, errs.JoinDetail("The CLI keeps your login, your keys and the keys you trust in it.", err)+"\n\n"+privateDirFix(dir))
+	}
+	return fmt.Errorf("could not check %s: %w", Dir(), errs.PathCause(err))
+}
+
+// privateDirFix says how to make the folder dir private to the user.
+func privateDirFix(dir string) string {
+	if runtime.GOOS != "windows" {
+		return fmt.Sprintf("To keep it to your account, run:\n  chmod 700 %q", dir)
+	}
+	me := "%USERNAME%"
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		me = u.Username
+	}
+	return fmt.Sprintf("To keep it to your account, run:\n  icacls \"%s\" /inheritance:r /grant:r \"%s:(OI)(CI)F\"\nand take away any other account it still lists with /remove:g.", dir, me)
+}
+
+// makeDir creates ~/.deepsecret, private to the user, when it is missing,
+// and refuses one already there that is not (CheckDir): MkdirPrivate leaves
+// such a folder as it is.
+func makeDir() error {
+	if err := safefile.MkdirPrivate(Dir()); err != nil {
+		return err
+	}
+	return CheckDir()
+}
+
 // Sensitive fields (api_key, bearer token) are stored as plaintext in files
 // private to the user (safefile): mode 0600 inside a 0700 directory on
 // Unix, an owner-only ACL on Windows. Operators who need stronger
@@ -90,7 +136,7 @@ func Load() (*Config, error) {
 
 // Save writes the config file, private to the user.
 func Save(c *Config) error {
-	if err := safefile.MkdirPrivate(Dir()); err != nil {
+	if err := makeDir(); err != nil {
 		return err
 	}
 	// #nosec G117 -- the API key is what the config file holds; writePrivateFile keeps it private.

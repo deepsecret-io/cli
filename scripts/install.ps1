@@ -12,11 +12,12 @@
 # folder to your user PATH. It needs no administrator rights.
 #
 # SHA256SUMS comes from the same release, so on its own that check catches
-# a damaged download, not a tampered release. When cosign is installed,
-# this also checks that this repository's Release workflow signed
-# SHA256SUMS for the version, and stops if it did not. Without cosign it
-# installs on the checksum alone and says that the signature was not
-# verified; set $env:REQUIRE_SIGNATURE = '1' to stop instead. RELEASING.md
+# a damaged download, not a tampered release. So this also checks, with
+# cosign, that this repository's Release workflow signed SHA256SUMS for
+# the version, and stops if it did not. Without cosign it stops before it
+# downloads anything and says how to install it; set
+# $env:ALLOW_CHECKSUM_ONLY = '1' to install on the checksum alone, with a
+# warning that the signature was not verified. RELEASING.md
 # shows how to check the build provenance as well. PowerShell downloads
 # carry no mark of the web, so SmartScreen does not stop the unsigned
 # secret.exe.
@@ -61,16 +62,29 @@
             default { throw "This Windows architecture is not supported: $osArch" }
         }
 
-        # cosign checks the signature of SHA256SUMS. Without it only the
-        # checksum is checked, unless REQUIRE_SIGNATURE=1 asks for the
-        # signature: then nothing is downloaded. Only a program on the
-        # PATH counts, not an alias or a function of this session.
+        # cosign checks the signature of SHA256SUMS. Without it nothing
+        # is downloaded, unless ALLOW_CHECKSUM_ONLY=1 accepts the checksum
+        # alone: whoever can replace the archive can replace SHA256SUMS
+        # with it. Only a program on the PATH counts, not an alias or a
+        # function of this session, and only the value 1 accepts the
+        # checksum alone, so nothing else is taken for a yes.
         $cosign = Get-Command -Name cosign -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-        # Any value of REQUIRE_SIGNATURE but empty, 0, false or no asks for
-        # the signature, so "true" or "yes" is never taken for off.
-        $requireSignature = [bool]$env:REQUIRE_SIGNATURE -and ($env:REQUIRE_SIGNATURE -notin @('0', 'false', 'no'))
-        if (-not $cosign -and $requireSignature) {
-            throw 'REQUIRE_SIGNATURE=1 needs cosign to verify the release signature, and cosign is not installed. Install it (https://docs.sigstore.dev/cosign/system_config/installation/) and run this again.'
+        if (-not $cosign -and $env:ALLOW_CHECKSUM_ONLY -ne '1') {
+            throw (@(
+                'cosign is needed to verify the release signature, and it is not installed. Nothing was downloaded.'
+                ''
+                '  Why: the checksum file (SHA256SUMS) comes from the same place as the binary, so it'
+                '  cannot prove who built it. Its signature can, and cosign checks the signature.'
+                ''
+                '  Install cosign v3, then run this again:'
+                '    Windows:  save cosign-windows-amd64.exe from https://github.com/sigstore/cosign/releases/latest'
+                '              as cosign.exe in a folder on your PATH'
+                '    other:    https://docs.sigstore.dev/cosign/system_config/installation/'
+                ''
+                '  Or accept checksum-only verification, with no proof of who built the binary:'
+                "    `$env:ALLOW_CHECKSUM_ONLY = '1'"
+                '    irm https://github.com/deepsecret-io/cli/releases/latest/download/install.ps1 | iex'
+            ) -join [Environment]::NewLine)
         }
 
         $name = "secret_windows_$arch"
@@ -125,7 +139,7 @@
         $got = (Get-FileHash -Path $zip -Algorithm SHA256).Hash
         if ($got -ne $want) { throw "Checksum mismatch for $name.zip: expected $want, got $got. Do not use this download." }
         if (-not $cosign) {
-            Write-Warning 'Only the checksum was verified. The release signature was NOT verified, because cosign is not installed. To verify it, see https://github.com/deepsecret-io/cli#check-the-release-signature'
+            Write-Warning 'Only the checksum was verified. The release signature was NOT verified, because cosign is not installed and ALLOW_CHECKSUM_ONLY=1 is set. To verify it, see https://github.com/deepsecret-io/cli#check-the-release-signature'
         }
 
         Expand-Archive -Path $zip -DestinationPath $tmp -Force

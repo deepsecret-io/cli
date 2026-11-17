@@ -54,8 +54,23 @@ func newIdentityCmd() *cobra.Command {
 	return cmd
 }
 
+// The terminal a new key password is typed on: keyPasswordTerminal says
+// whether there is one, and newKeyPassword reads and confirms the password
+// there, without echo. Tests replace them.
+var (
+	keyPasswordTerminal = func() bool {
+		t, err := prompt.OpenTerminal()
+		if err != nil {
+			return false
+		}
+		_ = t.Close()
+		return true
+	}
+	newKeyPassword = prompt.PasswordConfirm
+)
+
 func newIdentityGenerateCmd() *cobra.Command {
-	var usePassword bool
+	var usePassword, noPassword bool
 	var local bool
 	var useSecurityKey, backup, recoveryCode, single bool
 	var label string
@@ -67,11 +82,22 @@ func newIdentityGenerateCmd() *cobra.Command {
 		Short:   "Generate a new key pair and make it your primary key (alias: gen)",
 		Long: "Generate a new key pair on this device, register its public keys and make it your\n" +
 			"primary key, the one people send to. With --local it stays on this device only;\n" +
-			"register it later with: secret identity sync",
+			"register it later with: secret identity sync\n\n" +
+			"The private keys are protected by a password, asked for twice on the terminal, unless\n" +
+			"--security-key or --kms-arn protects them instead. The password is never read from a\n" +
+			"flag, the environment or a pipe: where there is no terminal, choose --kms-arn, or\n" +
+			"--no-password, which stores the private keys in clear, so that anyone who can read the\n" +
+			"key file can open every secret sent to this identity.",
+		Example: `  secret identity generate                                    # asks for a new password
+  secret identity generate --security-key --recovery-code     # a security key, and a printed code if it is lost
+  secret identity generate --kms-arn <KMS key ARN> --single   # AWS KMS, for automation
+  secret identity generate --no-password                      # private keys stored in clear`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			useKMS := len(kmsARNs) > 0
 			switch {
+			case noPassword && (usePassword || useSecurityKey || useKMS):
+				return errors.New("--no-password stores the private keys in clear: it does not go with --password, --security-key or --kms-arn")
 			case useKMS && useSecurityKey:
 				return errors.New("--kms-arn and --security-key do not go together: a key file holds KMS keys or security keys, never both")
 			case useKMS && usePassword:
@@ -105,6 +131,20 @@ func newIdentityGenerateCmd() *cobra.Command {
 					}
 				}
 			}
+			// A key pair is protected unless --no-password says otherwise:
+			// with no other choice it gets a password, typed on the terminal
+			// and nowhere else. With no terminal nothing is asked, generated
+			// or written.
+			if !useSecurityKey && !useKMS && !noPassword {
+				if !keyPasswordTerminal() {
+					return errs.WithDetail(errors.New("the password of a new key pair is typed on a terminal"),
+						"Run the command in a terminal, or choose another way to store the private keys:\n"+
+							"  secret identity generate --kms-arn <KMS key ARN> --single   protected by AWS KMS, for automation\n"+
+							"  secret identity generate --security-key --recovery-code     protected by a security key (needs a terminal too)\n"+
+							"  secret identity generate --no-password                      stored in clear")
+				}
+				usePassword = true
+			}
 			// A new key pair is registered unless --local: check the account
 			// first, with a request, so a missing or revoked login fails
 			// before any PIN or touch and does not leave a key pair saved but
@@ -137,12 +177,12 @@ func newIdentityGenerateCmd() *cobra.Command {
 			var password string
 			if usePassword {
 				var err error
-				password, err = prompt.PasswordConfirm(cmd.Context(), "Set key password: ")
+				password, err = newKeyPassword(cmd.Context(), "Set key password: ")
 				if err != nil {
 					return err
 				}
 				if password == "" {
-					return fmt.Errorf("--password needs a password that is not empty")
+					return errors.New("a password is needed; use --no-password to store the key pair unprotected")
 				}
 			}
 
@@ -222,6 +262,9 @@ func newIdentityGenerateCmd() *cobra.Command {
 				}
 			}
 
+			if noPassword {
+				ui.Warning("The private keys are stored in clear: anyone who can read the key file can open every secret sent to this identity", "")
+			}
 			fmt.Fprintln(os.Stderr)
 			if number, err := identity.SafetyNumber(fp); err == nil {
 				ui.KeyValue("Safety number", number)
@@ -234,6 +277,9 @@ func newIdentityGenerateCmd() *cobra.Command {
 			ui.KeyValue("Stored at", console.Safe(filepath.Join(config.KeysDir(), fp+".json")))
 			if usePassword {
 				ui.KeyValue("Encrypted", "yes, with your password")
+			}
+			if noPassword {
+				ui.KeyValue("Encrypted", "no, stored in clear")
 			}
 			if useSecurityKey {
 				ui.KeyValue("Protected", "yes, by your security key")
@@ -259,7 +305,8 @@ func newIdentityGenerateCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolVarP(&usePassword, "password", "p", false, "Encrypt the private keys with a password")
+	cmd.Flags().BoolVarP(&usePassword, "password", "p", false, "Encrypt the private keys with a password (the default)")
+	cmd.Flags().BoolVar(&noPassword, "no-password", false, "Store the private keys in clear")
 	cmd.Flags().BoolVar(&local, "local", false, "Keep the key pair on this device only, without registering it (by default it is registered and becomes your primary key)")
 	cmd.Flags().BoolVar(&useSecurityKey, "security-key", false, "Protect the private keys with a security key such as a YubiKey, in place of a password")
 	cmd.Flags().StringArrayVar(&kmsARNs, "kms-arn", nil, "Protect the private keys with the AWS KMS key of this full `ARN` (arn:aws:kms:<region>:<account>:key/<id>), for automation: repeat for a second key, up to 4")
@@ -267,7 +314,7 @@ func newIdentityGenerateCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&backup, "backup", false, "With --security-key: also enroll a backup security key")
 	cmd.Flags().BoolVar(&recoveryCode, "recovery-code", false, "With --security-key or --kms-arn: also create a printed recovery code")
 	cmd.Flags().BoolVar(&single, "single", false, "With --security-key or --kms-arn: allow one key with no backup and no recovery code")
-	flags.SetGroup(cmd.Flags(), flags.GroupOptions, "password", "local", "security-key", "kms-arn", "label", "backup", "recovery-code", "single")
+	flags.SetGroup(cmd.Flags(), flags.GroupOptions, "password", "no-password", "local", "security-key", "kms-arn", "label", "backup", "recovery-code", "single")
 	return cmd
 }
 

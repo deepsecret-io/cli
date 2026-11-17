@@ -4,6 +4,7 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/deepsecret-io/cli/internal/errs"
+	"github.com/deepsecret-io/cli/internal/safefile"
 	"github.com/deepsecret-io/cli/internal/testutil"
 )
 
@@ -133,4 +135,70 @@ func TestCheckHome(t *testing.T) {
 		}
 	}()
 	Dir()
+}
+
+// ~/.deepsecret holds the login, the key pairs and the keys this device
+// trusts. One that other accounts may open is refused, with the command
+// that fixes it, also when saving into it: creating the folder leaves one
+// already there as it is. A missing folder is fine, and so is a link the
+// user put there to a private folder.
+func TestCheckDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file modes do not say who may open a folder on Windows")
+	}
+	home := t.TempDir()
+	testutil.SetHome(t, home)
+	if err := CheckDir(); err != nil {
+		t.Fatalf("no folder yet: %v", err)
+	}
+	if err := os.Mkdir(Dir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(Dir(), 0o700) })
+	if err := CheckDir(); err != nil {
+		t.Fatalf("a private folder: %v", err)
+	}
+	for _, mode := range []os.FileMode{0o770, 0o707, 0o755, 0o777} {
+		if err := os.Chmod(Dir(), mode); err != nil {
+			t.Fatal(err)
+		}
+		for what, err := range map[string]error{
+			"CheckDir":  CheckDir(),
+			"Save":      Save(&Config{APIKey: "ds_test_key"}),
+			"SaveToken": SaveToken("session-token", "alice@example.com", ""),
+		} {
+			if !errors.Is(err, safefile.ErrNotPrivate) {
+				t.Fatalf("%s, mode %o: %v, want ErrNotPrivate", what, mode, err)
+			}
+			if _, detail := errs.Describe(err); !strings.Contains(detail, "chmod 700 ") || !strings.Contains(detail, Dir()) {
+				t.Errorf("%s, mode %o: detail %q", what, mode, detail)
+			}
+		}
+	}
+	if entries, _ := os.ReadDir(Dir()); len(entries) != 0 {
+		t.Errorf("%d files were written into a folder open to others", len(entries))
+	}
+	if err := os.Chmod(Dir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(&Config{APIKey: "ds_test_key"}); err != nil {
+		t.Fatalf("Save into a private folder: %v", err)
+	}
+
+	// A link to a private folder is followed; one to a folder open to
+	// others is refused like the folder.
+	linked := t.TempDir()
+	testutil.SetHome(t, linked)
+	if err := os.Symlink(filepath.Join(home, ".deepsecret"), Dir()); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckDir(); err != nil {
+		t.Errorf("a link to a private folder: %v", err)
+	}
+	if err := os.Chmod(filepath.Join(home, ".deepsecret"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckDir(); !errors.Is(err, safefile.ErrNotPrivate) {
+		t.Errorf("a link to a folder open to others: %v, want ErrNotPrivate", err)
+	}
 }

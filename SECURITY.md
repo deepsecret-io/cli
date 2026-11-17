@@ -19,7 +19,7 @@ Anything that lets someone get at a secret, a key or a login through the CLI. Fo
 - **Trust in keys:** the CLI sends to, or accepts a secret from, a key the user did not accept, or does not show a refused key clearly.
 - **Untrusted text:** a secret name, file name or server message can inject terminal escape sequences or mislead the user about what they are opening.
 - **Traffic:** the CLI can be made to send credentials to another host or over plaintext.
-- **The installer and release process:** `scripts/install.sh` or a release archive can be tampered with unnoticed.
+- **The installer and release process:** `scripts/install.sh`, `scripts/install.ps1` or a release archive can be tampered with unnoticed, or an installer installs a release whose signature it did not verify without `ALLOW_CHECKSUM_ONLY=1` set.
 
 Flaws in the encryption, the protocol or key storage belong in [the SDK's repository](https://github.com/deepsecret-io/deepsecret-go). If you are not sure which of the two a problem belongs to, report it in either.
 

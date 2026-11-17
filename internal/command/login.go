@@ -67,7 +67,7 @@ func newLogoutCmd() *cobra.Command {
 			}
 			// Revoke server-side first so a copy of the token stops
 			// working, then remove it locally whatever the outcome.
-			revokeErr := login.Revoke(cmd.Context(), config.APIBaseURL, tf.Token)
+			revokeErr := revokeToken(cmd.Context(), config.APIBaseURL, tf.Token)
 			if err := config.RemoveToken(); err != nil {
 				return fmt.Errorf("could not remove the login token: %w", err)
 			}
@@ -76,10 +76,11 @@ func newLogoutCmd() *cobra.Command {
 					"Other accounts on this device may have read it. Sign in again with 'secret login': the new token file is private to you.")
 			}
 			if revokeErr != nil {
-				ui.Warning("The server could not revoke the login token",
-					fmt.Sprintf("%v\n\nIt was removed from this device, but a copy of it stays valid until it expires, within an hour.", errs.APICause(revokeErr)))
-				ui.Success("Logged out on this device.")
-				return nil
+				// The token is gone from this device, but the session is
+				// not ended: the command fails, so a script does not take
+				// it for revoked.
+				return errs.WithDetail(fmt.Errorf("the server could not revoke the login token: %w", errs.APICause(revokeErr)),
+					"The token was removed from this device, but a copy of it stays valid until it expires, within an hour.")
 			}
 			logging.Module(logging.Log, "auth").Info("logged out", "email", tf.Email)
 			ui.Success("Logged out: the session is revoked, and its token removed.")
@@ -87,6 +88,9 @@ func newLogoutCmd() *cobra.Command {
 		},
 	}
 }
+
+// revokeToken ends a login session on the server. A test replaces it.
+var revokeToken = login.Revoke
 
 // showAuthStatus prints the login session, the saved API key, and which
 // credential commands use: an API key given with a flag or DS_API_KEY,

@@ -29,7 +29,7 @@ func tokenPath() string {
 
 // SaveToken writes the login token, private to the user.
 func SaveToken(token, email, expiresAt string) error {
-	if err := safefile.MkdirPrivate(Dir()); err != nil {
+	if err := makeDir(); err != nil {
 		return err
 	}
 	tf := TokenFile{Token: token, Email: email, ExpiresAt: expiresAt}

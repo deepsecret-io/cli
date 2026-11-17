@@ -4,12 +4,16 @@
 package command
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/deepsecret-io/deepsecret-go/keys"
 	"github.com/deepsecret-io/deepsecret-go/secrets"
 
+	"github.com/deepsecret-io/cli/internal/auth"
+	"github.com/deepsecret-io/cli/internal/errs"
 	"github.com/deepsecret-io/cli/internal/testutil"
 )
 
@@ -69,5 +73,51 @@ func TestOwnKeyNotice(t *testing.T) {
 		if out := testutil.StderrOf(t, func() { printOwnKeyNotice(&r) }); out != "" {
 			t.Errorf("%s: %q, want nothing", name, out)
 		}
+	}
+}
+
+// An -o file that exists is refused before anything is downloaded, unless
+// --overwrite is given; a link there counts, as the write does not follow
+// one.
+func TestOutputFileIsCheckedBeforeTheDownload(t *testing.T) {
+	testutil.SetHome(t, t.TempDir())
+	t.Setenv("DS_API_KEY", "")
+	savedKey, savedOrigin := auth.FlagKey, auth.FlagKeyOrigin
+	t.Cleanup(func() { auth.FlagKey, auth.FlagKeyOrigin = savedKey, savedOrigin })
+	auth.FlagKey, auth.FlagKeyOrigin = "", ""
+
+	dir := t.TempDir()
+	existing := filepath.Join(dir, "out.txt")
+	if err := os.WriteFile(existing, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link.txt")
+	if err := os.Symlink(filepath.Join(dir, "nowhere"), link); err != nil {
+		t.Skipf("no symlinks here: %v", err)
+	}
+	for _, path := range []string{existing, link} {
+		err := checkOutputFree(path, false)
+		if err == nil || !strings.Contains(err.Error(), "already exists") {
+			t.Fatalf("%s: %v", filepath.Base(path), err)
+		}
+		if _, detail := errs.Describe(err); !strings.Contains(detail, "--overwrite") {
+			t.Errorf("detail %q", detail)
+		}
+		if err := checkOutputFree(path, true); err != nil {
+			t.Errorf("%s with --overwrite: %v", filepath.Base(path), err)
+		}
+	}
+	if err := checkOutputFree(filepath.Join(dir, "new.txt"), false); err != nil {
+		t.Errorf("a new file: %v", err)
+	}
+
+	// The command stops there: with no credential it would otherwise fail
+	// for that, before any request.
+	err := runRoot("decrypt", testID, "-o", existing)
+	if err == nil || !strings.Contains(err.Error(), existing+" already exists") {
+		t.Fatalf("decrypt -o an existing file: %v", err)
+	}
+	if got, _ := os.ReadFile(existing); string(got) != "keep" {
+		t.Errorf("the existing file now holds %q", got)
 	}
 }

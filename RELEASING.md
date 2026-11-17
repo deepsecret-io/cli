@@ -56,6 +56,8 @@ Windows ignores the 0600 and 0700 modes the CLI uses elsewhere, so there the CLI
 
 Each release also has `SHA256SUMS`, `SHA256SUMS.sigstore.json` (its signature), a `.spdx.json` SBOM per archive, the installers `install.sh` (macOS and Linux) and `install.ps1` (Windows), and `security-reports.tar.gz`.
 
+The installers do the first two checks below themselves, the signature before the checksum, and need cosign for it: without cosign they stop before downloading anything, unless `ALLOW_CHECKSUM_ONLY=1` accepts the checksum alone, which they then say was all they verified.
+
 ## Verify a download
 
 Download the archive with `SHA256SUMS` and `SHA256SUMS.sigstore.json` from the same release, then:

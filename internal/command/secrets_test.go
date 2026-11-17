@@ -4,14 +4,18 @@
 package command
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/deepsecret-io/deepsecret-go/secrets"
+	"gopkg.in/yaml.v3"
 
 	"github.com/deepsecret-io/cli/internal/testutil"
 	"github.com/deepsecret-io/cli/internal/ui"
@@ -205,5 +209,114 @@ func TestDisplayTime(t *testing.T) {
 		if got := displayTimeString(in); got != want {
 			t.Errorf("displayTimeString(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// --format json and yaml print values from the server and from senders.
+// On a terminal the characters that would act on it or reorder what is
+// read are written as escapes, and the output still decodes to the same
+// values. Redirected, it is what the encoder wrote, byte for byte.
+func TestStructuredOutputOnATerminal(t *testing.T) {
+	// U+009B starts a terminal command as ESC [ does, U+202E reverses the
+	// text after it, U+E0001 is a formatting mark outside the BMP, and
+	// U+200D joins an emoji and stays.
+	hostile := "db\u009b31m.env \u202egnp.exe\u007f \U000E0001 \u0085 👩\u200d💻"
+	data := map[string]any{
+		"secrets": []map[string]string{{"name": hostile, "sender": "alice@example.com"}, {"name": "plain\nlines", hostile: "key"}},
+		// YAML would write this one unquoted, where an escape is not read.
+		"team":  "gnp.\u202eexe",
+		"total": 2,
+	}
+	raw := func(out []byte) bool { return bytes.ContainsFunc(out, actsOnTerminal) }
+
+	plainJSON, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plainYAML, err := yaml.Marshal(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for format, plain := range map[string][]byte{"json": append(plainJSON, '\n'), "yaml": plainYAML} {
+		piped, err := formatStructured(format, data, false)
+		if err != nil || !bytes.Equal(piped, plain) {
+			t.Errorf("%s redirected is not what the encoder wrote: %v\n%s", format, err, piped)
+		}
+		shown, err := formatStructured(format, data, true)
+		if err != nil {
+			t.Fatalf("%s: %v", format, err)
+		}
+		if raw(shown) {
+			t.Errorf("%s on a terminal holds a raw control or formatting character:\n%q", format, shown)
+		}
+		if !bytes.Contains(shown, []byte("\u200d")) {
+			t.Errorf("%s on a terminal lost the emoji joiner:\n%q", format, shown)
+		}
+		var want, got any
+		decode := json.Unmarshal
+		if format == "yaml" {
+			decode = yaml.Unmarshal
+		}
+		if err := decode(plain, &want); err != nil {
+			t.Fatal(err)
+		}
+		if err := decode(shown, &got); err != nil {
+			t.Fatalf("%s on a terminal does not decode: %v\n%s", format, err, shown)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s on a terminal decodes to %v, want %v", format, got, want)
+		}
+
+		// Output with nothing to escape is the same on a terminal.
+		safe := map[string]any{"name": "db.env", "note": "two\nlines"}
+		piped, _ = formatStructured(format, safe, false)
+		shown, _ = formatStructured(format, safe, true)
+		if len(shown) == 0 || !bytes.Equal(piped, shown) {
+			t.Errorf("%s without such characters differs on a terminal:\n%s\n%s", format, piped, shown)
+		}
+	}
+	if !raw(plainJSON) {
+		t.Fatal("the JSON encoder escaped everything itself: the test data proves nothing")
+	}
+	if out, err := formatStructured("table", data, true); out != nil || err != nil {
+		t.Errorf("another format: %q, %v", out, err)
+	}
+}
+
+// The server gives a list a page at a time. listAll asks for every page,
+// whatever page size the server applies, and ends on the server's total or
+// on an empty page.
+func TestListAllFetchesEveryPage(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		have, serverPage   int
+		reportedTotal      int
+		wantLen, wantCalls int
+	}{
+		{"one short page", 7, 100, 7, 7, 1},
+		{"several pages", 250, 100, 250, 250, 3},
+		{"a server with smaller pages", 250, 50, 250, 250, 5},
+		{"a total larger than the list", 120, 100, 500, 120, 3},
+		{"nothing", 0, 100, 0, 0, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			fetch := func(_ context.Context, opts ...secrets.ListOptions) ([]secrets.Info, int, error) {
+				calls++
+				opt := opts[0]
+				if opt.Limit != listPageSize || opt.Email != "bob@example.com" {
+					t.Errorf("asked with %+v", opt)
+				}
+				n := min(tc.serverPage, opt.Limit, max(tc.have-opt.Offset, 0))
+				return make([]secrets.Info, n), tc.reportedTotal, nil
+			}
+			got, err := listAll(context.Background(), fetch, "bob@example.com")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != tc.wantLen || calls != tc.wantCalls {
+				t.Errorf("got %d secrets in %d calls, want %d in %d", len(got), calls, tc.wantLen, tc.wantCalls)
+			}
+		})
 	}
 }

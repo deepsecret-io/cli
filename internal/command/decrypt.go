@@ -112,6 +112,9 @@ plan and every change to it.`,
 				if err := flags.CheckOutputFile("output", outputFile); err != nil {
 					return err
 				}
+				if err := checkOutputFree(outputFile, forceOverwrite); err != nil {
+					return err
+				}
 			}
 
 			c, err := auth.NewAuthenticatedClient()
@@ -770,6 +773,21 @@ func outputDecrypted(d *secrets.DecryptedPayload, outputFile string) error {
 		}
 	}
 	return nil
+}
+
+// checkOutputFree refuses the -o file at path when something is there
+// already and --overwrite was not given, before anything is downloaded.
+// It is an early answer only: safefile.Write, which creates the file
+// exclusively once the secret is decrypted, is what keeps one from being
+// replaced. Like that create, it does not follow a link at path.
+func checkOutputFree(path string, overwrite bool) error {
+	if overwrite {
+		return nil
+	}
+	if _, err := os.Lstat(path); err != nil {
+		return nil
+	}
+	return errs.WithDetail(fmt.Errorf("%s already exists", path), "Pass --overwrite to replace it.")
 }
 
 // writeStdout prints decrypted content. On a terminal, control characters
