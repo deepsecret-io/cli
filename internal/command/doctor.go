@@ -7,7 +7,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -18,6 +20,7 @@ import (
 	"github.com/deepsecret-io/deepsecret-go/fido2"
 	"github.com/deepsecret-io/deepsecret-go/keys"
 	"github.com/deepsecret-io/deepsecret-go/keystore"
+	"github.com/deepsecret-io/deepsecret-go/trust"
 	"github.com/spf13/cobra"
 
 	"github.com/deepsecret-io/cli/internal/auth"
@@ -59,9 +62,12 @@ Examples:
 	}
 }
 
+// checkResult is one line of doctor. A warning (warn, with ok) passes but
+// shows its fix: something to look at, not something broken.
 type checkResult struct {
 	name   string
 	ok     bool
+	warn   bool
 	detail string
 	fix    string
 }
@@ -71,6 +77,9 @@ func runDoctor(ctx context.Context) error {
 	checks = append(checks, checkAPIURL())
 	checks = append(checks, checkAuth(ctx)...)
 	if hasAuth() {
+		if c, ok := checkAccount(ctx); ok {
+			checks = append(checks, c)
+		}
 		checks = append(checks, checkPlan(ctx))
 	}
 	checks = append(checks, checkLocalKeys()...)
@@ -84,35 +93,60 @@ func runDoctor(ctx context.Context) error {
 		checks = append(checks, checkRemoteSync(ctx)...)
 	}
 
-	if failed := printChecks(checks); failed > 0 {
+	failed, warned := printChecks(checks)
+	if failed > 0 {
 		return fmt.Errorf("%d of %d checks failed", failed, len(checks))
 	}
 	fmt.Fprintln(os.Stderr)
+	if warned > 0 {
+		ui.Success(fmt.Sprintf("All %d checks passed, with %d warning%s.", len(checks), warned, ui.PluralS(warned)))
+		return nil
+	}
 	ui.Success(fmt.Sprintf("All %d checks passed.", len(checks)))
 	return nil
 }
 
 // printChecks prints each check on a line, a checklist: a mark, its name
-// and what it found, and under a failed one how to fix it. It returns how
-// many failed.
-func printChecks(checks []checkResult) int {
+// and what it found, and under a failed check or a warning what to do. It
+// returns how many failed and how many warned.
+func printChecks(checks []checkResult) (failed, warned int) {
 	width := 0
 	for _, c := range checks {
 		width = max(width, len(c.name))
 	}
-	failed := 0
 	for _, c := range checks {
 		mark, color := console.Green+"✓"+console.Reset, console.Dim
-		if !c.ok {
+		switch {
+		case !c.ok:
 			mark, color = console.BoldRed+"✗"+console.Reset, console.Red
 			failed++
+		case c.warn:
+			mark, color = console.Yellow+"!"+console.Reset, console.Yellow
+			warned++
 		}
 		fmt.Fprintf(os.Stderr, "  %s %-*s  %s%s%s\n", mark, width, c.name, color, console.Safe(c.detail), console.Reset)
-		if !c.ok && c.fix != "" {
+		if (!c.ok || c.warn) && c.fix != "" {
 			fmt.Fprintf(os.Stderr, "    %-*s  %sfix: %s%s\n", width, "", console.Dim, console.Safe(c.fix), console.Reset)
 		}
 	}
-	return failed
+	return failed, warned
+}
+
+// checkAccount says which account the checks after it are for. With more
+// than one credential, it is the one every command uses (DS_API_KEY before
+// a saved API key before the login), which may not be the login shown
+// above. It is left out when that credential does not work: its own check
+// already failed.
+func checkAccount(ctx context.Context) (checkResult, bool) {
+	c, err := auth.NewAuthenticatedClient()
+	if err != nil {
+		return checkResult{}, false
+	}
+	me, err := c.Identity.WhoAmI(ctx)
+	if err != nil {
+		return checkResult{}, false
+	}
+	return checkResult{name: "Checking as", ok: true, detail: me.Email + ", from " + auth.Source}, true
 }
 
 func checkAPIURL() checkResult {
@@ -248,7 +282,7 @@ func checkLocalKeys() []checkResult {
 	for _, n := range names {
 		_, fp, err := identity.ReadPublicKeys(n)
 		if err != nil {
-			results = append(results, checkResult{name: "Key pair", detail: n + ".json: " + err.Error()})
+			results = append(results, unreadableKeyFile(n, err))
 			continue
 		}
 		detail := keys.ShortFingerprint(fp)
@@ -263,6 +297,19 @@ func checkLocalKeys() []checkResult {
 		results = append(results, checkResult{name: "Key pair", ok: true, detail: detail})
 	}
 	return results
+}
+
+// unreadableKeyFile is the failed check of key file name, which could not
+// be read: named by its short fingerprint, and for one this user may not
+// read, with how to give it back or remove it.
+func unreadableKeyFile(name string, err error) checkResult {
+	path := filepath.Join(config.KeysDir(), name+".json")
+	r := checkResult{name: "Key pair", detail: keys.ShortFingerprint(name) + " could not be read: " + errs.PathCause(err).Error()}
+	if errors.Is(err, fs.ErrPermission) {
+		r.detail = keys.ShortFingerprint(name) + " is not readable by you (its file belongs to another user, or was made with sudo)"
+		r.fix = "check its owner with: ls -l " + path + "; give it back with: sudo chown \"$USER\" " + path + "; or remove it if you do not need it"
+	}
+	return r
 }
 
 // checkSecurityKeys checks that a key pair protected by a security key can
@@ -389,14 +436,46 @@ func checkRemoteSync(ctx context.Context) []checkResult {
 			results = append(results, checkResult{name: "Registered key", ok: true, detail: short + " is not on this device"})
 		}
 	}
+	// A key pair here that is not this account's may be one of the user's
+	// other accounts (this device records the accounts it used each key
+	// with): that is fine. Otherwise it is kept on this device only, which
+	// may be on purpose (--local), so it is a warning, and its fix says
+	// which account syncing registers it to.
+	account := "your account"
+	var known []trust.KnownKey
+	if c, err := auth.NewAuthenticatedClient(); err == nil {
+		if me, err := c.Identity.WhoAmI(ctx); err == nil {
+			account = me.Email
+		}
+		known, _ = c.Trust.List("")
+	}
 	for _, n := range names {
 		_, fp, err := identity.ReadPublicKeys(n)
 		if err != nil || identity.Registered(remote, fp) != nil {
 			continue
 		}
-		results = append(results, checkResult{name: "Key pair", detail: keys.ShortFingerprint(fp) + " is not registered", fix: "secret identity sync -i " + fp})
+		short := keys.ShortFingerprint(fp)
+		if other := ownAccountOf(known, fp, account); other != "" {
+			results = append(results, checkResult{name: "Key pair", ok: true, detail: short + " belongs to " + other + ", another of your accounts"})
+			continue
+		}
+		results = append(results, checkResult{name: "Key pair", ok: true, warn: true,
+			detail: short + " is on this device only, not registered to " + account,
+			fix:    "to register it to " + account + ": secret identity sync -i " + fp})
 	}
 	return results
+}
+
+// ownAccountOf is the other account of the user's that this device used key
+// fp with (known being every key it knows), or "" when fp is not one of
+// another of their accounts' keys.
+func ownAccountOf(known []trust.KnownKey, fp, account string) string {
+	for _, k := range known {
+		if k.State == trust.Own && k.Fingerprint == fp && !strings.EqualFold(k.Email, account) {
+			return k.Email
+		}
+	}
+	return ""
 }
 
 func checkPlan(ctx context.Context) checkResult {
