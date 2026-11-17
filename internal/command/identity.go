@@ -130,6 +130,9 @@ func newIdentityGenerateCmd() *cobra.Command {
 					err = fmt.Errorf("could not reach your account to register the key pair: %w", errs.APICause(err))
 					return errs.WithDetail(err, strings.TrimSpace(errs.JoinDetail("", err)+"\n\n"+localHint))
 				}
+				if err := checkProtectionPolicy(cmd.Context(), c, usePassword || useSecurityKey || useKMS); err != nil {
+					return err
+				}
 			}
 			var password string
 			if usePassword {
@@ -268,12 +271,43 @@ func newIdentityGenerateCmd() *cobra.Command {
 	return cmd
 }
 
+// checkProtectionPolicy refuses, before a key pair is generated, one that
+// the account's organization would refuse to register: an organization
+// that requires protected keys takes only a key pair protected by a
+// password, a security key or an AWS KMS key. protected says whether the
+// key pair about to be generated will be; a protected one needs no request.
+func checkProtectionPolicy(ctx context.Context, c *deepsecret.Client, protected bool) error {
+	if protected {
+		return nil
+	}
+	required, err := c.Identity.KeyProtectionRequired(ctx)
+	if err != nil {
+		return fmt.Errorf("could not reach your account to register the key pair: %w", errs.APICause(err))
+	}
+	if !required {
+		return nil
+	}
+	return errs.WithDetail(sdkidentity.ErrKeyProtectionRequired, "Generate a protected one with one of:\n"+
+		"  secret identity generate --password\n"+
+		"  secret identity generate --security-key --recovery-code\n"+
+		"  secret identity generate --kms-arn <KMS key ARN> --recovery-code")
+}
+
 // registerKeyPair signs the public keys of kp, whose fingerprint is fp,
 // and registers them on the server, as a step does, labelled with how its
-// key file on this device is protected.
+// key file on this device is protected. An organization that requires
+// protected keys refuses one that is not, and the error says how to
+// protect it and register it again.
 func registerKeyPair(ctx context.Context, c *deepsecret.Client, kp *keys.Pair, fp string) (string, error) {
 	protection := identity.Protection(fp)
 	if err := c.Identity.Sync(ctx, kp, protection); err != nil {
+		if errors.Is(err, sdkidentity.ErrKeyProtectionRequired) {
+			short := keys.ShortFingerprint(fp)
+			return "", errs.WithDetail(err, "Protect it on this device, then register it:\n"+
+				"  secret identity security-key protect -i "+short+"\n"+
+				"  secret identity kms protect -i "+short+" --kms-arn <KMS key ARN>\n"+
+				"  secret identity sync -i "+short)
+		}
 		return "", fmt.Errorf("could not upload the public keys: %w", errs.APICause(err))
 	}
 	logging.Module(logging.Log, "identity").Info("key registered", "fingerprint", fp, "protection", string(protection))
