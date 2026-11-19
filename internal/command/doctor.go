@@ -99,7 +99,7 @@ func runDoctor(ctx context.Context) error {
 	}
 	fmt.Fprintln(os.Stderr)
 	if warned > 0 {
-		ui.Success(fmt.Sprintf("All %d checks passed, with %d warning%s.", len(checks), warned, ui.PluralS(warned)))
+		ui.Success(fmt.Sprintf("All %d checks passed, with %d warning%s.", len(checks), warned, ui.Plural(warned)))
 		return nil
 	}
 	ui.Success(fmt.Sprintf("All %d checks passed.", len(checks)))
@@ -415,7 +415,7 @@ func checkRemoteSync(ctx context.Context) []checkResult {
 	names, _ := identity.List() // checkLocalKeys reported a failure to list them
 	here := func(fp string) bool {
 		for _, n := range names {
-			if fingerprint.Match(n, fp) {
+			if fingerprint.Equal(n, fp) {
 				return true
 			}
 		}

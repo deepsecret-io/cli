@@ -22,7 +22,7 @@ import (
 // to each other (sdk/PROTOCOL_V4.md §11). With someone else it is the
 // number of your primary key and their key: the same 60 digits on both
 // sides. A key of yours alone has 30 digits. The hex fingerprint stays
-// under it as "Key fingerprint", for scripts and older clients.
+// under it as "Key fingerprint", for scripts.
 
 // ownSafetyKey is your half of a safety number with someone: the
 // fingerprint of your primary key, or why there is none. It is a variable

@@ -32,7 +32,7 @@ func FetchRegistered(ctx context.Context) ([]sdkidentity.Key, error) {
 // nil.
 func Registered(keys []sdkidentity.Key, fp string) *sdkidentity.Key {
 	for i := range keys {
-		if fingerprint.Match(keys[i].Fingerprint, fp) {
+		if fingerprint.Equal(keys[i].Fingerprint, fp) {
 			return &keys[i]
 		}
 	}
@@ -53,7 +53,7 @@ func PrimaryLocal(ctx context.Context, names []string) string {
 			continue
 		}
 		for _, n := range names {
-			if fingerprint.Match(n, k.Fingerprint) {
+			if fingerprint.Equal(n, k.Fingerprint) {
 				return n
 			}
 		}

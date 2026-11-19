@@ -42,8 +42,7 @@ func SaveKeyPair(fingerprint string, kp *keys.Pair, password string) error {
 // LoadKeyPair loads a key pair: as it is when unprotected, after a
 // password prompt, after its security key's PIN and touch, or through AWS
 // KMS with no prompt at all.
-// If the fingerprint doesn't match a file exactly, it tries prefix matching
-// (handles server-side 32-char fingerprints vs local 64-char filenames).
+// The fingerprint may be a prefix that only one key file starts with.
 func LoadKeyPair(ctx context.Context, fingerprint string) (*keys.Pair, error) {
 	resolved := ResolveFile(fingerprint)
 	switch Protection(resolved) {
@@ -85,42 +84,15 @@ func keyFile(fp string) (string, bool) {
 	return filepath.Join(config.KeysDir(), fp+".json"), true
 }
 
-// ResolveFile resolves a possibly-truncated fingerprint to the
-// full filename in the keys directory. This handles the case where the server
-// stores 32-char fingerprints but local files use 64-char names.
+// ResolveFile returns the full fingerprint of the key pair on this device
+// that fp names, the whole fingerprint or a prefix of 16+ characters that
+// only one key starts with (keystore.ResolveFingerprint).
 func ResolveFile(fp string) string {
 	clean, err := fingerprint.Check(fp)
 	if err != nil {
 		return fp // not a fingerprint, so it names no file: loading it fails
 	}
-	fp = clean
-	// Try exact match first
-	if _, err := os.Stat(filepath.Join(config.KeysDir(), fp+".json")); err == nil {
-		return fp
-	}
-	// Try prefix match against local key files
-	entries, err := os.ReadDir(config.KeysDir())
-	if err != nil {
-		return fp
-	}
-	for _, e := range entries {
-		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
-			continue
-		}
-		name := e.Name()[:len(e.Name())-5]
-		if len(fp) >= 16 && len(name) > len(fp) && name[:len(fp)] == fp {
-			return name
-		}
-	}
-	return fp // no match found, return as-is (will error on load)
-}
-
-// IsEncrypted checks if a key pair file is password-encrypted.
-func IsEncrypted(fingerprint string) bool {
-	if _, ok := keyFile(fingerprint); !ok {
-		return false
-	}
-	return Protection(fingerprint) == keystore.ProtectionPassword
+	return keystore.ResolveFingerprint(config.KeysDir(), clean)
 }
 
 // ReadPublicKeys reads the public keys of the key pair named name in the

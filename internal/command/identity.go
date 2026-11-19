@@ -460,7 +460,7 @@ func listLocalKeys(ctx context.Context) error {
 		fmt.Fprintln(os.Stderr)
 	}
 	if len(unreadable) > 0 {
-		ui.Warning(fmt.Sprintf("%d key file%s could not be read", len(unreadable), ui.PluralS(len(unreadable))), strings.Join(unreadable, "\n"))
+		ui.Warning(fmt.Sprintf("%d key file%s could not be read", len(unreadable), ui.Plural(len(unreadable))), strings.Join(unreadable, "\n"))
 	}
 	if remoteErr != nil {
 		summary, detail := describeFailure(ctx, remoteErr)
@@ -750,7 +750,7 @@ func newIdentitySetPrimaryCmd() *cobra.Command {
 						}
 						var matches []sdkidentity.Key
 						for _, k := range keyList {
-							if fingerprint.Match(k.Fingerprint, prefix) {
+							if strings.HasPrefix(strings.ToLower(k.Fingerprint), prefix) {
 								matches = append(matches, k)
 							}
 						}

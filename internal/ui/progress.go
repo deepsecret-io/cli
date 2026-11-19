@@ -179,7 +179,7 @@ func liveLines(head string, f liveFrame, now time.Time, width, height int, multi
 	}
 	if len(shown) < len(active) {
 		more := len(active) - len(shown)
-		lines = append(lines, console.Fit(fmt.Sprintf("  %s... and %d more connection%s%s", console.Dim, more, PluralS(more), console.Reset), width))
+		lines = append(lines, console.Fit(fmt.Sprintf("  %s... and %d more connection%s%s", console.Dim, more, Plural(more), console.Reset), width))
 	}
 	return lines
 }
@@ -210,7 +210,7 @@ func liveStats(f liveFrame) string {
 		b.WriteString(console.Reset)
 	}
 	if f.transfer {
-		fmt.Fprintf(&b, "  %s%d connection%s", console.Dim, f.snap.Threads, PluralS(f.snap.Threads))
+		fmt.Fprintf(&b, "  %s%d connection%s", console.Dim, f.snap.Threads, Plural(f.snap.Threads))
 		if f.snap.MaxThreads > f.snap.Threads {
 			fmt.Fprintf(&b, ", up to %d", f.snap.MaxThreads)
 		}

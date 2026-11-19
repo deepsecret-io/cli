@@ -189,7 +189,7 @@ your account. Recipients open the file with "secret decrypt --local".`,
 					return err
 				}
 				teamName, recipientsFrom = team.Name, "--team"
-				ui.Subject("secret", fmt.Sprintf("%s team %q (%d recipient%s)", verb, console.Safe(team.Name), len(recipients), ui.PluralS(len(recipients))))
+				ui.Subject("secret", fmt.Sprintf("%s team %q (%d recipient%s)", verb, console.Safe(team.Name), len(recipients), ui.Plural(len(recipients))))
 			case len(recipientEmails) > 0:
 				recipients = recipientEmails
 			default:
@@ -371,7 +371,7 @@ your account. Recipients open the file with "secret decrypt --local".`,
 			for i, r := range result.Recipients {
 				sentTo[i] = fmt.Sprintf("%s  %s%s%s%s", console.Safe(r.Email), console.Dim, console.Safe(keys.ShortFingerprint(r.Fingerprint)), console.Reset, identity.ProtectionNote(r.Fingerprint))
 			}
-			ui.KeyValues("Recipient"+ui.PluralS(len(sentTo)), sentTo)
+			ui.KeyValues("Recipient"+ui.Plural(len(sentTo)), sentTo)
 			if len(result.Revoked) > 0 {
 				revoked := make([]string, len(result.Revoked))
 				for i, r := range result.Revoked {

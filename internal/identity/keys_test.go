@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/deepsecret-io/deepsecret-go/keys"
+	"github.com/deepsecret-io/deepsecret-go/keystore"
 
 	"github.com/deepsecret-io/cli/internal/config"
 	"github.com/deepsecret-io/cli/internal/testutil"
@@ -33,7 +34,7 @@ func TestKeyFileRefusesPaths(t *testing.T) {
 		if _, ok := keyFile(fp); ok {
 			t.Errorf("keyFile(%q) accepted a path", fp)
 		}
-		if IsEncrypted(fp) {
+		if Protection(fp) == keystore.ProtectionPassword {
 			t.Errorf("isKeyPairEncrypted(%q) read a file outside the keys directory", fp)
 		}
 		if Exists(fp) {
@@ -67,7 +68,7 @@ func TestReadPublicKeysNeedsNoPassword(t *testing.T) {
 		t.Fatal(err)
 	}
 	pub, got, err := ReadPublicKeys(fp)
-	if err != nil || got != fp || pub.ED25519Public != kp.ED25519Public || !IsEncrypted(fp) {
+	if err != nil || got != fp || pub.ED25519Public != kp.ED25519Public || Protection(fp) != keystore.ProtectionPassword {
 		t.Fatalf("readPublicKeys: %q, %v", got, err)
 	}
 	if _, _, err := ReadPublicKeys("../keys"); err == nil {

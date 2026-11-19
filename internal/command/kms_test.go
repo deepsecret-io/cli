@@ -108,7 +108,7 @@ func TestKMSKeyPairLabels(t *testing.T) {
 	if p := identity.Protection(fp); p != keystore.ProtectionKMS {
 		t.Fatalf("Protection = %q", p)
 	}
-	if identity.IsEncrypted(fp) {
+	if identity.Protection(fp) == keystore.ProtectionPassword {
 		t.Error("a KMS file was taken for a password-protected one")
 	}
 	pub, got, err := identity.ReadPublicKeys(fp)

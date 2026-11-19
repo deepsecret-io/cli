@@ -331,8 +331,8 @@ func TestPageBounds(t *testing.T) {
 }
 
 // Without --identity, sync registers the only key pair not registered
-// yet, matching the server's fingerprints however long, and says what to
-// do when there is none or several.
+// yet, matching the server's whole fingerprints, and says what to do when
+// there is none or several.
 func TestKeyToSync(t *testing.T) {
 	testutil.SetHome(t, t.TempDir())
 	a, b := strings.Repeat("a", 64), strings.Repeat("b", 64)
@@ -351,7 +351,7 @@ func TestKeyToSync(t *testing.T) {
 	if summary, detail := errs.Describe(err); summary != "2 key pairs on this device are not registered" || !strings.Contains(detail, a) || !strings.Contains(detail, b) {
 		t.Fatalf("two unregistered: %q, %q", summary, detail)
 	}
-	if name, err := keyToSync("", []sdkidentity.Key{{Fingerprint: a[:32]}}); err != nil || name != b {
+	if name, err := keyToSync("", []sdkidentity.Key{{Fingerprint: a}}); err != nil || name != b {
 		t.Fatalf("one unregistered: %q, %v", name, err)
 	}
 	if _, err := keyToSync("", []sdkidentity.Key{{Fingerprint: a}, {Fingerprint: b}}); err == nil || !strings.Contains(err.Error(), "already registered") {

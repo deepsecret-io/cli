@@ -20,14 +20,6 @@ func Plural(n int) string {
 	return "s"
 }
 
-// PluralS is the "s" of a plural: "" when n is 1.
-func PluralS(n int) string {
-	if n == 1 {
-		return ""
-	}
-	return "s"
-}
-
 // FormatRemaining renders a time left in whole seconds or minutes.
 func FormatRemaining(d time.Duration) string {
 	d = d.Round(time.Second)

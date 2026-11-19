@@ -264,7 +264,7 @@ Examples:
 			pages := (total + limit - 1) / limit
 			if len(secretsList) == 0 {
 				return errs.WithDetail(fmt.Errorf("there is no page %d", page),
-					fmt.Sprintf("At %d per page, the %d secret%s take %d page%s.", limit, total, ui.PluralS(total), pages, ui.PluralS(pages)))
+					fmt.Sprintf("At %d per page, the %d secret%s take %d page%s.", limit, total, ui.Plural(total), pages, ui.Plural(pages)))
 			}
 
 			header := "Inbox secrets"
@@ -652,11 +652,11 @@ Examples:
 			}
 
 			if err := c.Secrets.Delete(cmd.Context(), ids...); err != nil {
-				return fmt.Errorf("could not delete the secret%s: %w", ui.PluralS(len(ids)), errs.APICause(err))
+				return fmt.Errorf("could not delete the secret%s: %w", ui.Plural(len(ids)), errs.APICause(err))
 			}
 			logging.Module(logging.Log, "secret").Info("secrets deleted", "ids", ids)
 
-			ui.Success(fmt.Sprintf("Deleted %d secret%s.", len(ids), ui.PluralS(len(ids))))
+			ui.Success(fmt.Sprintf("Deleted %d secret%s.", len(ids), ui.Plural(len(ids))))
 			return nil
 		},
 	}
@@ -901,7 +901,7 @@ func isArchivedRevision(r secrets.RevisionInfo) bool {
 
 // secretLatestArchived reports whether the secret's latest revision was
 // sent archived. Returns false if the latest revision isn't loaded in the
-// detail (older API responses, partial loads).
+// detail.
 func secretLatestArchived(detail *secrets.Detail, latestRevisionID string) bool {
 	if detail == nil {
 		return false

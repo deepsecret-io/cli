@@ -29,18 +29,11 @@ func Check(s string) (string, error) {
 
 // ── Fingerprint comparison ───────────────────────────────────────────────────
 
-// Match compares two fingerprints that may be different lengths.
-// The server stores 32-char (truncated) fingerprints while the SDK now produces
-// 64-char (full SHA-256) fingerprints. This matches if either is a prefix of
-// the other, or they are exactly equal.
-func Match(a, b string) bool {
-	if a == b {
-		return true
-	}
-	if len(a) < len(b) {
-		return len(a) >= 16 && b[:len(a)] == a
-	}
-	return len(b) >= 16 && a[:len(b)] == b
+// Equal reports whether two full fingerprints name the same key. The
+// server lists whole fingerprints, so a key on this device matches one
+// exactly; only a prefix the user types is matched as a prefix.
+func Equal(a, b string) bool {
+	return strings.EqualFold(a, b)
 }
 
 // Group splits a fingerprint into two lines of eight groups of

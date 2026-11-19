@@ -213,7 +213,7 @@ use again. For one of your own accounts, it forgets that it is yours.`,
 				return nil
 			}
 			logging.Module(logging.Log, "identity").Info("keys forgotten", "email", args[0], "fingerprint", fp, "count", n)
-			ui.Success(fmt.Sprintf("Forgot %d key%s of %s.", n, ui.PluralS(n), args[0]))
+			ui.Success(fmt.Sprintf("Forgot %d key%s of %s.", n, ui.Plural(n), args[0]))
 			return nil
 		},
 	}

@@ -88,7 +88,7 @@ func TestSecurityKeyProtectedKeyFile(t *testing.T) {
 	if p := identity.Protection(fp); p != keystore.ProtectionSecurityKey {
 		t.Fatalf("keyProtection = %q", p)
 	}
-	if identity.IsEncrypted(fp) {
+	if identity.Protection(fp) == keystore.ProtectionPassword {
 		t.Error("a security-key file was taken for a password-protected one")
 	}
 	pub, got, err := identity.ReadPublicKeys(fp)
