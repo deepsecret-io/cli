@@ -191,7 +191,7 @@ Examples:
   secret list --sent                            # sent secrets
   secret list --from alice@example.com           # inbox from specific sender
   secret list --sent --to bob@example.com        # sent to specific recipient
-  secret list --page 2 --limit 50               # page 2, 50 per page
+  secret list --page 2 --limit 20               # page 2, 20 per page
   secret list --no-pagination                    # all secrets at once
   secret list --format json                      # for scripts`,
 		Args: cobra.NoArgs,
@@ -333,7 +333,7 @@ Examples:
 	f.Var(flags.NewEmail(&fromEmail), "from", "Inbox secrets from this sender `email` only")
 	f.Var(flags.NewEmail(&toEmail), "to", "With --sent, secrets sent to this recipient `email` only")
 	flags.SetGroup(f, flags.GroupFilters, "sent", "from", "to")
-	f.Var(flags.NewIntRange(&limit, 20, 1, 1000, ""), "limit", "Secrets per page: 1 to 1000")
+	f.Var(flags.NewIntRange(&limit, 100, 1, 1000, ""), "limit", "Secrets per page: 1 to 1000")
 	f.Var(flags.NewIntRange(&page, 1, 1, 1_000_000, ""), "page", "Page number, from 1")
 	f.BoolVar(&noPagination, "no-pagination", false, "Show every secret on one page")
 	flags.SetGroup(f, flags.GroupPagination, "limit", "page", "no-pagination")
