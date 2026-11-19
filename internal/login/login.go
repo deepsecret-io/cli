@@ -23,6 +23,8 @@ import (
 	"strings"
 	"time"
 
+	deepsecret "github.com/deepsecret-io/deepsecret-go"
+
 	"github.com/deepsecret-io/cli/internal/auth"
 	"github.com/deepsecret-io/cli/internal/config"
 	"github.com/deepsecret-io/cli/internal/errs"
@@ -138,31 +140,14 @@ func Browser(ctx context.Context) error {
 		_ = server.Shutdown(ctx) // a loopback server for one callback; the login's own result is returned, and the process exits soon after.
 	}
 
-	// Fetch the Google auth URL from the API (don't send browser to API
-	// directly). client_state is echoed back only in the genuine redirect.
-	ssoQuery := url.Values{"return_url": {callbackURL}, "client_state": {state}}
-	ssoReqURL := fmt.Sprintf("%s/api/v1/auth/sso/google?%s", apiBase, ssoQuery.Encode())
-	httpClient := &http.Client{Timeout: 10 * time.Second}
-	httpResp, err := httpClient.Get(ssoReqURL)
+	// Ask the API for the Google sign-in URL (the browser goes to Google,
+	// not to the API) through the SDK's transport, which refuses plaintext
+	// HTTP to a host that is neither loopback nor allowed. client_state is
+	// echoed back only in the genuine redirect.
+	authURL, err := deepsecret.SignInURL(ctx, apiBase, callbackURL, state)
 	if err != nil {
 		stopServer()
-		// The error names the request URL, whose query holds the sign-in
-		// state: keep it out of the error and the logs.
-		var ue *url.Error
-		if errors.As(err, &ue) {
-			err = ue.Err
-		}
-		return fmt.Errorf("could not reach the DeepSecret API: %w", err)
-	}
-	defer func() { _ = httpResp.Body.Close() }() // read to the end or abandoned; nothing to do on failure
-	if httpResp.StatusCode/100 != 2 {
-		stopServer()
-		return fmt.Errorf("the DeepSecret API refused the sign-in request: %s", httpResp.Status)
-	}
-	authURL, err := readAuthURL(httpResp.Body)
-	if err != nil {
-		stopServer()
-		return fmt.Errorf("the DeepSecret API's answer to the sign-in request is not usable: %w", err)
+		return fmt.Errorf("the sign-in request failed: %w", err)
 	}
 
 	// Validate the server-supplied URL before handing it to the OS browser
@@ -224,39 +209,10 @@ func Browser(ctx context.Context) error {
 // loginTimeout is how long login waits for the browser sign-in.
 const loginTimeout = 2 * time.Minute
 
-// Bounds on the login flow's bodies, each holding one URL or one session
-// token of a few KB, so neither the API nor a local process can make the
-// CLI read without end. A body over its bound fails.
-const (
-	// maxAuthURLResponse bounds the API's answer naming the auth URL.
-	maxAuthURLResponse = 64 << 10
-	// maxTokenPost bounds what the callback page posts to /receive.
-	maxTokenPost = 64 << 10
-)
-
-// readAuthURL reads the API's answer to the SSO request and returns the
-// auth URL in it.
-func readAuthURL(r io.Reader) (string, error) {
-	body, err := io.ReadAll(io.LimitReader(r, maxAuthURLResponse+1))
-	if err != nil {
-		return "", err
-	}
-	if len(body) > maxAuthURLResponse {
-		return "", fmt.Errorf("it is over %d bytes", maxAuthURLResponse)
-	}
-	var resp struct {
-		Data struct {
-			AuthURL string `json:"auth_url"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return "", fmt.Errorf("it is not JSON: %w", err)
-	}
-	if resp.Data.AuthURL == "" {
-		return "", fmt.Errorf("it holds no sign-in URL")
-	}
-	return resp.Data.AuthURL, nil
-}
+// maxTokenPost bounds what the callback page posts to /receive, one
+// session token of a few KB, so a local process cannot make the CLI read
+// without end. A body over it fails.
+const maxTokenPost = 64 << 10
 
 // receiveToken handles the callback page's POST of the session token and
 // the login state, and passes on a token whose state matches.

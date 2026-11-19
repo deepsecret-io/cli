@@ -10,22 +10,6 @@ import (
 	"testing"
 )
 
-// The API's answer naming the auth URL is read up to a bound, and one
-// past it fails instead of being read without end.
-func TestReadAuthURLIsBounded(t *testing.T) {
-	url, err := readAuthURL(strings.NewReader(`{"data":{"auth_url":"https://accounts.example.com/o"}}`))
-	if err != nil || url != "https://accounts.example.com/o" {
-		t.Fatalf("url %q, %v", url, err)
-	}
-	huge := `{"data":{"auth_url":"https://accounts.example.com/o","pad":"` + strings.Repeat("a", maxAuthURLResponse) + `"}}`
-	if _, err := readAuthURL(strings.NewReader(huge)); err == nil || !strings.Contains(err.Error(), "over") {
-		t.Fatalf("an oversized answer: %v", err)
-	}
-	if _, err := readAuthURL(strings.NewReader(`{"data":{}}`)); err == nil {
-		t.Fatal("an answer without a URL was accepted")
-	}
-}
-
 // The callback listener refuses a post past its bound, so a local process
 // cannot make the CLI buffer an endless body, and still takes a token
 // whose state matches.
